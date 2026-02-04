@@ -1,0 +1,47 @@
+server:
+  port: 9000
+
+spring:
+  application:
+    name: clubone-billing-batch
+
+  datasource:
+    clubone:
+      url: ${CLUBONE_JDBC_URL:jdbc:postgresql://clubone-free-tier-db.cju8eqswasju.us-east-1.rds.amazonaws.com:5432/clubone_dev}
+      username: ${CLUBONE_DB_USER:clubone_dev_user}
+      password: ${CLUBONE_DB_PASSWORD:C1ub0ne@2024!}
+      driver-class-name: org.postgresql.Driver
+
+  batch:
+    job:
+      enabled: false
+    jdbc:
+      initialize-schema: never
+      table-prefix: batch_job_logs.batch_
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+clubone:
+  billing:
+    # Whether LIVE billing updates invoice + schedule statuses.
+    # You previously said "don't touch invoice table"; keep this false in environments where you want read-only behavior.
+    update-invoice: false
+    update-schedule: true
+
+    # Payment execution strategy for LIVE:
+    #  - NOOP: does not create payment intents/transactions; marks success by policy (useful to wire the flow end-to-end)
+    #  - HTTP: calls an external payment service (core-payment-service) endpoint you provide
+    payment:
+      strategy: ${CLUBONE_PAYMENT_STRATEGY:NOOP}
+      http:
+        base-url: ${CLUBONE_PAYMENT_BASE_URL:http://localhost:8010}
+        create-and-capture-path: ${CLUBONE_PAYMENT_CAPTURE_PATH:/api/payments/capture-invoice}
+        timeout-ms: ${CLUBONE_PAYMENT_TIMEOUT_MS:8000}
+
+    # In NOOP mode, choose what result to simulate for LIVE:
+    noop:
+      outcome: ${CLUBONE_NOOP_OUTCOME:SUCCESS}   # SUCCESS | FAIL_RANDOM_10PCT | ALWAYS_FAIL
