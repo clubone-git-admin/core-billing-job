@@ -9,6 +9,8 @@ import io.clubone.billing.batch.metrics.BillingMetrics;
 import io.clubone.billing.batch.model.BillingStatus;
 import io.clubone.billing.batch.model.BillingWorkItem;
 import io.clubone.billing.batch.model.DueInvoiceRow;
+import io.clubone.billing.batch.model.GatewayStatus;
+import io.clubone.billing.batch.model.ScheduleStatus;
 import io.clubone.billing.batch.payment.PaymentResult;
 import io.clubone.billing.batch.payment.PaymentService;
 import io.clubone.billing.batch.util.LoggingUtils;
@@ -127,10 +129,15 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
                 out.setHistoryStatusCode(BillingStatus.MOCK_EVALUATED.getCode());
                 log.debug("MOCK evaluated invoiceId={}", row.getInvoiceId());
                 metrics.recordInvoiceProcessingTime(timer);
-                metrics.recordInvoiceProcessed("MOCK_EVALUATED");
+                metrics.recordInvoiceProcessed(BillingStatus.MOCK_EVALUATED.getCode());
                 
                 // Audit: Invoice processing success (MOCK)
-                auditService.logInvoiceProcessingSuccess(row.getInvoiceId(), "MOCK_EVALUATED", runId, "system");
+                auditService.logInvoiceProcessingSuccess(
+                    row.getInvoiceId(),
+                    BillingStatus.MOCK_EVALUATED.getCode(),
+                    runId,
+                    "system"
+                );
                 
                 return out;
             }
@@ -165,31 +172,36 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
             if (pr.isSuccess()) {
                 out.setHistoryStatusCode(BillingStatus.LIVE_FINALIZED.getCode());
                 out.setShouldUpdateSchedule(true);
-                out.setScheduleNewStatus("BILLED");
+                out.setScheduleNewStatus(ScheduleStatus.BILLED.getCode());
                 out.setShouldUpdateInvoice(false);
                 out.setInvoiceMarkPaid(false);
 
                 log.info("Billing FINALIZED (sync success): invoiceId={} billingRunId={} txnId={}",
                         row.getInvoiceId(), runId, pr.getClientPaymentTransactionId());
                 metrics.recordInvoiceProcessingTime(timer);
-                metrics.recordInvoiceProcessed("LIVE_FINALIZED");
+                metrics.recordInvoiceProcessed(BillingStatus.LIVE_FINALIZED.getCode());
                 
                 // Audit: Payment success
                 auditService.logPaymentSuccess(row.getInvoiceId(), pr.getClientPaymentIntentId(), 
                     pr.getClientPaymentTransactionId(), "system");
                 // Audit: Invoice processing success
-                auditService.logInvoiceProcessingSuccess(row.getInvoiceId(), "LIVE_FINALIZED", runId, "system");
+                auditService.logInvoiceProcessingSuccess(
+                    row.getInvoiceId(),
+                    BillingStatus.LIVE_FINALIZED.getCode(),
+                    runId,
+                    "system"
+                );
                 
                 return out;
             }
 
             // B) PENDING (created/authorized) -> Mark as pending
             String gatewayRef = pr.getGatewayRef() != null ? pr.getGatewayRef() : "";
-            boolean isPending = "PENDING_CAPTURE".equalsIgnoreCase(gatewayRef);
+            boolean isPending = GatewayStatus.PENDING_CAPTURE.getCode().equalsIgnoreCase(gatewayRef);
 
             if (isPending) {
                 out.setHistoryStatusCode(BillingStatus.PENDING_CAPTURE.getCode());
-                out.setFailureReason("PENDING_CAPTURE");
+                out.setFailureReason(BillingStatus.PENDING_CAPTURE.getCode());
                 out.setShouldUpdateSchedule(false);
                 out.setShouldUpdateInvoice(false);
                 out.setInvoiceMarkPaid(false);
@@ -198,12 +210,17 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
                         row.getInvoiceId(), runId, pr.getClientPaymentIntentId(), pr.getClientPaymentTransactionId());
                 metrics.recordInvoiceProcessingTime(timer);
                 metrics.recordPaymentPending();
-                metrics.recordInvoiceProcessed("PENDING_CAPTURE");
+                metrics.recordInvoiceProcessed(BillingStatus.PENDING_CAPTURE.getCode());
                 
                 // Audit: Payment pending
                 auditService.logPaymentPending(row.getInvoiceId(), pr.getClientPaymentIntentId(), "system");
                 // Audit: Invoice processing success (pending)
-                auditService.logInvoiceProcessingSuccess(row.getInvoiceId(), "PENDING_CAPTURE", runId, "system");
+                auditService.logInvoiceProcessingSuccess(
+                    row.getInvoiceId(),
+                    BillingStatus.PENDING_CAPTURE.getCode(),
+                    runId,
+                    "system"
+                );
                 
                 return out;
             }
@@ -213,14 +230,14 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
             out.setHistoryStatusCode(BillingStatus.LIVE_PAYMENT_FAILED.getCode());
             out.setFailureReason(pr.getFailureReason());
             out.setShouldUpdateSchedule(true);
-            out.setScheduleNewStatus("FAILED");
+            out.setScheduleNewStatus(ScheduleStatus.FAILED.getCode());
             out.setShouldUpdateInvoice(false);
             out.setInvoiceMarkPaid(false);
 
             log.warn("Billing FAILED: invoiceId={} reason={} intentId={} txnId={}",
                     row.getInvoiceId(), pr.getFailureReason(), pr.getClientPaymentIntentId(), pr.getClientPaymentTransactionId());
             metrics.recordInvoiceProcessingTime(timer);
-            metrics.recordInvoiceProcessed("LIVE_PAYMENT_FAILED");
+            metrics.recordInvoiceProcessed(BillingStatus.LIVE_PAYMENT_FAILED.getCode());
             
             String failureReason = pr.getFailureReason();
             
@@ -228,8 +245,13 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
             auditService.logPaymentFailure(row.getInvoiceId(), pr.getClientPaymentIntentId(), 
                 failureReason != null ? failureReason : "Unknown", "system");
             // Audit: Invoice processing failure
-            auditService.logInvoiceProcessingFailure(row.getInvoiceId(), "LIVE_PAYMENT_FAILED", 
-                failureReason != null ? failureReason : "Unknown", runId, "system");
+            auditService.logInvoiceProcessingFailure(
+                row.getInvoiceId(),
+                BillingStatus.LIVE_PAYMENT_FAILED.getCode(),
+                failureReason != null ? failureReason : "Unknown",
+                runId,
+                "system"
+            );
             
             // Add to DLQ for all payment failures for audit and potential retry
             // This includes circuit breaker failures, payment service errors, business failures, etc.
@@ -292,7 +314,7 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
                     + ") term ON true "
                     + "WHERE si.subscription_instance_id = ?::uuid "
                     + "  AND sp.is_active = true "
-                    + "  AND ss.status_name = 'ACTIVE' "
+                    + "  AND ss.status_name = '" + io.clubone.billing.batch.model.SubscriptionInstanceStatus.ACTIVE.getCode() + "' "
                     + "  AND ?::date BETWEEN sp.contract_start_date AND sp.contract_end_date "
                     + "  AND (term.remaining_cycles IS NULL OR term.remaining_cycles > 0)";
 

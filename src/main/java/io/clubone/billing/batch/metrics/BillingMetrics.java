@@ -170,8 +170,9 @@ public class BillingMetrics {
     private int getActiveJobCount(JdbcTemplate jdbc) {
         try {
             Integer count = jdbc.queryForObject(
-                "SELECT COUNT(1) FROM client_subscription_billing.billing_run WHERE status = 'RUNNING'",
-                Integer.class
+                "SELECT COUNT(1) FROM client_subscription_billing.billing_run WHERE status = ?",
+                Integer.class,
+                io.clubone.billing.batch.model.BillingRunStatus.RUNNING.getCode()
             );
             return count != null ? count : 0;
         } catch (Exception e) {

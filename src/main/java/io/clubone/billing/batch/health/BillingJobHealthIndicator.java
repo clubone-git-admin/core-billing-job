@@ -88,8 +88,9 @@ public class BillingJobHealthIndicator implements HealthIndicator {
         // Check active jobs
         try {
             Integer activeJobs = jdbc.queryForObject(
-                "SELECT COUNT(1) FROM client_subscription_billing.billing_run WHERE status = 'RUNNING'",
-                Integer.class
+                "SELECT COUNT(1) FROM client_subscription_billing.billing_run WHERE status = ?",
+                Integer.class,
+                io.clubone.billing.batch.model.BillingRunStatus.RUNNING.getCode()
             );
             details.put("activeJobs", activeJobs != null ? activeJobs : 0);
         } catch (Exception e) {

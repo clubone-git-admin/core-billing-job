@@ -18,6 +18,9 @@ import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.Map;
 
+import io.clubone.billing.batch.model.BillingStatus;
+import io.clubone.billing.batch.model.ScheduleStatus;
+
 @Configuration
 public class DueInvoiceReaderConfig {
 
@@ -51,10 +54,16 @@ public class DueInvoiceReaderConfig {
       // Build WHERE clause with idempotency checks
       StringBuilder whereClause = new StringBuilder();
       whereClause.append("sis.is_active = true ");
-      whereClause.append("AND sis.schedule_status IN ('PENDING','DUE') ");
+      whereClause.append("AND sis.schedule_status IN ('")
+          .append(ScheduleStatus.PENDING.getCode())
+          .append("','")
+          .append(ScheduleStatus.DUE.getCode())
+          .append("') ");
       whereClause.append("AND sis.payment_due_date <= :asOfDate ");
       whereClause.append("AND i.is_active = true ");
-      whereClause.append("AND lis.status_name IN ('PENDING','DUE') ");
+      whereClause.append("AND lis.status_name IN ('")
+          .append(io.clubone.billing.batch.model.InvoiceStatus.PENDING.getCode()).append("','")
+          .append(io.clubone.billing.batch.model.InvoiceStatus.DUE.getCode()).append("') ");
       
       // Idempotency: Prevent processing same invoice in current run
       whereClause.append("AND NOT EXISTS ( ");
@@ -68,7 +77,9 @@ public class DueInvoiceReaderConfig {
           whereClause.append("  SELECT 1 FROM client_subscription_billing.subscription_billing_history h ");
           whereClause.append("  JOIN client_subscription_billing.lu_billing_status s ON s.billing_status_id = h.billing_status_id ");
           whereClause.append("  WHERE h.invoice_id = sis.invoice_id ");
-          whereClause.append("    AND s.status_code IN ('LIVE_FINALIZED') ");
+          whereClause.append("    AND s.status_code IN ('")
+              .append(BillingStatus.LIVE_FINALIZED.getCode())
+              .append("') ");
           whereClause.append(") ");
           log.info("Cross-run idempotency enabled: Will skip invoices already successfully billed in previous LIVE runs");
       }

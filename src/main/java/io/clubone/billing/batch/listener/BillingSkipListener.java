@@ -145,8 +145,9 @@ public class BillingSkipListener implements SkipListener<DueInvoiceRow, BillingW
         workItem.setClientRoleId(row.getClientRoleId());
         workItem.setClientPaymentMethodId(row.getClientPaymentMethodId());
         
-        // Set error status
-        workItem.setHistoryStatusCode("PROCESSOR_ERROR");
+        // Set error status - use LIVE_ERROR as default since we don't have runMode context here
+        // This workItem is only for DLQ, not written to billing_history, but use valid status for consistency
+        workItem.setHistoryStatusCode(io.clubone.billing.batch.model.BillingStatus.LIVE_ERROR.getCode());
         workItem.setFailureReason(error != null ? error.getMessage() : "Unknown error");
         workItem.setMock(false);
         

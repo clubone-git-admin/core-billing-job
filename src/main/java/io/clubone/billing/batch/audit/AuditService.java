@@ -242,7 +242,7 @@ public class AuditService {
     public void logPaymentPending(UUID invoiceId, UUID paymentIntentId, String userId) {
         Map<String, Object> details = new HashMap<>();
         details.put("invoiceId", invoiceId != null ? invoiceId.toString() : null);
-        details.put("status", "PENDING_CAPTURE");
+        details.put("status", io.clubone.billing.batch.model.BillingStatus.PENDING_CAPTURE.getCode());
         logPayment(invoiceId, paymentIntentId, "PAYMENT_PENDING", userId, details);
     }
 

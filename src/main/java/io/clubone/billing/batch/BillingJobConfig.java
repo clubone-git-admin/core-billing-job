@@ -143,7 +143,7 @@ public class BillingJobConfig {
           summary.put("countsByStatus", repo.countsByStatus(runId));
           String summaryJson = mapper.writeValueAsString(summary);
 
-          repo.completeRun(runId, "COMPLETED", summaryJson);
+          repo.completeRun(runId, io.clubone.billing.batch.model.BillingRunStatus.COMPLETED.getCode(), summaryJson);
           log.info("Completed billing run: runId={} summary={}", runId, summaryJson);
           
           // Audit: Job execution completed

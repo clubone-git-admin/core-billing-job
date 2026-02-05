@@ -1,5 +1,6 @@
 package io.clubone.billing.repo;
 
+import io.clubone.billing.batch.model.BillingRunStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -19,8 +20,8 @@ public class BillingRepository {
     jdbc.update(
       "INSERT INTO client_subscription_billing.billing_run " +
       "(billing_run_id, run_mode, as_of_date, started_on, status) " +
-      "VALUES (?::uuid, ?::text, ?::date, now(), 'RUNNING')",
-      id.toString(), mode, asOfDate
+      "VALUES (?::uuid, ?::text, ?::date, now(), ?)",
+      id.toString(), mode, asOfDate, BillingRunStatus.RUNNING.getCode()
     );
     return id;
   }

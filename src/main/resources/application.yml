@@ -40,11 +40,12 @@ management:
       exposure:
         include: health,info,metrics,prometheus
   metrics:
-    export:
-      prometheus:
-        enabled: true
     tags:
       application: ${spring.application.name}
+  prometheus:
+    metrics:
+      export:
+        enabled: true
 
 # Resilience4j Circuit Breaker Configuration
 resilience4j:

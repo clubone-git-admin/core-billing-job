@@ -2,6 +2,7 @@ package io.clubone.billing.batch.payment;
 
 import io.clubone.billing.batch.BillingJobProperties;
 import io.clubone.billing.batch.metrics.BillingMetrics;
+import io.clubone.billing.batch.model.GatewayStatus;
 import io.clubone.billing.batch.ratelimit.BillingRateLimiter;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
@@ -150,7 +151,7 @@ public class HttpPaymentService implements PaymentService {
 
 			// 3A) Failure
 			// status returned by charge-at-will is now: CAPTURED | PENDING_CAPTURE | FAILED
-			if ("FAILED".equalsIgnoreCase(status)) {
+			if (GatewayStatus.FAILED.getCode().equalsIgnoreCase(status)) {
 			    log.warn("billInvoiceRecurring charge-at-will FAILED: invoiceId={} status={} intentId={} txnId={}",
 			            invoiceId, status, intentId, clientPaymentTxnId);
 			    metrics.recordPaymentCallTime(timer);
@@ -158,13 +159,22 @@ public class HttpPaymentService implements PaymentService {
 			    return new PaymentResult(false, null, "PAYMENT_FAILED", intentId, clientPaymentTxnId, null);
 			}
 
-			if ("PENDING_CAPTURE".equalsIgnoreCase(status) || "AUTHORIZED".equalsIgnoreCase(status) || "CREATED".equalsIgnoreCase(status)) {
-			    log.info("billInvoiceRecurring charge-at-will PENDING: invoiceId={} status={} intentId={} txnId={}",
-			            invoiceId, status, intentId, clientPaymentTxnId);
-			    return new PaymentResult(false, "PENDING_CAPTURE", "PENDING_CAPTURE", intentId, clientPaymentTxnId, null);
+			if (GatewayStatus.PENDING_CAPTURE.getCode().equalsIgnoreCase(status)
+					|| GatewayStatus.AUTHORIZED.getCode().equalsIgnoreCase(status)
+					|| GatewayStatus.CREATED.getCode().equalsIgnoreCase(status)) {
+				log.info("billInvoiceRecurring charge-at-will PENDING: invoiceId={} status={} intentId={} txnId={}",
+						invoiceId, status, intentId, clientPaymentTxnId);
+				return new PaymentResult(
+					false,
+					GatewayStatus.PENDING_CAPTURE.getCode(),
+					GatewayStatus.PENDING_CAPTURE.getCode(),
+					intentId,
+					clientPaymentTxnId,
+					null
+				);
 			}
 
-			if (!"CAPTURED".equalsIgnoreCase(status)) {
+			if (!GatewayStatus.CAPTURED.getCode().equalsIgnoreCase(status)) {
 			    log.warn("billInvoiceRecurring charge-at-will unexpected status: invoiceId={} status={} intentId={} txnId={}",
 			            invoiceId, status, intentId, clientPaymentTxnId);
 			    metrics.recordPaymentCallTime(timer);

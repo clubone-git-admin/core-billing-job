@@ -10,6 +10,8 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
 
+import io.clubone.billing.batch.model.BillingStatus;
+
 /**
  * Comprehensive reconciliation service for billing operations.
  * Provides reconciliation reports, variance detection, financial reporting, and audit trail.
@@ -78,17 +80,20 @@ public class ReconciliationService {
             Map<String, Object> totals = totalsList.isEmpty() ? new LinkedHashMap<>() : totalsList.get(0);
             report.put("totals", totals);
 
-            // Failed invoices
+            // Failed invoices (by status codes from BillingStatus enum)
+            String failed1 = BillingStatus.LIVE_PAYMENT_FAILED.getCode();
+            String failed2 = BillingStatus.LIVE_ERROR.getCode();
+            String failed3 = BillingStatus.MOCK_ERROR.getCode();
             List<Map<String, Object>> failed = jdbc.queryForList("""
                 SELECT h.invoice_id, h.failure_reason, s.status_code, h.invoice_total_amount
                 FROM client_subscription_billing.subscription_billing_history h
                 JOIN client_subscription_billing.lu_billing_status s ON s.billing_status_id = h.billing_status_id
                 WHERE DATE(h.billing_attempt_on) = ?::date
-                  AND s.status_code IN ('LIVE_PAYMENT_FAILED', 'LIVE_ERROR', 'MOCK_ERROR')
+                  AND s.status_code IN (?, ?, ?)
                 ORDER BY h.billing_attempt_on DESC
                 LIMIT 100
                 """,
-                date.toString()
+                date.toString(), failed1, failed2, failed3
             );
             report.put("failedInvoices", failed);
             
@@ -333,15 +338,18 @@ public class ReconciliationService {
             report.put("summaryByStatus", byStatus);
 
             // Failed invoices for this run
+            String failed1 = io.clubone.billing.batch.model.BillingStatus.LIVE_PAYMENT_FAILED.getCode();
+            String failed2 = io.clubone.billing.batch.model.BillingStatus.LIVE_ERROR.getCode();
+            String failed3 = io.clubone.billing.batch.model.BillingStatus.MOCK_ERROR.getCode();
             List<Map<String, Object>> failed = jdbc.queryForList("""
                 SELECT h.invoice_id, h.failure_reason, s.status_code, h.invoice_total_amount
                 FROM client_subscription_billing.subscription_billing_history h
                 JOIN client_subscription_billing.lu_billing_status s ON s.billing_status_id = h.billing_status_id
                 WHERE h.billing_run_id = ?::uuid
-                  AND s.status_code IN ('LIVE_PAYMENT_FAILED', 'LIVE_ERROR', 'MOCK_ERROR')
+                  AND s.status_code IN (?, ?, ?)
                 ORDER BY h.billing_attempt_on DESC
                 """,
-                billingRunId.toString()
+                billingRunId.toString(), failed1, failed2, failed3
             );
             report.put("failedInvoices", failed);
 
