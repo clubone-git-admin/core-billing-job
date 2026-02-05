@@ -1,6 +1,10 @@
 package io.clubone.billing.batch.payment;
 
 import io.clubone.billing.batch.BillingJobProperties;
+import io.clubone.billing.batch.metrics.BillingMetrics;
+import io.clubone.billing.batch.ratelimit.BillingRateLimiter;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.retry.annotation.Retry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpEntity;
@@ -8,12 +12,27 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
+import java.net.SocketTimeoutException;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * Unchecked exception wrapper for SocketTimeoutException to enable test mode.
+ * Spring Retry will catch this via the cause chain.
+ */
+class TestSocketTimeoutException extends RuntimeException {
+	TestSocketTimeoutException(String message) {
+		super(message, new SocketTimeoutException(message));
+	}
+}
 
 @Service
 public class HttpPaymentService implements PaymentService {
@@ -21,18 +40,57 @@ public class HttpPaymentService implements PaymentService {
 	private static final Logger log = LoggerFactory.getLogger(HttpPaymentService.class);
 
 	private final BillingJobProperties props;
-	private final RestTemplate rt = new RestTemplate();
+	private final RestTemplate rt;
+	private final BillingRateLimiter rateLimiter;
+	private final BillingMetrics metrics;
+	
+	// ThreadLocal to track attempt counts per call for test mode
+	private final ThreadLocal<Map<String, AtomicInteger>> attemptCounters = ThreadLocal.withInitial(ConcurrentHashMap::new);
 
-	public HttpPaymentService(BillingJobProperties props) {
+	public HttpPaymentService(BillingJobProperties props, BillingRateLimiter rateLimiter, BillingMetrics metrics) {
 		this.props = props;
+		this.rateLimiter = rateLimiter;
+		this.metrics = metrics;
+		this.rt = createRestTemplate();
+	}
+
+	private RestTemplate createRestTemplate() {
+		SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+		int timeoutMs = props.getPayment().getHttp().getTimeoutMs();
+		factory.setConnectTimeout(timeoutMs);
+		factory.setReadTimeout(timeoutMs);
+		return new RestTemplate(factory);
 	}
 
 	@Override
+	@Retry(name = "paymentService")
+	@CircuitBreaker(name = "paymentService", fallbackMethod = "paymentFallback")
 	public PaymentResult billInvoiceRecurring(UUID invoiceId, UUID clientRoleId, UUID clientPaymentMethodId,
 			long amountMinor, String currencyCode) {
 		log.info("billInvoiceRecurring REQ: invoiceId={} clientRoleId={} clientPaymentMethodId={} amountMinor={} currencyCode={}",
 				invoiceId, clientRoleId, clientPaymentMethodId, amountMinor, currencyCode);
+		
+		// Get test mode configuration (cache to avoid repeated calls and help IDE resolution)
+		BillingJobProperties.Payment.Http.TestMode testMode = props.getPayment().getHttp().getTestMode();
+		
+		// Clear test mode counters at start of each invoice processing
+		// Note: Counters persist across Resilience4j Retry attempts, allowing us to test retry behavior
+		if (testMode.isEnabled()) {
+			// Only clear on first call (check if counters map is empty)
+			if (attemptCounters.get().isEmpty()) {
+				log.info("TEST MODE ENABLED: Will simulate {} failures per HTTP call with exception type: {}", 
+					testMode.getFailAttempts(),
+					testMode.getExceptionType());
+			}
+		}
+		
+		// Rate limiting
+		if (!rateLimiter.tryConsumePayment()) {
+			log.warn("Payment service rate limit exceeded: invoiceId={}", invoiceId);
+			return PaymentResult.fail("RATE_LIMIT_EXCEEDED");
+		}
 
+		var timer = metrics.startPaymentCallTimer();
 		try {
 			// 1) validate-method
 			String validateUrl = props.getPayment().getHttp().getBaseUrl() + props.getPayment().getHttp().getValidateMethodPath();
@@ -95,53 +153,111 @@ public class HttpPaymentService implements PaymentService {
 			if ("FAILED".equalsIgnoreCase(status)) {
 			    log.warn("billInvoiceRecurring charge-at-will FAILED: invoiceId={} status={} intentId={} txnId={}",
 			            invoiceId, status, intentId, clientPaymentTxnId);
+			    metrics.recordPaymentCallTime(timer);
+			    metrics.recordPaymentFailure("PAYMENT_FAILED");
 			    return new PaymentResult(false, null, "PAYMENT_FAILED", intentId, clientPaymentTxnId, null);
 			}
 
 			if ("PENDING_CAPTURE".equalsIgnoreCase(status) || "AUTHORIZED".equalsIgnoreCase(status) || "CREATED".equalsIgnoreCase(status)) {
-			    // DO NOT finalize here; webhook will finalize when payment becomes captured
 			    log.info("billInvoiceRecurring charge-at-will PENDING: invoiceId={} status={} intentId={} txnId={}",
 			            invoiceId, status, intentId, clientPaymentTxnId);
-			    return new PaymentResult(false, "PENDING_CAPTURE", "WAIT_FOR_WEBHOOK", intentId, clientPaymentTxnId, null);
+			    return new PaymentResult(false, "PENDING_CAPTURE", "PENDING_CAPTURE", intentId, clientPaymentTxnId, null);
 			}
 
 			if (!"CAPTURED".equalsIgnoreCase(status)) {
 			    log.warn("billInvoiceRecurring charge-at-will unexpected status: invoiceId={} status={} intentId={} txnId={}",
 			            invoiceId, status, intentId, clientPaymentTxnId);
+			    metrics.recordPaymentCallTime(timer);
+			    metrics.recordPaymentFailure("UNSUPPORTED_STATUS:" + status);
 			    return new PaymentResult(false, null, "UNSUPPORTED_STATUS:" + status, intentId, clientPaymentTxnId, null);
 			}
 
-			// Only CAPTURED can finalize immediately
-			
-			/*
-			 * // 4) finalize in transaction-service String finalizeUrl =
-			 * props.getPayment().getHttp().getTxnBaseUrl() +
-			 * props.getPayment().getHttp().getFinalizePath(); Map<String, Object>
-			 * finalizeReq = Map.of( "invoiceId", invoiceId.toString(), "clientRoleId",
-			 * clientRoleId.toString(), "paymentGatewayCode", "RAZORPAY",
-			 * "paymentMethodCode", "CARD", "paymentTypeCode",
-			 * props.getPayment().getHttp().getPaymentTypeCode(), "createdBy",
-			 * props.getPayment().getHttp().getActorId(), "clientPaymentTransactionId",
-			 * clientPaymentTxnId.toString()); Map<String, Object> finalizeResp =
-			 * postJson("finalize", finalizeUrl, finalizeReq);
-			 * log.info("billInvoiceRecurring finalize RESP: invoiceId={} response={}",
-			 * invoiceId, finalizeResp);
-			 * 
-			 * UUID transactionId = null; if (finalizeResp.get("transactionId") != null) {
-			 * transactionId =
-			 * UUID.fromString(String.valueOf(finalizeResp.get("transactionId"))); }
-			 */
 			log.info("billInvoiceRecurring RESP (success): invoiceId={} intentId={} clientPaymentTxnId={} transactionId={} razorpayOrderId={}",
 					invoiceId, intentId, clientPaymentTxnId, null, razorpayOrderId);
+			metrics.recordPaymentCallTime(timer);
 			return new PaymentResult(true, "RZP_ORDER:" + razorpayOrderId, null, intentId, clientPaymentTxnId, null);
 
 		} catch (Exception e) {
-			log.error("billInvoiceRecurring RESP (error): invoiceId={} error={}", invoiceId, e.getMessage(), e);
-			return PaymentResult.fail("HTTP_ERROR:" + e.getMessage());
+			// Log the error but let it propagate so Resilience4j Retry can handle retries
+			// Resilience4j Retry will catch RuntimeException and retry
+			// After retries exhausted, exception will propagate to Spring Batch
+			log.warn("billInvoiceRecurring exception (will be retried by Resilience4j): invoiceId={} error={}", invoiceId, e.getMessage());
+			metrics.recordPaymentCallTime(timer);
+			
+			// Convert checked exceptions to RuntimeException so Resilience4j Retry can handle them
+			if (e instanceof RuntimeException) {
+				throw (RuntimeException) e;
+			} else {
+				throw new RuntimeException("Payment service error: " + e.getMessage(), e);
+			}
 		}
 	}
 
+	/**
+	 * Fallback method for circuit breaker.
+	 * Called when circuit breaker is open or when an exception occurs.
+	 * 
+	 * @param invoiceId Invoice ID
+	 * @param clientRoleId Client role ID
+	 * @param clientPaymentMethodId Payment method ID
+	 * @param amountMinor Amount in minor currency units
+	 * @param currencyCode Currency code
+	 * @param throwable The exception that triggered the fallback
+	 * @return PaymentResult indicating failure
+	 */
+	public PaymentResult paymentFallback(UUID invoiceId, UUID clientRoleId, UUID clientPaymentMethodId,
+			long amountMinor, String currencyCode, Throwable throwable) {
+		log.warn("Circuit breaker fallback triggered: invoiceId={} error={}", invoiceId, 
+			throwable != null ? throwable.getMessage() : "Unknown error");
+		return PaymentResult.fail("CIRCUIT_BREAKER_OPEN: " + 
+			(throwable != null ? throwable.getMessage() : "Service unavailable"));
+	}
+
+	/**
+	 * Makes HTTP POST request to payment service.
+	 * Note: Retries are handled at the method level by Resilience4j Retry on billInvoiceRecurring().
+	 * Spring Retry doesn't work on self-invocations (private methods called from same class).
+	 * 
+	 * @param callName Name of the call for logging
+	 * @param url URL to call
+	 * @param body Request body
+	 * @return Response body as Map
+	 * @throws RuntimeException if request fails (will be retried by Resilience4j Retry)
+	 */
 	private Map<String, Object> postJson(String callName, String url, Map<String, Object> body) {
+		// Get test mode configuration (cache to avoid repeated calls and help IDE resolution)
+		BillingJobProperties.Payment.Http.TestMode testMode = props.getPayment().getHttp().getTestMode();
+		
+		// Test mode: Simulate failures for testing retry mechanism
+		if (testMode.isEnabled()) {
+			Map<String, AtomicInteger> counters = attemptCounters.get();
+			int attempt = counters.computeIfAbsent(callName, k -> new AtomicInteger(0)).incrementAndGet();
+			int failAttempts = testMode.getFailAttempts();
+			
+			if (attempt <= failAttempts) {
+				String exceptionType = testMode.getExceptionType();
+				log.warn("TEST MODE: Simulating failure for {} (attempt {}/{}) with exception type: {}", 
+					callName, attempt, failAttempts, exceptionType);
+				
+				// Throw exception based on configured type
+				switch (exceptionType.toUpperCase()) {
+					case "SOCKET_TIMEOUT":
+						// Use unchecked wrapper that Spring Retry can catch
+						throw new TestSocketTimeoutException("TEST MODE: Simulated socket timeout on attempt " + attempt);
+					case "ILLEGAL_STATE":
+						throw new IllegalStateException("TEST MODE: Simulated illegal state error on attempt " + attempt);
+					case "REST_CLIENT":
+						throw new RestClientException("TEST MODE: Simulated REST client error on attempt " + attempt) {};
+					default:
+						throw new IllegalStateException("TEST MODE: Simulated error on attempt " + attempt);
+				}
+			} else {
+				log.info("TEST MODE: Allowing success for {} after {} failed attempts", callName, failAttempts);
+				// Reset counter for this call after successful attempt
+				counters.remove(callName);
+			}
+		}
+		
 		log.info("HttpPaymentService {} REQ: url={} body={}", callName, url, body);
 
 		HttpHeaders headers = new HttpHeaders();
@@ -154,6 +270,17 @@ public class HttpPaymentService implements PaymentService {
 		Map<String, Object> respBody = resp.getBody();
 
 		log.info("HttpPaymentService {} RESP: url={} statusCode={} body={}", callName, url, statusCode, respBody);
+		
+		// Clear test mode counter on success
+		if (testMode.isEnabled()) {
+			attemptCounters.get().remove(callName);
+		}
+		
+		// Retry on 5xx server errors (transient failures)
+		if (statusCode >= 500 && statusCode < 600) {
+			log.warn("HttpPaymentService {} received 5xx error, will retry: url={} statusCode={}", callName, url, statusCode);
+			throw new IllegalStateException("Server error " + statusCode + " url=" + url);
+		}
 
 		if (!resp.getStatusCode().is2xxSuccessful() || respBody == null) {
 			log.error("HttpPaymentService {} failed: url={} statusCode={} body={}", callName, url, statusCode, respBody);

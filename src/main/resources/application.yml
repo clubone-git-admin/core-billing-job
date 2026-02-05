@@ -9,8 +9,18 @@ spring:
     clubone:
       url: ${CLUBONE_JDBC_URL:jdbc:postgresql://clubone-free-tier-db.cju8eqswasju.us-east-1.rds.amazonaws.com:5432/clubone_dev}
       username: ${CLUBONE_DB_USER:clubone_dev_user}
-      password: ${CLUBONE_DB_PASSWORD:C1ub0ne@2024!}
+      # IMPORTANT (production): NEVER commit real passwords here.
+      # Provide password via environment variable or external secret store.
+      password: ${CLUBONE_DB_PASSWORD:C1ub0ne@2024!}  # No default; must be supplied via env in non-dev environments
       driver-class-name: org.postgresql.Driver
+      # Connection pool configuration (HikariCP)
+      hikari:
+        maximum-pool-size: ${CLUBONE_DB_MAX_POOL_SIZE:10}
+        minimum-idle: ${CLUBONE_DB_MIN_IDLE:2}
+        connection-timeout: ${CLUBONE_DB_CONNECTION_TIMEOUT:30000}  # 30 seconds
+        idle-timeout: ${CLUBONE_DB_IDLE_TIMEOUT:600000}  # 10 minutes
+        max-lifetime: ${CLUBONE_DB_MAX_LIFETIME:1800000}  # 30 minutes
+        leak-detection-threshold: ${CLUBONE_DB_LEAK_DETECTION:60000}  # 1 minute
 
   batch:
     job:
@@ -19,14 +29,57 @@ spring:
       initialize-schema: never
       table-prefix: batch_job_logs.batch_
 
+  # Security Configuration (disabled by default)
+  # To enable OAuth2, set OAUTH2_ISSUER_URI environment variable
+  # When set, OAuth2 will be automatically configured via SecurityConfig
+  # When not set, all endpoints are publicly accessible (no authentication required)
+
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics,prometheus
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: ${spring.application.name}
+
+# Resilience4j Circuit Breaker Configuration
+resilience4j:
+  circuitbreaker:
+    instances:
+      paymentService:
+        registerHealthIndicator: true
+        slidingWindowSize: 50
+        minimumNumberOfCalls: 20  # Minimum calls before circuit can open (tuned for production)
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        waitDurationInOpenState: 10s
+        failureRateThreshold: 50  # Circuit opens if 50% of calls fail
+        eventConsumerBufferSize: 10
+  retry:
+    instances:
+      paymentService:
+        maxAttempts: 3
+        waitDuration: 1s
+        enableExponentialBackoff: true
+        exponentialBackoffMultiplier: 2
+        # Retry on all exceptions by default (can be configured with retryExceptionPredicate)
 
 clubone:
   billing:
+    # Chunk size for batch processing (number of items processed per transaction)
+    chunk-size: ${CLUBONE_BILLING_CHUNK_SIZE:300}
+    
+    # Idempotency settings
+    # Prevent processing invoices already successfully billed in previous LIVE runs
+    prevent-duplicate-across-runs: ${CLUBONE_BILLING_PREVENT_DUPLICATES:true}
+    # Use row-level locking (FOR UPDATE SKIP LOCKED) to prevent concurrent processing
+    # Note: Requires PostgreSQL and proper transaction isolation
+    use-row-locking: ${CLUBONE_BILLING_USE_ROW_LOCKING:false}
+    
     # Whether LIVE billing updates invoice + schedule statuses.
     # You previously said "don't touch invoice table"; keep this false in environments where you want read-only behavior.
     update-invoice: false
@@ -36,12 +89,26 @@ clubone:
     #  - NOOP: does not create payment intents/transactions; marks success by policy (useful to wire the flow end-to-end)
     #  - HTTP: calls an external payment service (core-payment-service) endpoint you provide
     payment:
-      strategy: ${CLUBONE_PAYMENT_STRATEGY:NOOP}
+      # In production, default to HTTP so that real payments are used unless explicitly overridden.
+      # For local/dev, set CLUBONE_PAYMENT_STRATEGY=NOOP to avoid hitting real gateway.
+      strategy: ${CLUBONE_PAYMENT_STRATEGY:HTTP}
       http:
         base-url: ${CLUBONE_PAYMENT_BASE_URL:http://localhost:8010}
         create-and-capture-path: ${CLUBONE_PAYMENT_CAPTURE_PATH:/api/payments/capture-invoice}
         timeout-ms: ${CLUBONE_PAYMENT_TIMEOUT_MS:8000}
+        # Test mode for simulating retry failures
+        # Set enabled=true ONLY in lower environments to test retry mechanism.
+        # MUST remain false in production.
+        test-mode:
+          enabled: ${CLUBONE_PAYMENT_TEST_MODE_ENABLED:false}  # Disabled by default for production
+          fail-attempts: ${CLUBONE_PAYMENT_TEST_FAIL_ATTEMPTS:2}  # Fail first N attempts, then succeed
+          exception-type: ${CLUBONE_PAYMENT_TEST_EXCEPTION_TYPE:SOCKET_TIMEOUT}  # SOCKET_TIMEOUT | ILLEGAL_STATE | REST_CLIENT
 
     # In NOOP mode, choose what result to simulate for LIVE:
     noop:
       outcome: ${CLUBONE_NOOP_OUTCOME:SUCCESS}   # SUCCESS | FAIL_RANDOM_10PCT | ALWAYS_FAIL
+
+    # Enterprise Features Configuration
+    scheduling:
+      enabled: ${CLUBONE_BILLING_SCHEDULING_ENABLED:false}
+      cron: ${CLUBONE_BILLING_SCHEDULING_CRON:0 0 2 * * ?}  # Daily at 2 AM

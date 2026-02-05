@@ -6,8 +6,13 @@ import org.springframework.stereotype.Component;
 @Component
 @ConfigurationProperties(prefix = "clubone.billing")
 public class BillingJobProperties {
+	private int chunkSize = 300;
 	private boolean updateInvoice = false;
 	private boolean updateSchedule = true;
+	
+	// Idempotency settings
+	private boolean preventDuplicateAcrossRuns = true; // Prevent processing invoices already billed in previous runs
+	private boolean useRowLocking = true; // Use FOR UPDATE SKIP LOCKED for concurrent safety
 
 	private Payment payment = new Payment();
 	private Noop noop = new Noop();
@@ -26,6 +31,30 @@ public class BillingJobProperties {
 
 	public void setUpdateSchedule(boolean updateSchedule) {
 		this.updateSchedule = updateSchedule;
+	}
+
+	public int getChunkSize() {
+		return chunkSize;
+	}
+
+	public void setChunkSize(int chunkSize) {
+		this.chunkSize = chunkSize;
+	}
+
+	public boolean isPreventDuplicateAcrossRuns() {
+		return preventDuplicateAcrossRuns;
+	}
+
+	public void setPreventDuplicateAcrossRuns(boolean preventDuplicateAcrossRuns) {
+		this.preventDuplicateAcrossRuns = preventDuplicateAcrossRuns;
+	}
+
+	public boolean isUseRowLocking() {
+		return useRowLocking;
+	}
+
+	public void setUseRowLocking(boolean useRowLocking) {
+		this.useRowLocking = useRowLocking;
 	}
 
 	public Payment getPayment() {
@@ -77,6 +106,42 @@ public class BillingJobProperties {
 
 			private String actorId = "00000000-0000-0000-0000-000000000001"; // system user
 			private String paymentTypeCode = "RECURRING";
+			
+			// Test mode configuration for simulating retry failures
+			private TestMode testMode = new TestMode();
+
+			/**
+			 * Test mode configuration for simulating retry failures.
+			 */
+			public static class TestMode {
+				private boolean enabled = false;
+				private int failAttempts = 2; // Fail first N attempts, then succeed
+				private String exceptionType = "SOCKET_TIMEOUT"; // SOCKET_TIMEOUT | ILLEGAL_STATE | REST_CLIENT
+
+				public boolean isEnabled() {
+					return enabled;
+				}
+
+				public void setEnabled(boolean enabled) {
+					this.enabled = enabled;
+				}
+
+				public int getFailAttempts() {
+					return failAttempts;
+				}
+
+				public void setFailAttempts(int failAttempts) {
+					this.failAttempts = failAttempts;
+				}
+
+				public String getExceptionType() {
+					return exceptionType;
+				}
+
+				public void setExceptionType(String exceptionType) {
+					this.exceptionType = exceptionType;
+				}
+			}
 
 			public String getValidateMethodPath() {
 				return validateMethodPath;
@@ -156,6 +221,14 @@ public class BillingJobProperties {
 
 			public void setTimeoutMs(int timeoutMs) {
 				this.timeoutMs = timeoutMs;
+			}
+
+			public TestMode getTestMode() {
+				return testMode;
+			}
+
+			public void setTestMode(TestMode testMode) {
+				this.testMode = testMode;
 			}
 		}
 	}

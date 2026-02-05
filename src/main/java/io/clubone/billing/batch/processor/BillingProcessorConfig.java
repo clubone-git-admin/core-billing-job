@@ -13,10 +13,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import io.clubone.billing.batch.BillingJobProperties;
 import io.clubone.billing.batch.RunMode;
+import io.clubone.billing.batch.audit.AuditService;
+import io.clubone.billing.batch.dlq.DeadLetterQueueService;
+import io.clubone.billing.batch.metrics.BillingMetrics;
 import io.clubone.billing.batch.model.BillingWorkItem;
 import io.clubone.billing.batch.model.DueInvoiceRow;
 import io.clubone.billing.batch.payment.PaymentServiceFactory;
-import io.clubone.billing.repo.BillingRepository;
 
 @Configuration
 public class BillingProcessorConfig {
@@ -25,15 +27,17 @@ public class BillingProcessorConfig {
   @StepScope
   public ItemProcessor<DueInvoiceRow, BillingWorkItem> billingItemProcessor(
       @Qualifier("cluboneJdbcTemplate") JdbcTemplate jdbc,
-      BillingRepository repo,
       BillingJobProperties props,
       PaymentServiceFactory paymentFactory,
+      BillingMetrics metrics,
+      DeadLetterQueueService dlqService,
+      AuditService auditService,
       @Value("#{jobExecutionContext['billingRunId']}") String runIdStr,
       @Value("#{jobExecutionContext['runMode']}") String modeStr,
       @Value("#{jobParameters['asOfDate']}") String asOfDateStr) {
     UUID runId = UUID.fromString(runIdStr);
     RunMode mode = RunMode.valueOf(modeStr);
     LocalDate asOfDate = LocalDate.parse(asOfDateStr);
-    return new BillingItemProcessor(jdbc, repo, props, paymentFactory.get(mode), runId, mode, asOfDate);
+    return new BillingItemProcessor(jdbc, props, paymentFactory.get(mode), metrics, dlqService, auditService, runId, mode, asOfDate);
   }
 }

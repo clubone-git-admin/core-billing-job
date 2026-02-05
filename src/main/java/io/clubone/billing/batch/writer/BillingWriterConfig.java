@@ -1,5 +1,7 @@
 package io.clubone.billing.batch.writer;
 
+import io.clubone.billing.batch.dlq.DeadLetterQueueService;
+import io.clubone.billing.batch.metrics.BillingMetrics;
 import io.clubone.billing.batch.model.BillingWorkItem;
 import io.clubone.billing.repo.BillingRepository;
 import org.springframework.batch.item.ItemWriter;
@@ -14,7 +16,9 @@ public class BillingWriterConfig {
   @Bean
   public ItemWriter<BillingWorkItem> billingItemWriter(
       @Qualifier("cluboneJdbcTemplate") JdbcTemplate jdbc,
-      BillingRepository repo) {
-    return new BillingItemWriter(jdbc, repo);
+      BillingRepository repo,
+      DeadLetterQueueService dlqService,
+      BillingMetrics metrics) {
+    return new BillingItemWriter(jdbc, repo, dlqService, metrics);
   }
 }

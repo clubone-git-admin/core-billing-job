@@ -1,6 +1,10 @@
 package io.clubone.billing.batch;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import io.clubone.billing.batch.audit.AuditService;
+import io.clubone.billing.batch.metrics.BillingMetrics;
 import io.clubone.billing.batch.model.BillingWorkItem;
 import io.clubone.billing.batch.model.DueInvoiceRow;
 import io.clubone.billing.repo.BillingRepository;
@@ -49,7 +53,12 @@ public class BillingJobConfig {
 
   @Bean
   public ObjectMapper objectMapper() {
-    return new ObjectMapper();
+    ObjectMapper mapper = new ObjectMapper();
+    // Register JavaTimeModule to handle Java 8 date/time types (LocalDate, LocalDateTime, etc.)
+    mapper.registerModule(new JavaTimeModule());
+    // Disable writing dates as timestamps (use ISO-8601 strings instead)
+    mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    return mapper;
   }
 
   // -----------------------------------------------------------------------
@@ -59,7 +68,8 @@ public class BillingJobConfig {
   @Bean("startRunStep")
   public Step startRunStep(JobRepository jobRepository,
                            PlatformTransactionManager txManager,
-                           BillingRepository repo) {
+                           BillingRepository repo,
+                           AuditService auditService) {
     return new StepBuilder("startRunStep", jobRepository)
         .tasklet((contribution, chunkContext) -> {
           String asOfDateStr = (String) chunkContext.getStepContext().getJobParameters().get("asOfDate");
@@ -75,6 +85,10 @@ public class BillingJobConfig {
           JobExecution je = chunkContext.getStepContext().getStepExecution().getJobExecution();
           je.getExecutionContext().putString("billingRunId", runId.toString());
           je.getExecutionContext().putString("runMode", mode.name());
+          
+          // Audit: Job execution started
+          auditService.logJobStarted(runId, mode.name(), asOfDateStr, "system");
+          
           return RepeatStatus.FINISHED;
         }, txManager)
         .build();
@@ -87,17 +101,24 @@ public class BillingJobConfig {
   @Bean("processDueInvoicesStep")
   public Step processDueInvoicesStep(JobRepository jobRepository,
                                      PlatformTransactionManager txManager,
+                                     BillingJobProperties props,
                                      org.springframework.batch.item.ItemReader<DueInvoiceRow> dueInvoiceReader,
                                      org.springframework.batch.item.ItemProcessor<DueInvoiceRow, BillingWorkItem> billingItemProcessor,
-                                     org.springframework.batch.item.ItemWriter<BillingWorkItem> billingItemWriter) {
+                                     org.springframework.batch.item.ItemWriter<BillingWorkItem> billingItemWriter,
+                                     io.clubone.billing.batch.listener.BillingStepExecutionListener stepListener,
+                                     io.clubone.billing.batch.listener.BillingItemReadListener readListener,
+                                     io.clubone.billing.batch.listener.BillingSkipListener skipListener) {
     return new StepBuilder("processDueInvoicesStep", jobRepository)
-        .<DueInvoiceRow, BillingWorkItem>chunk(300, txManager)
+        .<DueInvoiceRow, BillingWorkItem>chunk(props.getChunkSize(), txManager)
         .reader(dueInvoiceReader)
+        .listener(readListener)
         .processor(billingItemProcessor)
         .writer(billingItemWriter)
+        .listener(stepListener)
         .faultTolerant()
         .skip(Exception.class)
         .skipLimit(10000)
+        .listener(skipListener)  // Add skip listener to capture processor/writer failures in DLQ
         .build();
   }
 
@@ -109,11 +130,14 @@ public class BillingJobConfig {
   public Step endRunStep(JobRepository jobRepository,
                          PlatformTransactionManager txManager,
                          BillingRepository repo,
-                         ObjectMapper mapper) {
+                         ObjectMapper mapper,
+                         BillingMetrics metrics,
+                         AuditService auditService) {
     return new StepBuilder("endRunStep", jobRepository)
         .tasklet((contribution, chunkContext) -> {
           JobExecution je = chunkContext.getStepContext().getStepExecution().getJobExecution();
           UUID runId = UUID.fromString(je.getExecutionContext().getString("billingRunId"));
+          String runMode = je.getExecutionContext().getString("runMode");
 
           Map<String, Object> summary = new LinkedHashMap<>();
           summary.put("countsByStatus", repo.countsByStatus(runId));
@@ -121,6 +145,10 @@ public class BillingJobConfig {
 
           repo.completeRun(runId, "COMPLETED", summaryJson);
           log.info("Completed billing run: runId={} summary={}", runId, summaryJson);
+          
+          // Audit: Job execution completed
+          auditService.logJobCompleted(runId, summary, "system");
+          
           return RepeatStatus.FINISHED;
         }, txManager)
         .build();
