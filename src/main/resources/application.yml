@@ -121,5 +121,3 @@ aws:
   s3:
     bucket-name: billing-preview-bucket
     region: us-east-1
-    access-key-id: AKIAZAI4HBDBQHBW5K4H
-    secret-access-key: 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
