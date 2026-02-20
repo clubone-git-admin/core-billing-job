@@ -13,16 +13,18 @@ import java.util.UUID;
 /**
  * REST API for managing Dead Letter Queue entries.
  * Allows manual review and recovery of failed billing items.
+ * 
+ * @deprecated Use {@link io.clubone.billing.api.v1.DLQController} instead for v1 API
  */
 @RestController
 @RequestMapping("/api/billing/dlq")
-public class DLQController {
+public class DLQControllerLegacy {
 
-    private static final Logger log = LoggerFactory.getLogger(DLQController.class);
+    private static final Logger log = LoggerFactory.getLogger(DLQControllerLegacy.class);
 
     private final DeadLetterQueueService dlqService;
 
-    public DLQController(DeadLetterQueueService dlqService) {
+    public DLQControllerLegacy(DeadLetterQueueService dlqService) {
         this.dlqService = dlqService;
     }
 
