@@ -1,8 +1,10 @@
 package io.clubone.billing.api.v1;
 
+import io.clubone.billing.api.dto.ApproveDuePreviewRequest;
 import io.clubone.billing.api.dto.DuePreviewRequest;
 import io.clubone.billing.api.dto.DuePreviewRunHistoryDto;
 import io.clubone.billing.api.dto.PageResponse;
+import io.clubone.billing.api.dto.StageRunDto;
 import io.clubone.billing.service.DuePreviewService;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.Operation;
@@ -136,6 +138,80 @@ public class DuePreviewController {
 
         Map<String, Object> response = duePreviewService.getDuePreviewRunDetails(stageRunId);
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * POST /api/billing/due-preview/runs/{stageRunId}/approve
+     * Approve a due preview stage run.
+     * Creates approval record, marks DUE_PREVIEW as COMPLETED, transitions to INVOICE_GENERATION stage.
+     */
+    @PostMapping(value = "/runs/{stageRunId}/approve", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @Operation(
+            summary = "Approve due preview stage run",
+            description = "Approves a due preview stage run. Creates approval record in billing_run_approval, " +
+                    "marks DUE_PREVIEW stage as COMPLETED, and transitions to INVOICE_GENERATION stage (RUNNING status)."
+    )
+    @ApiResponses(value = {
+            @ApiResponse(
+                    responseCode = "200",
+                    description = "Due preview approved successfully",
+                    content = @Content(schema = @Schema(implementation = StageRunDto.class))
+            ),
+            @ApiResponse(
+                    responseCode = "404",
+                    description = "Stage run not found or not a DUE_PREVIEW stage"
+            ),
+            @ApiResponse(
+                    responseCode = "400",
+                    description = "Invalid request or not a DUE_PREVIEW stage"
+            )
+    })
+    public ResponseEntity<StageRunDto> approveDuePreview(
+            @Parameter(description = "Stage run ID (DUE_PREVIEW stage_run_id)") @PathVariable UUID stageRunId,
+            @Valid @RequestBody ApproveDuePreviewRequest request) {
+
+        log.info("Approving due preview: stageRunId={}, approverId={}, approvalLevel={}",
+                stageRunId, request.approverId(), request.approvalLevel());
+
+        StageRunDto stage = duePreviewService.approveOrDenyDuePreview(stageRunId, request, true);
+        return ResponseEntity.ok(stage);
+    }
+
+    /**
+     * POST /api/billing/due-preview/runs/{stageRunId}/deny
+     * Deny a due preview stage run.
+     * Creates rejection record, marks DUE_PREVIEW as COMPLETED, does not transition to next stage.
+     */
+    @PostMapping(value = "/runs/{stageRunId}/deny", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @Operation(
+            summary = "Deny due preview stage run",
+            description = "Denies a due preview stage run. Creates rejection record in billing_run_approval, " +
+                    "marks DUE_PREVIEW stage as COMPLETED, but does not transition to next stage."
+    )
+    @ApiResponses(value = {
+            @ApiResponse(
+                    responseCode = "200",
+                    description = "Due preview denied successfully",
+                    content = @Content(schema = @Schema(implementation = StageRunDto.class))
+            ),
+            @ApiResponse(
+                    responseCode = "404",
+                    description = "Stage run not found or not a DUE_PREVIEW stage"
+            ),
+            @ApiResponse(
+                    responseCode = "400",
+                    description = "Invalid request or not a DUE_PREVIEW stage"
+            )
+    })
+    public ResponseEntity<StageRunDto> denyDuePreview(
+            @Parameter(description = "Stage run ID (DUE_PREVIEW stage_run_id)") @PathVariable UUID stageRunId,
+            @Valid @RequestBody ApproveDuePreviewRequest request) {
+
+        log.info("Denying due preview: stageRunId={}, approverId={}, approvalLevel={}",
+                stageRunId, request.approverId(), request.approvalLevel());
+
+        StageRunDto stage = duePreviewService.approveOrDenyDuePreview(stageRunId, request, false);
+        return ResponseEntity.ok(stage);
     }
 
     /**

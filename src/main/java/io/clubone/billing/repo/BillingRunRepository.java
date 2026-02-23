@@ -440,6 +440,21 @@ public class BillingRunRepository {
     }
 
     /**
+     * Update billing run current stage code.
+     */
+    public void updateCurrentStage(UUID billingRunId, String stageCode) {
+        String stageIdSql = "SELECT billing_stage_code_id FROM client_subscription_billing.lu_billing_stage_code WHERE stage_code = ?";
+        UUID stageId = jdbc.queryForObject(stageIdSql, new Object[]{stageCode}, UUID.class);
+
+        jdbc.update("""
+            UPDATE client_subscription_billing.billing_run
+            SET current_stage_code_id = ?::uuid, modified_on = now()
+            WHERE billing_run_id = ?::uuid
+            """,
+                stageId.toString(), billingRunId.toString());
+    }
+
+    /**
      * Cancel billing run.
      */
     public void cancelBillingRun(UUID billingRunId) {

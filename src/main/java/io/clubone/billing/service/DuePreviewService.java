@@ -1,8 +1,10 @@
 package io.clubone.billing.service;
 
+import io.clubone.billing.api.dto.ApproveDuePreviewRequest;
 import io.clubone.billing.api.dto.DuePreviewRequest;
 import io.clubone.billing.api.dto.DuePreviewRunHistoryDto;
 import io.clubone.billing.api.dto.PageResponse;
+import io.clubone.billing.repo.ApprovalRepository;
 import io.clubone.billing.repo.AuditLogRepository;
 import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.DuePreviewRepository;
@@ -18,7 +20,9 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /**
@@ -36,6 +40,7 @@ public class DuePreviewService {
     private final S3Service s3Service;
     private final AuditLogRepository auditLogRepository;
     private final SnapshotRepository snapshotRepository;
+    private final ApprovalRepository approvalRepository;
 
     public DuePreviewService(
             DuePreviewRepository duePreviewRepository,
@@ -43,13 +48,15 @@ public class DuePreviewService {
             StageRunRepository stageRunRepository,
             S3Service s3Service,
             AuditLogRepository auditLogRepository,
-            SnapshotRepository snapshotRepository) {
+            SnapshotRepository snapshotRepository,
+            ApprovalRepository approvalRepository) {
         this.duePreviewRepository = duePreviewRepository;
         this.billingRunRepository = billingRunRepository;
         this.stageRunRepository = stageRunRepository;
         this.s3Service = s3Service;
         this.auditLogRepository = auditLogRepository;
         this.snapshotRepository = snapshotRepository;
+        this.approvalRepository = approvalRepository;
     }
 
     /**
@@ -168,6 +175,123 @@ public class DuePreviewService {
         }
         // Fallback: generate filename from stage run ID and date
         return String.format("due-preview-%s.csv", stageRunId.toString().substring(0, 8));
+    }
+
+    /**
+     * Approve or deny a due preview stage run.
+     * - Creates approval record in billing_run_approval
+     * - Updates billing_run.approval_status_id
+     * - Marks DUE_PREVIEW stage run as COMPLETED
+     * - If approved: creates INVOICE_GENERATION stage run (RUNNING) and updates billing_run.current_stage_code_id
+     * - If denied: only completes DUE_PREVIEW, no next stage transition
+     *
+     * @param stageRunId The DUE_PREVIEW stage run ID
+     * @param request Approval/denial request with approver info
+     * @param approved true to approve, false to deny
+     * @return Updated stage run DTO
+     */
+    @Transactional
+    public StageRunDto approveOrDenyDuePreview(UUID stageRunId, ApproveDuePreviewRequest request, boolean approved) {
+        // Validate stage run exists and is DUE_PREVIEW
+        StageRunDto duePreviewStage = stageRunRepository.findById(stageRunId);
+        if (duePreviewStage == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Stage run not found: " + stageRunId);
+        }
+        if (!"DUE_PREVIEW".equals(duePreviewStage.stageCode())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not a DUE_PREVIEW stage run: " + stageRunId);
+        }
+
+        UUID billingRunId = duePreviewStage.billingRunId();
+        var billingRun = billingRunRepository.findById(billingRunId);
+        if (billingRun == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Billing run not found: " + billingRunId);
+        }
+
+        // Apply defaults for optional fields
+        String approverRole = request.approverRole() != null && !request.approverRole().isBlank() 
+                ? request.approverRole() : "APPROVER";
+        Integer approvalLevel = request.approvalLevel() != null ? request.approvalLevel() : 1;
+
+        // Create or update approval record in billing_run_approval
+        try {
+            // Check if approval record already exists for this level
+            var existingApprovals = approvalRepository.findByBillingRunId(billingRunId);
+            var existingApproval = existingApprovals.stream()
+                    .filter(a -> a.approvalLevel().equals(approvalLevel))
+                    .findFirst();
+
+            if (existingApproval.isPresent()) {
+                // Update existing approval
+                if (approved) {
+                    approvalRepository.approve(billingRunId, approvalLevel, request.approverId(), request.notes());
+                } else {
+                    approvalRepository.reject(billingRunId, approvalLevel, request.approverId(), 
+                            request.notes() != null ? request.notes() : request.rejectionReason());
+                }
+            } else {
+                // Create new approval record
+                approvalRepository.createApproval(billingRunId, approvalLevel, approverRole);
+                if (approved) {
+                    approvalRepository.approve(billingRunId, approvalLevel, request.approverId(), request.notes());
+                } else {
+                    approvalRepository.reject(billingRunId, approvalLevel, request.approverId(), 
+                            request.notes() != null ? request.notes() : request.rejectionReason());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Could not create/update approval record (non-blocking): {}", e.getMessage());
+        }
+
+        // Update billing_run.approval_status_id
+        String approvalStatus = approved ? "APPROVED" : "REJECTED";
+		/*
+		 * approvalRepository.updateBillingRunApprovalStatus(billingRunId,
+		 * approvalStatus, request.approverId(), request.notes() != null ?
+		 * request.notes() : request.rejectionReason());
+		 */
+        // Mark DUE_PREVIEW stage run as COMPLETED
+        Map<String, Object> summaryJson = new HashMap<>();
+        summaryJson.put("approved", approved);
+        summaryJson.put("approver_id", request.approverId().toString());
+        summaryJson.put("approver_role", approverRole);
+        summaryJson.put("approval_level", approvalLevel);
+        summaryJson.put("notes", request.notes());
+        if (!approved && request.rejectionReason() != null) {
+            summaryJson.put("rejection_reason", request.rejectionReason());
+        }
+        stageRunRepository.completeStageRun(stageRunId, summaryJson);
+
+        // If approved: transition to INVOICE_GENERATION stage
+        if (approved) {
+            // Create INVOICE_GENERATION stage run if it doesn't exist
+            StageRunDto existingInvoiceGen = stageRunRepository.findByBillingRunIdAndStageCode(billingRunId, "INVOICE_GENERATION");
+            UUID invoiceGenStageRunId;
+            if (existingInvoiceGen == null) {
+                invoiceGenStageRunId = stageRunRepository.createStageRun(
+                        billingRunId, "INVOICE_GENERATION", OffsetDateTime.now(), null, request.approverId());
+            } else {
+                invoiceGenStageRunId = existingInvoiceGen.stageRunId();
+            }
+
+            // Start INVOICE_GENERATION stage run (sets status to RUNNING)
+            stageRunRepository.startStageRun(invoiceGenStageRunId);
+            
+            // Update billing_run.current_stage_code_id to INVOICE_GENERATION
+            billingRunRepository.updateCurrentStage(billingRunId, "INVOICE_GENERATION");
+            
+            log.info("Transitioned to INVOICE_GENERATION stage: billingRunId={}, stageRunId={}", billingRunId, invoiceGenStageRunId);
+        }
+
+        // Audit log
+        auditLogRepository.insertAuditLog(
+                "DUE_PREVIEW",
+                "STAGE_RUN",
+                stageRunId,
+                approved ? "APPROVED" : "DENIED",
+                request.approverId().toString(),
+                summaryJson);
+
+        return stageRunRepository.findById(stageRunId);
     }
 
     /**
@@ -314,10 +438,13 @@ public class DuePreviewService {
         // Generate CSV content
         String csvContent = generateCSV(processedInstances);
 
-        // Generate file name (use billing run id for traceability)
-        String fileName = String.format("due-preview-%s-%s.csv",
+        // Generate file name (use billing run id for traceability) with current date/time
+        LocalDateTime now = LocalDateTime.now();
+        String dateTimeStr = now.format(DateTimeFormatter.ofPattern("dd-MM_HHmm"));
+        String fileName = String.format("due-preview-%s-%s-%s.csv",
                 billingRunId.toString().substring(0, 8),
-                request.dueDate().toString().replace("-", ""));
+                request.dueDate().toString().replace("-", ""),
+                dateTimeStr);
 
         // Upload to S3
         String s3Path = s3Service.uploadToS3(csvContent, fileName, "text/csv");

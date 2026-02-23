@@ -66,16 +66,32 @@ public class ApprovalRepository {
     public UUID createApproval(UUID billingRunId, Integer approvalLevel, String approverRole) {
         UUID approvalId = UUID.randomUUID();
 
+        // 1️⃣ Resolve approval_status_id for PENDING
+        UUID statusId = jdbc.queryForObject(
+            "SELECT approval_status_id FROM client_subscription_billing.lu_approval_status WHERE status_code = ?",
+            new Object[]{"PENDING"},
+            UUID.class
+        );
+
+        if (statusId == null) {
+            throw new IllegalStateException("PENDING status not found in lu_approval_status");
+        }
+
+        // 2️⃣ Insert with BOTH status_code and approval_status_id
         jdbc.update("""
             INSERT INTO client_subscription_billing.billing_run_approval
-            (approval_id, billing_run_id, approval_level, approver_role, status_code)
-            VALUES (?::uuid, ?::uuid, ?, ?, 'PENDING')
+            (approval_id, billing_run_id, approval_level, approver_role, status_code, approval_status_id, created_on)
+            VALUES (?::uuid, ?::uuid, ?, ?, 'PENDING', ?::uuid, now())
             """,
-                approvalId.toString(), billingRunId.toString(), approvalLevel, approverRole);
+            approvalId.toString(),
+            billingRunId.toString(),
+            approvalLevel,
+            approverRole,
+            statusId.toString()
+        );
 
         return approvalId;
     }
-
     /**
      * Approve at a specific level.
      */
@@ -105,8 +121,10 @@ public class ApprovalRepository {
      */
     public void updateBillingRunApprovalStatus(UUID billingRunId, String statusCode, UUID approvedBy, String notes) {
         String statusIdSql = "SELECT approval_status_id FROM client_subscription_billing.lu_approval_status WHERE status_code = ?";
+        System.out.println("statusCode id" + statusCode);
         UUID statusId = jdbc.queryForObject(statusIdSql, new Object[]{statusCode}, UUID.class);
-
+        System.out.println("status id" + statusId);
+        System.out.println("statusCode id" + statusCode);
         jdbc.update("""
             UPDATE client_subscription_billing.billing_run
             SET approval_status_id = ?::uuid, approved_by = ?::uuid, approved_on = now(), approval_notes = ?, modified_on = now()
