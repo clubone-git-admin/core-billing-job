@@ -31,7 +31,7 @@ public class BillingBatchApplication {
 			public void addCorsMappings(CorsRegistry registry) {
 				registry.addMapping("/**") // Adjust the mapping pattern as per your requirements
 						.allowedOriginPatterns("*") // Set the allowed origins or "*" for all origins
-						.allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS") // Set the allowed HTTP methods
+						.allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH") // Set the allowed HTTP methods
 						.allowedHeaders("*")// Set the allowed headers
 						.allowCredentials(true); // Allow credentials, if needed
 			}

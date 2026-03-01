@@ -1,0 +1,70 @@
+package io.clubone.billing.api.dto.crm;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+/**
+ * Detailed DTO for lead detail view.
+ */
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record CrmLeadDetailDto(
+        @JsonProperty("lead_id") String leadId,
+        @JsonProperty("full_name") String fullName,
+        @JsonProperty("first_name") String firstName,
+        @JsonProperty("last_name") String lastName,
+        @JsonProperty("email") String email,
+        @JsonProperty("phone") String phone,
+        @JsonProperty("company") String company,
+        @JsonProperty("status_id") String statusId,
+        @JsonProperty("status_code") String statusCode,
+        @JsonProperty("status_display_name") String statusDisplayName,
+        @JsonProperty("owner_id") String ownerId,
+        @JsonProperty("owner_display_name") String ownerDisplayName,
+        @JsonProperty("owner_name") String ownerName,
+        @JsonProperty("source_display_name") String sourceDisplayName,
+        @JsonProperty("created_at") String createdAt,
+        @JsonProperty("last_contacted_on") String lastContactedOn,
+        @JsonProperty("warmth_score") Integer warmthScore,
+        @JsonProperty("home_club_id") String homeClubId,
+        @JsonProperty("home_club_name") String homeClubName,
+        @JsonProperty("lead_type_display_name") String leadTypeDisplayName,
+        @JsonProperty("lead_record_type_display_name") String leadRecordTypeDisplayName,
+        @JsonProperty("address") String address,
+        @JsonProperty("city") String city,
+        @JsonProperty("state") String state,
+        @JsonProperty("zip_code") String zipCode,
+        @JsonProperty("country") String country,
+        @JsonProperty("country_id") String countryId,
+        @JsonProperty("state_id") String stateId,
+        @JsonProperty("account_id") String accountId,
+        @JsonProperty("account_display_name") String accountDisplayName,
+        @JsonProperty("notes") String notes,
+        @JsonProperty("salutation_id") String salutationId,
+        @JsonProperty("salutation_display_name") String salutationDisplayName,
+        @JsonProperty("alternate_phone") String alternatePhone,
+        @JsonProperty("opt_out_sms") Boolean optOutSms,
+        @JsonProperty("referred_by_id") String referredById,
+        @JsonProperty("referred_by_display_name") String referredByDisplayName,
+        @JsonProperty("campaign_id") String campaignId,
+        @JsonProperty("marketing_code") String marketingCode,
+        @JsonProperty("corporate_group_name") String corporateGroupName,
+        @JsonProperty("relationship_display_name") String relationshipDisplayName,
+        @JsonProperty("corporate_lead_path_display_name") String corporateLeadPathDisplayName,
+        @JsonProperty("goals") String goals,
+        @JsonProperty("fitness_level_display_name") String fitnessLevelDisplayName,
+        @JsonProperty("exercise_now_display_name") String exerciseNowDisplayName,
+        @JsonProperty("trainer_gender_preference_display_name") String trainerGenderPreferenceDisplayName,
+        @JsonProperty("interest_display_names") String interestDisplayNames,
+        @JsonProperty("decision_factor_display_names") String decisionFactorDisplayNames,
+        @JsonProperty("category_display_name") String categoryDisplayName,
+        @JsonProperty("gender_id") String genderId,
+        @JsonProperty("gender_display_name") String genderDisplayName,
+        @JsonProperty("date_of_birth") String dateOfBirth,
+        @JsonProperty("consent_to_contact") Boolean consentToContact,
+        @JsonProperty("consent_to_marketing") Boolean consentToMarketing,
+        @JsonProperty("created_by") String createdBy,
+        @JsonProperty("last_modified_by") String lastModifiedBy,
+        @JsonProperty("created_date") String createdDate,
+        @JsonProperty("last_modified_date") String lastModifiedDate
+) {
+}
