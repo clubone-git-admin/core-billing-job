@@ -109,5 +109,99 @@ public class CrmLookupController {
         return ResponseEntity.ok(lookupService.getContacts());
     }
 
+    // Activity lookups
+    @GetMapping("/activity-types")
+    public ResponseEntity<List<CrmLookupItemDto>> getActivityTypes() {
+        return ResponseEntity.ok(lookupService.getActivityTypes());
+    }
+
+    @GetMapping("/activity-statuses")
+    public ResponseEntity<List<CrmLookupItemDto>> getActivityStatuses() {
+        return ResponseEntity.ok(lookupService.getActivityStatuses());
+    }
+
+    @GetMapping("/activity-outcomes")
+    public ResponseEntity<List<CrmLookupItemDto>> getActivityOutcomes() {
+        return ResponseEntity.ok(lookupService.getActivityOutcomes());
+    }
+
+    @GetMapping("/activity-visibilities")
+    public ResponseEntity<List<CrmLookupItemDto>> getActivityVisibilities() {
+        return ResponseEntity.ok(lookupService.getActivityVisibilities());
+    }
+
+    @GetMapping("/entity-types")
+    public ResponseEntity<List<CrmLookupItemDto>> getEntityTypes() {
+        return ResponseEntity.ok(lookupService.getEntityTypes());
+    }
+
+    @GetMapping("/call-directions")
+    public ResponseEntity<List<CrmLookupItemDto>> getCallDirections() {
+        return ResponseEntity.ok(lookupService.getCallDirections());
+    }
+
+    @GetMapping("/call-results")
+    public ResponseEntity<List<CrmLookupItemDto>> getCallResults() {
+        return ResponseEntity.ok(lookupService.getCallResults());
+    }
+
+    @GetMapping("/email-delivery-statuses")
+    public ResponseEntity<List<CrmLookupItemDto>> getEmailDeliveryStatuses() {
+        return ResponseEntity.ok(lookupService.getEmailDeliveryStatuses());
+    }
+
+    @GetMapping("/sms-delivery-statuses")
+    public ResponseEntity<List<CrmLookupItemDto>> getSmsDeliveryStatuses() {
+        return ResponseEntity.ok(lookupService.getSmsDeliveryStatuses());
+    }
+
+    @GetMapping("/whatsapp-delivery-statuses")
+    public ResponseEntity<List<CrmLookupItemDto>> getWhatsappDeliveryStatuses() {
+        return ResponseEntity.ok(lookupService.getWhatsappDeliveryStatuses());
+    }
+
+    @GetMapping("/event-statuses")
+    public ResponseEntity<List<CrmLookupItemDto>> getEventStatuses() {
+        return ResponseEntity.ok(lookupService.getEventStatuses());
+    }
+
+    @GetMapping("/event-purposes")
+    public ResponseEntity<List<CrmLookupItemDto>> getEventPurposes() {
+        log.debug("Getting CRM event purposes");
+        return ResponseEntity.ok(lookupService.getEventPurposes());
+    }
+
+    @GetMapping("/rsvp-statuses")
+    public ResponseEntity<List<CrmLookupItemDto>> getRsvpStatuses() {
+        return ResponseEntity.ok(lookupService.getRsvpStatuses());
+    }
+
+    @GetMapping("/task-types")
+    public ResponseEntity<List<CrmLookupItemDto>> getTaskTypes() {
+        return ResponseEntity.ok(lookupService.getTaskTypes());
+    }
+
+    @GetMapping("/task-statuses")
+    public ResponseEntity<List<CrmLookupItemDto>> getTaskStatuses() {
+        return ResponseEntity.ok(lookupService.getTaskStatuses());
+    }
+
+    @GetMapping("/task-priorities")
+    public ResponseEntity<List<CrmLookupItemDto>> getTaskPriorities() {
+        return ResponseEntity.ok(lookupService.getTaskPriorities());
+    }
+
+    @GetMapping("/email-from-addresses")
+    public ResponseEntity<List<CrmLookupItemDto>> getEmailFromAddresses() {
+        log.debug("Getting CRM email from addresses");
+        return ResponseEntity.ok(lookupService.getEmailFromAddresses());
+    }
+
+    @GetMapping("/email-templates")
+    public ResponseEntity<List<CrmLookupItemDto>> getEmailTemplates() {
+        log.debug("Getting CRM email templates");
+        return ResponseEntity.ok(lookupService.getEmailTemplates());
+    }
+
 }
 

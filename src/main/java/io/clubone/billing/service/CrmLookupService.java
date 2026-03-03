@@ -75,8 +75,80 @@ public class CrmLookupService {
         return toLookupItems(repository.getContacts(getOrgClientId()));
     }
 
+    public List<CrmLookupItemDto> getActivityTypes() {
+        return toLookupItems(repository.getActivityTypes(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getActivityStatuses() {
+        return toLookupItems(repository.getActivityStatuses(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getActivityOutcomes() {
+        return toLookupItems(repository.getActivityOutcomes(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getActivityVisibilities() {
+        return toLookupItems(repository.getActivityVisibilities(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getEntityTypes() {
+        return toLookupItems(repository.getEntityTypes(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getCallDirections() {
+        return toLookupItems(repository.getCallDirections(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getCallResults() {
+        return toLookupItems(repository.getCallResults(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getEmailDeliveryStatuses() {
+        return toLookupItems(repository.getEmailDeliveryStatuses(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getSmsDeliveryStatuses() {
+        return toLookupItems(repository.getSmsDeliveryStatuses(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getWhatsappDeliveryStatuses() {
+        return toLookupItems(repository.getWhatsappDeliveryStatuses(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getEventStatuses() {
+        return toLookupItems(repository.getEventStatuses(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getEventPurposes() {
+        return toLookupItems(repository.getEventPurposes(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getRsvpStatuses() {
+        return toLookupItems(repository.getRsvpStatuses(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getTaskTypes() {
+        return toLookupItems(repository.getTaskTypes(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getTaskStatuses() {
+        return toLookupItems(repository.getTaskStatuses(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getTaskPriorities() {
+        return toLookupItems(repository.getTaskPriorities(getOrgClientId()));
+    }
+
     public List<CrmLookupItemDto> getEmpty() {
         return toLookupItems(repository.getEmptyLookup());
+    }
+
+    public List<CrmLookupItemDto> getEmailFromAddresses() {
+        return toLookupItems(repository.getEmailFromAddresses(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getEmailTemplates() {
+        return toLookupItems(repository.getEmailTemplates(getOrgClientId()));
     }
 
     private UUID getOrgClientId() {

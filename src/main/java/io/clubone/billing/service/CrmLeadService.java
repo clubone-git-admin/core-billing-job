@@ -24,7 +24,7 @@ public class CrmLeadService {
 
     // TODO: Wire from auth/tenant context when available
     private static final UUID DEFAULT_ORG_CLIENT_ID = UUID.fromString("f21d42c1-5ca2-4c98-acac-4e9a1e081fc5");
-    private static final UUID SYSTEM_USER_ID = UUID.fromString("53fbd2ad-fe27-4a3c-b37b-497d74ceb19d");
+    private static final UUID SYSTEM_USER_ID = UUID.fromString("8ad0558a-2f87-4609-9a1f-2aa62703c4c5");
 
     private static final Set<String> REVERTIBLE_STATUS_CODES = Set.of("NEW", "CONTACTED", "QUALIFIED", "DISQUALIFIED");
     private static final String CONVERTED_STATUS_CODE = "CONVERTED";

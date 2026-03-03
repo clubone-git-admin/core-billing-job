@@ -454,9 +454,11 @@ public class CrmLeadRepository {
                 n.note_id,
                 n.entity_id AS lead_id,
                 n.created_on,
-                n.created_by::text AS author,
+                COALESCE(concat_ws(' ', u.first_name, u.last_name), 'Unknown User') AS author,
                 n.content
             FROM crm.note n
+            LEFT JOIN access.access_user u
+            ON u.user_id = n.created_by
             WHERE n.org_client_id = ?
               AND n.entity_type_id = ?
               AND n.entity_id = ?
@@ -557,11 +559,11 @@ public class CrmLeadRepository {
         List<Map<String, Object>> rows = jdbc.queryForList("""
             SELECT 
                 o.opportunity_id,
-                o.opportunity_name,
+                null as opportunity_name,
                 st.code AS stage_code,
                 st.display_name AS stage_display_name,
-                o.amount,
-                o.expected_close_date,
+                null as amount,
+                null as expected_close_date,
                 c.full_name AS contact_name,
                 COALESCE(o.owner_user_id::text, '') AS owner_name
             FROM crm.leads l
@@ -587,7 +589,7 @@ public class CrmLeadRepository {
                 acc.account_name,
                 at.display_name AS type_display_name,
                 acc.phone,
-                acc.address
+                null as address
             FROM crm.leads l
             JOIN crm.contact c
               ON c.contact_id = l.converted_contact_id
@@ -604,13 +606,35 @@ public class CrmLeadRepository {
         return rows.isEmpty() ? null : rows.get(0);
     }
 
+    /**
+     * Related cases: those linked to the lead via converted contact, converted opportunity, or related account.
+     * Uses crm.cases; matches case if contact_id, opportunity_id, or account_id matches any of the given IDs.
+     */
     public List<Map<String, Object>> findRelatedCases(UUID orgClientId, UUID contactId, UUID opportunityId, UUID accountId) {
         if (contactId == null && opportunityId == null && accountId == null) {
             return Collections.emptyList();
         }
 
-        StringBuilder sql = new StringBuilder("""
-            SELECT 
+        List<String> orClauses = new ArrayList<>();
+        List<Object> params = new ArrayList<>();
+        params.add(orgClientId);
+
+        if (contactId != null) {
+            orClauses.add("c.contact_id = ?");
+            params.add(contactId);
+        }
+        if (opportunityId != null) {
+            orClauses.add("c.opportunity_id = ?");
+            params.add(opportunityId);
+        }
+        if (accountId != null) {
+            orClauses.add("c.account_id = ?");
+            params.add(accountId);
+        }
+
+        String orCondition = String.join(" OR ", orClauses);
+        String sql = """
+            SELECT
                 c.case_id,
                 c.case_number,
                 c.subject,
@@ -621,28 +645,13 @@ public class CrmLeadRepository {
             LEFT JOIN crm.lu_case_status cs ON cs.case_status_id = c.case_status_id
             LEFT JOIN crm.lu_case_priority cp ON cp.case_priority_id = c.case_priority_id
             WHERE c.org_client_id = ?
-              AND c.is_deleted = false
-            """);
+              AND COALESCE(c.is_deleted, false) = false
+              AND (""" + orCondition + """
+            )
+            ORDER BY c.created_on DESC
+            """;
 
-        List<Object> params = new ArrayList<>();
-        params.add(orgClientId);
-
-        if (contactId != null) {
-            sql.append(" AND c.contact_id = ? ");
-            params.add(contactId);
-        }
-        if (opportunityId != null) {
-            sql.append(" AND c.opportunity_id = ? ");
-            params.add(opportunityId);
-        }
-        if (accountId != null) {
-            sql.append(" AND c.account_id = ? ");
-            params.add(accountId);
-        }
-
-        sql.append(" ORDER BY c.created_on DESC ");
-
-        return jdbc.queryForList(sql.toString(), params.toArray());
+        return jdbc.queryForList(sql, params.toArray());
     }
 
     public static String toIsoString(Object value) {

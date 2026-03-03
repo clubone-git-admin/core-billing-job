@@ -14,10 +14,15 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.presigner.S3Presigner;
+import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
+import software.amazon.awssdk.services.s3.presigner.model.PresignedGetObjectRequest;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
@@ -31,6 +36,7 @@ public class S3Service {
 
     private final String bucketName;
     private final S3Client s3Client;
+    private final S3Presigner s3Presigner;
 
     public S3Service(
             @Value("${aws.s3.bucket-name}") String bucketName,
@@ -38,12 +44,45 @@ public class S3Service {
             @Value("${aws.s3.access-key-id}") String accessKeyId,
             @Value("${aws.s3.secret-access-key}") String secretAccessKey) {
         this.bucketName = bucketName;
-        this.s3Client = S3Client.builder()
-                .region(Region.of(region))
-                .credentialsProvider(StaticCredentialsProvider.create(
-                        AwsBasicCredentials.create(accessKeyId, secretAccessKey)))
-                .build();
+        var credentials = StaticCredentialsProvider.create(AwsBasicCredentials.create(accessKeyId, secretAccessKey));
+        var regionObj = Region.of(region);
+        this.s3Client = S3Client.builder().region(regionObj).credentialsProvider(credentials).build();
+        this.s3Presigner = S3Presigner.builder().region(regionObj).credentialsProvider(credentials).build();
     }
+
+    /**
+     * Generate a short-lived presigned URL for downloading an object from S3.
+     *
+     * @param s3Path      Full S3 path (e.g. s3://bucket-name/key/path/file.pdf)
+     * @param expiryMinutes Validity of the URL in minutes (e.g. 15)
+     * @return PresignedResult with url and expiresAt (ISO-8601 instant)
+     */
+    public PresignedResult generatePresignedDownloadUrl(String s3Path, int expiryMinutes) {
+        if (s3Path == null || !s3Path.startsWith("s3://")) {
+            throw new IllegalArgumentException("Invalid S3 path: " + s3Path);
+        }
+        String withoutScheme = s3Path.substring(5);
+        int firstSlash = withoutScheme.indexOf('/');
+        if (firstSlash <= 0) {
+            throw new IllegalArgumentException("Invalid S3 path (missing key): " + s3Path);
+        }
+        String bucket = withoutScheme.substring(0, firstSlash);
+        String key = withoutScheme.substring(firstSlash + 1);
+
+        GetObjectRequest getObjectRequest = GetObjectRequest.builder()
+                .bucket(bucket)
+                .key(key)
+                .build();
+        GetObjectPresignRequest presignRequest = GetObjectPresignRequest.builder()
+                .signatureDuration(Duration.ofMinutes(expiryMinutes))
+                .getObjectRequest(getObjectRequest)
+                .build();
+        PresignedGetObjectRequest presigned = s3Presigner.presignGetObject(presignRequest);
+        Instant expiresAt = Instant.now().plus(Duration.ofMinutes(expiryMinutes));
+        return new PresignedResult(presigned.url().toString(), expiresAt);
+    }
+
+    public record PresignedResult(String url, Instant expiresAt) {}
 
     /**
      * Upload content to S3 and return the S3 path.
@@ -84,19 +123,28 @@ public class S3Service {
     }
 
     /**
-     * Upload byte array content to S3.
+     * Upload byte array content to S3 (default key prefix: billing-preview).
+     */
+    public String uploadToS3(byte[] content, String fileName, String contentType) {
+        return uploadToS3(content, fileName, contentType, null);
+    }
+
+    /**
+     * Upload byte array content to S3 with optional key prefix.
      *
      * @param content     The content bytes
      * @param fileName    The file name
      * @param contentType The content type
+     * @param keyPrefix   Key prefix (e.g. "crm/attachments"). If null or blank, "billing-preview" is used.
      * @return The S3 path (s3://...)
      */
-    public String uploadToS3(byte[] content, String fileName, String contentType) {
+    public String uploadToS3(byte[] content, String fileName, String contentType, String keyPrefix) {
         try {
             LocalDateTime now = LocalDateTime.now();
             String datePath = now.format(DateTimeFormatter.ofPattern("yyyy/MM/dd"));
             String timestamp = now.format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
-            String s3Key = String.format("billing-preview/%s/%s-%s", datePath, timestamp, fileName);
+            String prefix = (keyPrefix != null && !keyPrefix.isBlank()) ? keyPrefix : "billing-preview";
+            String s3Key = String.format("%s/%s/%s-%s", prefix, datePath, timestamp, fileName);
 
             PutObjectRequest putObjectRequest = PutObjectRequest.builder()
                     .bucket(bucketName)
