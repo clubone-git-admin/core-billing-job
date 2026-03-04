@@ -32,6 +32,7 @@ import io.clubone.billing.api.dto.crm.CrmLeadDetailDto;
 import io.clubone.billing.api.dto.crm.CrmLeadHistoryItemDto;
 import io.clubone.billing.api.dto.crm.CrmLeadListResponse;
 import io.clubone.billing.api.dto.crm.CrmLeadNoteDto;
+import io.clubone.billing.api.dto.crm.CrmLeadPlaceholderDto;
 import io.clubone.billing.api.dto.crm.CrmLeadRelatedDto;
 import io.clubone.billing.api.dto.crm.CrmLeadSummaryDto;
 import io.clubone.billing.api.dto.crm.CrmLeadUpsertRequest;
@@ -246,6 +247,24 @@ public class LeadsController {
             return ResponseEntity.notFound().build();
         }
         CrmLeadRelatedDto dto = leadService.getRelated(leadId);
+        return ResponseEntity.ok(dto);
+    }
+
+    /**
+     * GET /api/crm/leads/{leadId}/placeholder
+     * Placeholder API: brand name, lead first/last name, sales advisor name and title.
+     * Query param: sales_advisor_id (UUID). 404 if lead does not exist.
+     */
+    @GetMapping("/leads/{leadId}/placeholder")
+    public ResponseEntity<CrmLeadPlaceholderDto> getLeadPlaceholder(
+            @PathVariable("leadId") UUID leadId,
+            @RequestParam(name = "sales_advisor_id") UUID salesAdvisorId
+    ) {
+        log.debug("Getting placeholder for lead: leadId={}, salesAdvisorId={}", leadId, salesAdvisorId);
+        CrmLeadPlaceholderDto dto = leadService.getLeadPlaceholder(leadId, salesAdvisorId);
+        if (dto == null) {
+            return ResponseEntity.notFound().build();
+        }
         return ResponseEntity.ok(dto);
     }
 

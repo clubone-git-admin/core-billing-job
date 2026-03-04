@@ -367,6 +367,23 @@ public class CrmLeadService {
         return new CrmLeadRelatedDto(convertedContact, convertedOpportunity, relatedCases, relatedAccount);
     }
 
+    /**
+     * Placeholder API: brand name (org), lead first/last name, sales advisor name and title.
+     * Returns null if lead does not exist.
+     */
+    public CrmLeadPlaceholderDto getLeadPlaceholder(UUID leadId, UUID salesAdvisorId) {
+        if (leadId == null) return null;
+        Map<String, Object> row = repository.findLeadPlaceholderData(leadId, salesAdvisorId);
+        if (row == null) return null;
+        return new CrmLeadPlaceholderDto(
+                asString(row.get("brand_name")),
+                asString(row.get("first_name")),
+                asString(row.get("last_name")),
+                asString(row.get("sales_advisor_name")),
+                asString(row.get("sales_advisor_title"))
+        );
+    }
+
     private void validateCreateRequest(CrmLeadUpsertRequest request) {
         if (request == null) {
             throw new IllegalArgumentException("Request body is required");

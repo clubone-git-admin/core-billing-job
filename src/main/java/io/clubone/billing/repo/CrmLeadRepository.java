@@ -654,6 +654,33 @@ public class CrmLeadRepository {
         return jdbc.queryForList(sql, params.toArray());
     }
 
+    /**
+     * Placeholder API: brand name (org), lead first/last name, sales advisor display name and role title.
+     * Uses common.organization_client, crm.leads, access.access_user, access.access_application_user,
+     * access.access_user_role_location, access.access_role.
+     */
+    public Map<String, Object> findLeadPlaceholderData(UUID leadId, UUID salesAdvisorId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+            SELECT
+                oc.name AS brand_name,
+                l.first_name,
+                l.last_name,
+                TRIM(COALESCE(u.first_name, '') || ' ' || COALESCE(u.last_name, '')) AS sales_advisor_name,
+                (SELECT r.name
+                 FROM "access".access_application_user aau
+                 JOIN "access".access_user_role_location aurl ON aurl.application_user_id = aau.application_user_id
+                 JOIN "access".access_role r ON r.role_id = aurl.role_id AND r.is_active = true
+                 WHERE aau.user_id = ?
+                   AND aau.is_active = true
+                 LIMIT 1) AS sales_advisor_title
+            FROM crm.leads l
+            JOIN common.organization_client oc ON oc.org_client_id = l.org_client_id
+            LEFT JOIN "access".access_user u ON u.user_id = ?
+            WHERE l.lead_id = ?
+            """, salesAdvisorId, salesAdvisorId, leadId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
     public static String toIsoString(Object value) {
         if (value == null) {
             return null;
