@@ -78,6 +78,12 @@ public class CrmLookupController {
         return ResponseEntity.ok(lookupService.getUsers());
     }
 
+    @GetMapping("/contact-lifecycles")
+    public ResponseEntity<List<CrmLookupItemDto>> getContactLifecycles() {
+        log.debug("Getting CRM contact lifecycles");
+        return ResponseEntity.ok(lookupService.getContactLifecycles());
+    }
+
     @GetMapping("/countries")
     public ResponseEntity<List<CrmLookupItemDto>> getCountries() {
         log.debug("Getting CRM countries");

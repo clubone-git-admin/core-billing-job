@@ -137,14 +137,18 @@ public class CrmAttachmentRepository {
     }
 
     /**
-     * Fetch storage_path and file_name for an attachment that belongs to the given lead (for download URL). Excludes deleted.
+     * Fetch storage_path and file_name for an attachment that belongs to the given entity (lead or contact). Excludes deleted.
      */
     public Map<String, Object> findStoragePathAndFileNameByLead(UUID orgClientId, UUID leadId, UUID attachmentId) {
+        return findStoragePathAndFileNameByEntity(orgClientId, leadId, attachmentId);
+    }
+
+    public Map<String, Object> findStoragePathAndFileNameByEntity(UUID orgClientId, UUID entityId, UUID attachmentId) {
         List<Map<String, Object>> list = jdbc.queryForList("""
             SELECT att.storage_path, att.file_name
             FROM crm.attachment att
             WHERE att.org_client_id = ? AND att.entity_id = ? AND att.attachment_id = ? AND COALESCE(att.is_deleted, false) = false
-            """, orgClientId, leadId, attachmentId);
+            """, orgClientId, entityId, attachmentId);
         return list.isEmpty() ? null : list.get(0);
     }
 

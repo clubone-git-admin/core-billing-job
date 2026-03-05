@@ -151,6 +151,10 @@ public class CrmLookupService {
         return toLookupItems(repository.getEmailTemplates(getOrgClientId()));
     }
 
+    public List<CrmLookupItemDto> getContactLifecycles() {
+        return toLookupItems(repository.getContactLifecycles(getOrgClientId()));
+    }
+
     private UUID getOrgClientId() {
         return DEFAULT_ORG_CLIENT_ID;
     }

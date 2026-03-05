@@ -284,6 +284,15 @@ public class CrmLookupRepository {
             """, orgClientId);
     }
 
+    public List<Map<String, Object>> getContactLifecycles(UUID orgClientId) {
+        return jdbc.queryForList("""
+            SELECT code, display_name
+            FROM crm.lu_contact_lifecycle
+            WHERE org_client_id = ? AND is_active = true
+            ORDER BY display_order, display_name
+            """, orgClientId);
+    }
+
     public List<Map<String, Object>> getEmptyLookup() {
         return Collections.emptyList();
     }

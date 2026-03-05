@@ -119,11 +119,13 @@ public class CrmLeadRepository {
      */
     public Map<String, Object> findLeadRowForConvert(UUID orgClientId, UUID leadId) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
-            SELECT 
+            SELECT
                 l.lead_id, l.org_client_id, l.first_name, l.last_name, l.full_name,
                 l.email, l.phone, l.salutation_id, l.home_location_id, l.owner_user_id,
                 l.address, l.city, l.state_id, l.zip_code, l.country_id,
-                l.lead_type_id, l.gender_id, l.referred_by_contact_id
+                l.lead_type_id, l.gender_id, l.referred_by_contact_id,
+                l.account_id, l.date_of_birth,
+                l.consent_to_contact, l.consent_to_marketing, l.has_opt_out_sms, l.has_opt_out_email
             FROM crm.leads l
             WHERE l.org_client_id = ? AND l.lead_id = ?
             """, orgClientId, leadId);

@@ -5,6 +5,7 @@ import io.clubone.billing.api.dto.crm.CrmAttachmentDownloadUrlDto;
 import io.clubone.billing.api.dto.crm.CrmAttachmentListResponse;
 import io.clubone.billing.repo.CrmActivityRepository;
 import io.clubone.billing.repo.CrmAttachmentRepository;
+import io.clubone.billing.repo.CrmContactRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -34,13 +35,16 @@ public class CrmAttachmentService {
 
     private final CrmAttachmentRepository attachmentRepository;
     private final CrmActivityRepository activityRepository;
+    private final CrmContactRepository contactRepository;
     private final S3Service s3Service;
 
     public CrmAttachmentService(CrmAttachmentRepository attachmentRepository,
                                 CrmActivityRepository activityRepository,
+                                CrmContactRepository contactRepository,
                                 S3Service s3Service) {
         this.attachmentRepository = attachmentRepository;
         this.activityRepository = activityRepository;
+        this.contactRepository = contactRepository;
         this.s3Service = s3Service;
     }
 
@@ -129,7 +133,7 @@ public class CrmAttachmentService {
         if (!activityRepository.leadExists(getOrgClientId(), leadId)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Lead not found: " + leadId);
         }
-        java.util.Map<String, Object> att = attachmentRepository.findStoragePathAndFileNameByLead(
+        java.util.Map<String, Object> att = attachmentRepository.findStoragePathAndFileNameByEntity(
                 getOrgClientId(), leadId, attachmentId);
         if (att == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Attachment not found: " + attachmentId);
@@ -186,5 +190,93 @@ public class CrmAttachmentService {
 
     private UUID getOrgClientId() {
         return DEFAULT_ORG_CLIENT_ID;
+    }
+
+    // --- Contact attachments (entity_type = CONTACT, entity_id = contactId) ---
+
+    public CrmAttachmentListResponse listAttachmentsForContact(UUID contactId, String search, String category, Integer limit, Integer offset) {
+        if (!contactRepository.contactExists(getOrgClientId(), contactId)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Contact not found: " + contactId);
+        }
+        UUID entityTypeId = attachmentRepository.resolveEntityTypeIdByCode(getOrgClientId(), "CONTACT");
+        if (entityTypeId == null) {
+            return new CrmAttachmentListResponse(List.of(), 0L);
+        }
+        int limitVal = limit != null && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
+        int offsetVal = offset != null && offset >= 0 ? offset : 0;
+        List<Map<String, Object>> rows = attachmentRepository.findAttachmentsByLead(
+                getOrgClientId(), entityTypeId, contactId, search, category, limitVal, offsetVal);
+        long total = attachmentRepository.countAttachmentsByLead(
+                getOrgClientId(), entityTypeId, contactId, search, category);
+        List<CrmAttachmentDto> attachments = rows.stream().map(this::mapToDto).toList();
+        return new CrmAttachmentListResponse(attachments, total);
+    }
+
+    @Transactional
+    public CrmAttachmentDto uploadAttachmentForContact(UUID contactId, MultipartFile file, String description, String category) {
+        if (file == null || file.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "file is required");
+        }
+        if (!contactRepository.contactExists(getOrgClientId(), contactId)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Contact not found: " + contactId);
+        }
+        UUID entityTypeId = attachmentRepository.resolveEntityTypeIdByCode(getOrgClientId(), "CONTACT");
+        if (entityTypeId == null) {
+            throw new IllegalStateException("Entity type CONTACT not found");
+        }
+        String fileName = file.getOriginalFilename();
+        if (fileName == null || fileName.isBlank()) fileName = "unnamed";
+        long size = file.getSize();
+        if (size <= 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "file size must be greater than 0");
+        }
+        String contentType = file.getContentType();
+        if (contentType == null) contentType = "application/octet-stream";
+        String fileExtension = (fileName.lastIndexOf('.') > 0 && fileName.lastIndexOf('.') < fileName.length() - 1)
+                ? fileName.substring(fileName.lastIndexOf('.') + 1) : null;
+        byte[] bytes;
+        try {
+            bytes = file.getBytes();
+        } catch (Exception e) {
+            log.warn("Failed to read file bytes: {}", e.getMessage());
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Failed to read file");
+        }
+        String storagePath = s3Service.uploadToS3(bytes, fileName, contentType, S3_KEY_PREFIX_CRM_ATTACHMENTS);
+        UUID attachmentId = attachmentRepository.insert(
+                getOrgClientId(), entityTypeId, contactId,
+                fileName, size, contentType, fileExtension,
+                "S3", storagePath,
+                description, category, 1,
+                SYSTEM_USER_ID, false, SYSTEM_USER_ID);
+        Map<String, Object> row = attachmentRepository.findById(getOrgClientId(), attachmentId);
+        return row != null ? mapToDto(row) : null;
+    }
+
+    public void deleteAttachmentForContact(UUID contactId, UUID attachmentId) {
+        if (!contactRepository.contactExists(getOrgClientId(), contactId)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Contact not found: " + contactId);
+        }
+        boolean deleted = attachmentRepository.softDelete(getOrgClientId(), contactId, attachmentId, SYSTEM_USER_ID);
+        if (!deleted) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Attachment not found: " + attachmentId);
+        }
+    }
+
+    public CrmAttachmentDownloadUrlDto getDownloadUrlForContact(UUID contactId, UUID attachmentId) {
+        if (!contactRepository.contactExists(getOrgClientId(), contactId)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Contact not found: " + contactId);
+        }
+        Map<String, Object> att = attachmentRepository.findStoragePathAndFileNameByEntity(
+                getOrgClientId(), contactId, attachmentId);
+        if (att == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Attachment not found: " + attachmentId);
+        }
+        String storagePath = asString(att.get("storage_path"));
+        String fileName = asString(att.get("file_name"));
+        if (storagePath == null || storagePath.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Attachment has no storage path");
+        }
+        S3Service.PresignedResult result = s3Service.generatePresignedDownloadUrl(storagePath, PRESIGNED_URL_EXPIRY_MINUTES);
+        return new CrmAttachmentDownloadUrlDto(result.url(), result.expiresAt().toString(), fileName != null ? fileName : "");
     }
 }

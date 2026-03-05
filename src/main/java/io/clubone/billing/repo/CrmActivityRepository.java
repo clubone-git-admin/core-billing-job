@@ -95,6 +95,13 @@ public class CrmActivityRepository {
         return Boolean.TRUE.equals(exists);
     }
 
+    public boolean contactExists(UUID orgClientId, UUID contactId) {
+        Boolean exists = jdbc.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM crm.contact WHERE org_client_id = ? AND contact_id = ?)",
+                Boolean.class, orgClientId, contactId);
+        return Boolean.TRUE.equals(exists);
+    }
+
     public List<Map<String, Object>> findActivitiesByLead(UUID orgClientId, UUID leadId, UUID entityTypeId,
                                                           String typeCode, String statusCode, String outcomeCode,
                                                           Timestamp from, Timestamp to, String search,

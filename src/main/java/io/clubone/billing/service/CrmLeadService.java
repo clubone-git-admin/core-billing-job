@@ -222,7 +222,12 @@ public class CrmLeadService {
 
         UUID contactId = leadConvertRepository.insertContact(
                 orgId, clientRoleId, contactLifecycleId, (UUID) lead.get("salutation_id"),
-                firstName, lastName, fullName, asString(lead.get("email")), asString(lead.get("phone")), SYSTEM_USER_ID);
+                firstName, lastName, fullName, asString(lead.get("email")), asString(lead.get("phone")),
+                (UUID) lead.get("home_location_id"), (UUID) lead.get("account_id"), (UUID) lead.get("gender_id"),
+                asString(lead.get("date_of_birth")),
+                asBoolean(lead.get("consent_to_contact")), asBoolean(lead.get("consent_to_marketing")),
+                asBoolean(lead.get("has_opt_out_sms")), asBoolean(lead.get("has_opt_out_email")),
+                SYSTEM_USER_ID);
 
         UUID ownerUserId = (UUID) lead.get("owner_user_id");
         if (ownerUserId == null) {
