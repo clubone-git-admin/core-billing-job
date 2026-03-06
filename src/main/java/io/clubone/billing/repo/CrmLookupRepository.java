@@ -210,6 +210,10 @@ public class CrmLookupRepository {
         return jdbc.queryForList("SELECT code, display_name FROM crm.lu_entity_type WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
     }
 
+    public List<Map<String, Object>> getEntityTypesFull(UUID orgClientId) {
+        return jdbc.queryForList("SELECT entity_type_id, code, display_name FROM crm.lu_entity_type WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
+    }
+
     public List<Map<String, Object>> getCallDirections(UUID orgClientId) {
         return jdbc.queryForList("SELECT code, display_name FROM crm.lu_call_direction WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
     }
@@ -246,12 +250,24 @@ public class CrmLookupRepository {
         return jdbc.queryForList("SELECT code, display_name FROM crm.lu_task_type WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
     }
 
+    public List<Map<String, Object>> getTaskTypesFull(UUID orgClientId) {
+        return jdbc.queryForList("SELECT task_type_id, code, display_name FROM crm.lu_task_type WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
+    }
+
     public List<Map<String, Object>> getTaskStatuses(UUID orgClientId) {
         return jdbc.queryForList("SELECT code, display_name FROM crm.lu_task_status WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
     }
 
+    public List<Map<String, Object>> getTaskStatusesFull(UUID orgClientId) {
+        return jdbc.queryForList("SELECT task_status_id, code, display_name FROM crm.lu_task_status WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
+    }
+
     public List<Map<String, Object>> getTaskPriorities(UUID orgClientId) {
         return jdbc.queryForList("SELECT code, display_name FROM crm.lu_task_priority WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
+    }
+
+    public List<Map<String, Object>> getTaskPrioritiesFull(UUID orgClientId) {
+        return jdbc.queryForList("SELECT task_priority_id, code, display_name FROM crm.lu_task_priority WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
     }
 
     /**
@@ -291,6 +307,50 @@ public class CrmLookupRepository {
             WHERE org_client_id = ? AND is_active = true
             ORDER BY display_order, display_name
             """, orgClientId);
+    }
+
+    public List<Map<String, Object>> getCaseTypes(UUID orgClientId) {
+        return jdbc.queryForList("""
+            SELECT case_type_id, code, display_name
+            FROM crm.lu_case_type
+            WHERE org_client_id = ? AND is_active = true
+            ORDER BY display_order, display_name
+            """, orgClientId);
+    }
+
+    public List<Map<String, Object>> getCaseStatuses(UUID orgClientId) {
+        return jdbc.queryForList("""
+            SELECT case_status_id, code, display_name
+            FROM crm.lu_case_status
+            WHERE org_client_id = ? AND is_active = true
+            ORDER BY display_order, display_name
+            """, orgClientId);
+    }
+
+    public List<Map<String, Object>> getCasePriorities(UUID orgClientId) {
+        return jdbc.queryForList("""
+            SELECT case_priority_id, code, display_name
+            FROM crm.lu_case_priority
+            WHERE org_client_id = ? AND is_active = true
+            ORDER BY display_order, display_name
+            """, orgClientId);
+    }
+
+    public List<Map<String, Object>> getAccountTypes(UUID orgClientId) {
+        return jdbc.queryForList("""
+            SELECT account_type_id, code, display_name
+            FROM crm.lu_account_type
+            WHERE org_client_id = ? AND is_active = true
+            ORDER BY display_order, display_name
+            """, orgClientId);
+    }
+
+    public List<Map<String, Object>> getCampaignTypesFull(UUID orgClientId) {
+        return jdbc.queryForList("SELECT campaign_type_id, code, display_name FROM crm.lu_campaign_type WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
+    }
+
+    public List<Map<String, Object>> getCampaignStatusesFull(UUID orgClientId) {
+        return jdbc.queryForList("SELECT campaign_status_id, code, display_name FROM crm.lu_campaign_status WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
     }
 
     public List<Map<String, Object>> getEmptyLookup() {

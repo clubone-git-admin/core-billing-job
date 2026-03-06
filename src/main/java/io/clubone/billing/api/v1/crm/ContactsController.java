@@ -183,6 +183,16 @@ public class ContactsController {
         return ResponseEntity.ok(response);
     }
 
+    @PostMapping("/contacts/{contactId}/cases")
+    public ResponseEntity<CrmContactCaseDto> createCase(
+            @PathVariable("contactId") UUID contactId,
+            @RequestBody CrmCreateCaseRequest request) {
+        log.info("Creating case for contact: contactId={}", contactId);
+        CrmContactCaseDto dto = contactService.createCase(contactId, request);
+        if (dto == null) return ResponseEntity.badRequest().build();
+        return ResponseEntity.status(HttpStatus.CREATED).body(dto);
+    }
+
     @PatchMapping("/contacts/bulk/owner")
     public ResponseEntity<CrmContactBulkOwnerResponse> bulkChangeOwner(@RequestBody CrmContactBulkOwnerRequest request) {
         log.info("Bulk change owner for {} contacts", request.contactIds() != null ? request.contactIds().size() : 0);

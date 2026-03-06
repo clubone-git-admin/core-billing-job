@@ -1,6 +1,6 @@
 package io.clubone.billing.service;
 
-import io.clubone.billing.api.dto.crm.CrmLookupItemDto;
+import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.repo.CrmLookupRepository;
 import org.springframework.stereotype.Service;
 
@@ -154,6 +154,68 @@ public class CrmLookupService {
     public List<CrmLookupItemDto> getContactLifecycles() {
         return toLookupItems(repository.getContactLifecycles(getOrgClientId()));
     }
+
+    public List<CrmCaseTypeLookupDto> getCaseTypes() {
+        return repository.getCaseTypes(getOrgClientId()).stream()
+                .map(r -> new CrmCaseTypeLookupDto(asStr(r.get("case_type_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
+                .collect(Collectors.toList());
+    }
+
+    public List<CrmCaseStatusLookupDto> getCaseStatuses() {
+        return repository.getCaseStatuses(getOrgClientId()).stream()
+                .map(r -> new CrmCaseStatusLookupDto(asStr(r.get("case_status_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
+                .collect(Collectors.toList());
+    }
+
+    public List<CrmCasePriorityLookupDto> getCasePriorities() {
+        return repository.getCasePriorities(getOrgClientId()).stream()
+                .map(r -> new CrmCasePriorityLookupDto(asStr(r.get("case_priority_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
+                .collect(Collectors.toList());
+    }
+
+    public List<CrmAccountTypeLookupDto> getAccountTypes() {
+        return repository.getAccountTypes(getOrgClientId()).stream()
+                .map(r -> new CrmAccountTypeLookupDto(asStr(r.get("account_type_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
+                .collect(Collectors.toList());
+    }
+
+    public List<CrmTaskTypeLookupDto> getTaskTypesFull() {
+        return repository.getTaskTypesFull(getOrgClientId()).stream()
+                .map(r -> new CrmTaskTypeLookupDto(asStr(r.get("task_type_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
+                .collect(Collectors.toList());
+    }
+
+    public List<CrmTaskStatusLookupDto> getTaskStatusesFull() {
+        return repository.getTaskStatusesFull(getOrgClientId()).stream()
+                .map(r -> new CrmTaskStatusLookupDto(asStr(r.get("task_status_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
+                .collect(Collectors.toList());
+    }
+
+    public List<CrmTaskPriorityLookupDto> getTaskPrioritiesFull() {
+        return repository.getTaskPrioritiesFull(getOrgClientId()).stream()
+                .map(r -> new CrmTaskPriorityLookupDto(asStr(r.get("task_priority_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
+                .collect(Collectors.toList());
+    }
+
+    public List<CrmEntityTypeLookupDto> getEntityTypesFull() {
+        return repository.getEntityTypesFull(getOrgClientId()).stream()
+                .map(r -> new CrmEntityTypeLookupDto(asStr(r.get("entity_type_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
+                .collect(Collectors.toList());
+    }
+
+    public List<CrmCampaignTypeLookupDto> getCampaignTypesFull() {
+        return repository.getCampaignTypesFull(getOrgClientId()).stream()
+                .map(r -> new CrmCampaignTypeLookupDto(asStr(r.get("campaign_type_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
+                .collect(Collectors.toList());
+    }
+
+    public List<CrmCampaignStatusLookupDto> getCampaignStatusesFull() {
+        return repository.getCampaignStatusesFull(getOrgClientId()).stream()
+                .map(r -> new CrmCampaignStatusLookupDto(asStr(r.get("campaign_status_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
+                .collect(Collectors.toList());
+    }
+
+    private static String asStr(Object v) { return v == null ? null : v.toString(); }
 
     private UUID getOrgClientId() {
         return DEFAULT_ORG_CLIENT_ID;

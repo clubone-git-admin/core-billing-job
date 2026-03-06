@@ -167,6 +167,51 @@ public class CrmContactService {
         return new CrmContactCasesResponse(cases, total);
     }
 
+    /**
+     * Create a case linked to the contact. contact_id is set from path; case_number from DB trigger.
+     * Returns created case in same shape as GET cases list item, or null if validation fails.
+     */
+    @Transactional
+    public CrmContactCaseDto createCase(UUID contactId, CrmCreateCaseRequest request) {
+        if (contactId == null || request == null) return null;
+        UUID orgId = getOrgClientId();
+        if (!contactRepository.contactExists(orgId, contactId)) return null;
+        // Required: subject (non-empty, max 255)
+        String subject = request.subject();
+        if (subject == null || subject.isBlank()) return null;
+        if (subject.length() > 255) return null;
+        // Required: case_type_id and must exist
+        if (request.caseTypeId() == null || request.caseTypeId().isBlank()) return null;
+        UUID caseTypeId = UUID.fromString(request.caseTypeId());
+        if (!contactRepository.caseTypeExists(orgId, caseTypeId)) return null;
+        // Optional: case_status_id, case_priority_id — if present must exist
+        UUID caseStatusId = null;
+        if (request.caseStatusId() != null && !request.caseStatusId().isBlank()) {
+            caseStatusId = UUID.fromString(request.caseStatusId());
+            if (!contactRepository.caseStatusExists(orgId, caseStatusId)) return null;
+        } else {
+            caseStatusId = contactRepository.resolveDefaultCaseStatusIdByCode(orgId, "NEW");
+            if (caseStatusId == null) caseStatusId = contactRepository.resolveDefaultCaseStatusIdByCode(orgId, "OPEN");
+        }
+        UUID casePriorityId = null;
+        if (request.casePriorityId() != null && !request.casePriorityId().isBlank()) {
+            casePriorityId = UUID.fromString(request.casePriorityId());
+            if (!contactRepository.casePriorityExists(orgId, casePriorityId)) return null;
+        }
+        UUID accountId = parseUuid(request.accountId());
+        UUID opportunityId = parseUuid(request.opportunityId());
+        UUID ownerUserId = parseUuid(request.ownerUserId());
+        UUID createdCaseId = contactRepository.insertCase(orgId, contactId, caseTypeId, caseStatusId, casePriorityId,
+                accountId, opportunityId, ownerUserId, request.channelCode(), subject, request.description(), request.internalNotes(), SYSTEM_USER_ID);
+        Map<String, Object> row = contactRepository.findCaseByIdAndContact(orgId, contactId, createdCaseId);
+        return row != null ? mapToCase(row) : null;
+    }
+
+    private static UUID parseUuid(String s) {
+        if (s == null || s.isBlank()) return null;
+        try { return UUID.fromString(s); } catch (Exception e) { return null; }
+    }
+
     private CrmContactSummaryDto mapToSummary(Map<String, Object> r) {
         return new CrmContactSummaryDto(
                 asString(r.get("contact_id")),

@@ -1,6 +1,6 @@
 package io.clubone.billing.api.v1.crm;
 
-import io.clubone.billing.api.dto.crm.CrmLookupItemDto;
+import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.service.CrmLookupService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -137,8 +137,8 @@ public class CrmLookupController {
     }
 
     @GetMapping("/entity-types")
-    public ResponseEntity<List<CrmLookupItemDto>> getEntityTypes() {
-        return ResponseEntity.ok(lookupService.getEntityTypes());
+    public ResponseEntity<List<CrmEntityTypeLookupDto>> getEntityTypes() {
+        return ResponseEntity.ok(lookupService.getEntityTypesFull());
     }
 
     @GetMapping("/call-directions")
@@ -183,18 +183,18 @@ public class CrmLookupController {
     }
 
     @GetMapping("/task-types")
-    public ResponseEntity<List<CrmLookupItemDto>> getTaskTypes() {
-        return ResponseEntity.ok(lookupService.getTaskTypes());
+    public ResponseEntity<List<CrmTaskTypeLookupDto>> getTaskTypes() {
+        return ResponseEntity.ok(lookupService.getTaskTypesFull());
     }
 
     @GetMapping("/task-statuses")
-    public ResponseEntity<List<CrmLookupItemDto>> getTaskStatuses() {
-        return ResponseEntity.ok(lookupService.getTaskStatuses());
+    public ResponseEntity<List<CrmTaskStatusLookupDto>> getTaskStatuses() {
+        return ResponseEntity.ok(lookupService.getTaskStatusesFull());
     }
 
     @GetMapping("/task-priorities")
-    public ResponseEntity<List<CrmLookupItemDto>> getTaskPriorities() {
-        return ResponseEntity.ok(lookupService.getTaskPriorities());
+    public ResponseEntity<List<CrmTaskPriorityLookupDto>> getTaskPriorities() {
+        return ResponseEntity.ok(lookupService.getTaskPrioritiesFull());
     }
 
     @GetMapping("/email-from-addresses")
@@ -207,6 +207,42 @@ public class CrmLookupController {
     public ResponseEntity<List<CrmLookupItemDto>> getEmailTemplates() {
         log.debug("Getting CRM email templates");
         return ResponseEntity.ok(lookupService.getEmailTemplates());
+    }
+
+    @GetMapping("/case-types")
+    public ResponseEntity<List<CrmCaseTypeLookupDto>> getCaseTypes() {
+        log.debug("Getting CRM case types");
+        return ResponseEntity.ok(lookupService.getCaseTypes());
+    }
+
+    @GetMapping("/case-statuses")
+    public ResponseEntity<List<CrmCaseStatusLookupDto>> getCaseStatuses() {
+        log.debug("Getting CRM case statuses");
+        return ResponseEntity.ok(lookupService.getCaseStatuses());
+    }
+
+    @GetMapping("/case-priorities")
+    public ResponseEntity<List<CrmCasePriorityLookupDto>> getCasePriorities() {
+        log.debug("Getting CRM case priorities");
+        return ResponseEntity.ok(lookupService.getCasePriorities());
+    }
+
+    @GetMapping("/account-types")
+    public ResponseEntity<List<CrmAccountTypeLookupDto>> getAccountTypes() {
+        log.debug("Getting CRM account types");
+        return ResponseEntity.ok(lookupService.getAccountTypes());
+    }
+
+    @GetMapping("/campaign-types")
+    public ResponseEntity<List<CrmCampaignTypeLookupDto>> getCampaignTypes() {
+        log.debug("Getting CRM campaign types");
+        return ResponseEntity.ok(lookupService.getCampaignTypesFull());
+    }
+
+    @GetMapping("/campaign-statuses")
+    public ResponseEntity<List<CrmCampaignStatusLookupDto>> getCampaignStatuses() {
+        log.debug("Getting CRM campaign statuses");
+        return ResponseEntity.ok(lookupService.getCampaignStatusesFull());
     }
 
 }
