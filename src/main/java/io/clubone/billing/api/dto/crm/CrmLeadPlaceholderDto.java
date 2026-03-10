@@ -4,14 +4,18 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
- * Placeholder API response: brand, lead name, sales advisor name and title.
+ * Placeholder API response: brand, lead name, completion link, from (sales advisor), sales advisor name and title.
+ * Keys match template placeholders: brandName, firstName, lastName, completionLink, fromName, fromNameTitle, salesAdvisorName, salesAdvisorTitle.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record CrmLeadPlaceholderDto(
-        @JsonProperty("brand_name") String brandName,
-        @JsonProperty("first_name") String firstName,
-        @JsonProperty("last_name") String lastName,
-        @JsonProperty("sales_advisor_name") String salesAdvisorName,
-        @JsonProperty("sales_advisor_title") String salesAdvisorTitle
+        @JsonProperty("brandName") String brandName,
+        @JsonProperty("firstName") String firstName,
+        @JsonProperty("lastName") String lastName,
+        @JsonProperty("completionLink") String completionLink,
+        @JsonProperty("fromName") String fromName,
+        @JsonProperty("fromNameTitle") String fromNameTitle,
+        @JsonProperty("salesAdvisorName") String salesAdvisorName,
+        @JsonProperty("salesAdvisorTitle") String salesAdvisorTitle
 ) {
 }

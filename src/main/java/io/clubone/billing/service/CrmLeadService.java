@@ -7,6 +7,7 @@ import io.clubone.billing.repo.CrmLeadRepository;
 import io.clubone.billing.repo.LeadConvertRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -32,11 +33,14 @@ public class CrmLeadService {
     private final CrmLeadRepository repository;
     private final LeadConvertRepository leadConvertRepository;
     private final ObjectMapper objectMapper;
+    private final String completionLinkBase;
 
-    public CrmLeadService(CrmLeadRepository repository, LeadConvertRepository leadConvertRepository, ObjectMapper objectMapper) {
+    public CrmLeadService(CrmLeadRepository repository, LeadConvertRepository leadConvertRepository, ObjectMapper objectMapper,
+                           @Value("${clubone.crm.completion-link-base:}") String completionLinkBase) {
         this.repository = repository;
         this.leadConvertRepository = leadConvertRepository;
         this.objectMapper = objectMapper;
+        this.completionLinkBase = completionLinkBase != null ? completionLinkBase : "";
     }
 
     public CrmLeadListResponse listLeads(String statusFilter, String search, Integer limit, Integer offset) {
@@ -373,20 +377,36 @@ public class CrmLeadService {
     }
 
     /**
-     * Placeholder API: brand name (org), lead first/last name, sales advisor name and title.
+     * Placeholder API: brandName, firstName, lastName, completionLink, fromName, fromNameTitle, salesAdvisorName, salesAdvisorTitle.
      * Returns null if lead does not exist.
      */
     public CrmLeadPlaceholderDto getLeadPlaceholder(UUID leadId, UUID salesAdvisorId) {
         if (leadId == null) return null;
         Map<String, Object> row = repository.findLeadPlaceholderData(leadId, salesAdvisorId);
         if (row == null) return null;
+        String brandName = asString(row.get("brand_name"));
+        String firstName = asString(row.get("first_name"));
+        String lastName = asString(row.get("last_name"));
+        String salesAdvisorName = asString(row.get("sales_advisor_name"));
+        String salesAdvisorTitle = asString(row.get("sales_advisor_title"));
+        String completionLink = buildCompletionLink(leadId);
         return new CrmLeadPlaceholderDto(
-                asString(row.get("brand_name")),
-                asString(row.get("first_name")),
-                asString(row.get("last_name")),
-                asString(row.get("sales_advisor_name")),
-                asString(row.get("sales_advisor_title"))
+                brandName,
+                firstName,
+                lastName,
+                completionLink,
+                salesAdvisorName,  // fromName = sales advisor name
+                salesAdvisorTitle, // fromNameTitle = sales advisor title
+                salesAdvisorName,
+                salesAdvisorTitle
         );
+    }
+
+    private String buildCompletionLink(UUID leadId) {
+        if (completionLinkBase == null || completionLinkBase.isBlank()) return null;
+        String base = completionLinkBase.trim();
+        String sep = base.contains("?") ? "&" : "?";
+        return base + sep + "lead_id=" + leadId;
     }
 
     private void validateCreateRequest(CrmLeadUpsertRequest request) {

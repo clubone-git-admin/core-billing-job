@@ -286,6 +286,34 @@ public class CrmLookupRepository {
     }
 
     /**
+     * SMS identities (code/display_name). code = sms_identity_id, display_name = sender_name or "sender_id (sender_name)".
+     */
+    public List<Map<String, Object>> getSmsIdentities(UUID orgClientId) {
+        return jdbc.queryForList("""
+            SELECT
+                sms_identity_id::text AS code,
+                COALESCE(NULLIF(TRIM(sender_name), ''), sender_id) AS display_name
+            FROM crm.lu_sms_identity
+            WHERE org_client_id = ? AND is_active = true
+            ORDER BY display_order NULLS LAST, sender_name, sender_id
+            """, orgClientId);
+    }
+
+    /**
+     * WhatsApp identities (code/display_name). code = whatsapp_identity_id, display_name = display_name or phone_number.
+     */
+    public List<Map<String, Object>> getWhatsappIdentities(UUID orgClientId) {
+        return jdbc.queryForList("""
+            SELECT
+                whatsapp_identity_id::text AS code,
+                COALESCE(NULLIF(TRIM(display_name), ''), phone_number) AS display_name
+            FROM crm.lu_whatsapp_identity
+            WHERE org_client_id = ? AND is_active = true
+            ORDER BY display_order NULLS LAST, display_name, phone_number
+            """, orgClientId);
+    }
+
+    /**
      * Email templates (notification.notification_template).
      * code = template_code, display_name = template_name.
      */

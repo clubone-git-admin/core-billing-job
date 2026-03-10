@@ -151,6 +151,14 @@ public class CrmLookupService {
         return toLookupItems(repository.getEmailTemplates(getOrgClientId()));
     }
 
+    public List<CrmLookupItemDto> getSmsIdentities() {
+        return toLookupItems(repository.getSmsIdentities(getOrgClientId()));
+    }
+
+    public List<CrmLookupItemDto> getWhatsappIdentities() {
+        return toLookupItems(repository.getWhatsappIdentities(getOrgClientId()));
+    }
+
     public List<CrmLookupItemDto> getContactLifecycles() {
         return toLookupItems(repository.getContactLifecycles(getOrgClientId()));
     }

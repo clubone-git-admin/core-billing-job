@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Request for POST /api/crm/leads/{lead_id}/activities.
@@ -53,11 +54,33 @@ public record CrmLogActivityRequest(
         @JsonProperty("to_phone") String toPhone,
         @JsonProperty("body") String body,
         @JsonProperty("sms_template_id") String smsTemplateId,
-        @JsonProperty("whatsapp_template_id") String whatsappTemplateId
+        @JsonProperty("sms_identity_id") String smsIdentityId,
+        @JsonProperty("whatsapp_template_id") String whatsappTemplateId,
+        @JsonProperty("whatsapp_identity_id") String whatsappIdentityId,
+        // Notification (for EMAIL activity → notification job/send)
+        @JsonProperty("notification_template_code") String notificationTemplateCode,
+        /** Dynamic key-value map for notification common params (e.g. brandName, clubName, fromEmail, etc.). */
+        @JsonProperty("common_params") Map<String, Object> commonParams,
+        @JsonProperty("recipients") List<NotificationRecipientDto> recipients
 ) {
     public record CrmEventAttendeeDto(
             @JsonProperty("attendee_name") String attendeeName,
             @JsonProperty("attendee_email") String attendeeEmail,
             @JsonProperty("rsvp_status_code") String rsvpStatusCode
+    ) {}
+
+    /** Recipient for notification job (from request body). params is dynamic by template placeholders. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record NotificationRecipientDto(
+            @JsonProperty("client_id") String clientId,
+            @JsonProperty("to") NotificationRecipientToDto to,
+            /** Dynamic key-value map for template placeholders (e.g. firstName, lastName, displayName, expiryDate, etc.). */
+            @JsonProperty("params") Map<String, Object> params
+    ) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record NotificationRecipientToDto(
+            @JsonProperty("email") String email,
+            @JsonProperty("phone") String phone
     ) {}
 }

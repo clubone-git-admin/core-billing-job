@@ -209,6 +209,18 @@ public class CrmLookupController {
         return ResponseEntity.ok(lookupService.getEmailTemplates());
     }
 
+    @GetMapping("/sms-identities")
+    public ResponseEntity<List<CrmLookupItemDto>> getSmsIdentities() {
+        log.debug("Getting CRM SMS identities");
+        return ResponseEntity.ok(lookupService.getSmsIdentities());
+    }
+
+    @GetMapping("/whatsapp-identities")
+    public ResponseEntity<List<CrmLookupItemDto>> getWhatsappIdentities() {
+        log.debug("Getting CRM WhatsApp identities");
+        return ResponseEntity.ok(lookupService.getWhatsappIdentities());
+    }
+
     @GetMapping("/case-types")
     public ResponseEntity<List<CrmCaseTypeLookupDto>> getCaseTypes() {
         log.debug("Getting CRM case types");

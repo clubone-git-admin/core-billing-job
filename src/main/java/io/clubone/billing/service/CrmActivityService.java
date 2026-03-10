@@ -1,6 +1,7 @@
 package io.clubone.billing.service;
 
 import io.clubone.billing.api.dto.crm.*;
+import io.clubone.billing.api.dto.notification.NotificationJobRequest;
 import io.clubone.billing.repo.CrmActivityRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -25,11 +27,17 @@ public class CrmActivityService {
     private static final UUID SYSTEM_USER_ID = UUID.fromString("53fbd2ad-fe27-4a3c-b37b-497d74ceb19d");
     private static final int DEFAULT_PAGE_SIZE = 50;
     private static final int MAX_PAGE_SIZE = 500;
+    private static final String NOTIFICATION_ORG_CLIENT_ID = "f21d42c1-5ca2-4c98-acac-4e9a1e081fc5";
+    private static final String NOTIFICATION_DEFAULT_TEMPLATE = "EXPIRING_MEMBER_TEMPLATE";
 
     private final CrmActivityRepository activityRepository;
+    private final CrmLeadService leadService;
+    private final NotificationClient notificationClient;
 
-    public CrmActivityService(CrmActivityRepository activityRepository) {
+    public CrmActivityService(CrmActivityRepository activityRepository, CrmLeadService leadService, NotificationClient notificationClient) {
         this.activityRepository = activityRepository;
+        this.leadService = leadService;
+        this.notificationClient = notificationClient;
     }
 
     public CrmLeadActivitiesResponse getLeadActivities(UUID leadId, String typeCode, String statusCode, String outcomeCode,
@@ -161,6 +169,7 @@ public class CrmActivityService {
                     request.emailSubject(), request.emailBody(),
                     emailTemplateId, emailIdentityId,
                     SYSTEM_USER_ID);
+            sendNotificationJobForLeadEmail(leadId, request);
         } else if ("EVENT".equals(typeCode)) {
             if (request.eventPurposeId() == null || request.eventPurposeId().isBlank())
                 throw new IllegalArgumentException("event_purpose_id is required for EVENT activity");
@@ -401,46 +410,7 @@ public class CrmActivityService {
         List<CrmBulkActivitiesResponse.CrmBulkActivityErrorDto> errors = new ArrayList<>();
         UUID orgId = getOrgClientId();
 
-        CrmLogActivityRequest single = new CrmLogActivityRequest(
-                request.activityTypeCode(),
-                request.activityStatusCode(),
-                request.activityVisibilityCode(),
-                request.activityOutcomeCode(),
-                request.subject(),
-                request.description(),
-                request.notes(),
-                request.startDateTime(),
-                request.endDateTime(),
-                request.assignedToUserId(),
-                request.callDirectionCode(),
-                request.callResultCode(),
-                request.callDurationSeconds(),
-                null, // email_to
-                null, // email_cc
-                null, // email_bcc
-                null, // email_subject
-                null, // email_body
-                null, // email_identity_id
-                null, // email_template_id
-                null, // event_purpose_id
-                null, // event_status_id
-                null, // location
-                null, // event_status_code
-                null, // location_id
-                null, // meeting_purpose
-                null, // attendees
-                null, // task_type_code
-                null, // task_status_code
-                null, // task_priority_code
-                null, // due_date
-                null, // due_time
-                null, // reminder_set
-                null, // reminder_start_date_time
-                null, // to_phone
-                null, // body
-                null, // sms_template_id
-                null  // whatsapp_template_id
-        );
+        CrmLogActivityRequest single = toLogActivityRequest(request);
 
         for (String leadIdStr : request.leadIds()) {
             try {
@@ -534,6 +504,106 @@ public class CrmActivityService {
         if (value == null) return null;
         if (value instanceof Number n) return n.intValue();
         try { return Integer.parseInt(value.toString()); } catch (Exception e) { return null; }
+    }
+
+    /**
+     * For EMAIL activity: call notification service job/send. Uses common_params and recipients from request body when provided;
+     * otherwise falls back to building recipients from email_to and lead data (commonParams then null).
+     */
+    private void sendNotificationJobForLeadEmail(UUID leadId, CrmLogActivityRequest request) {
+        String templateCode = request.notificationTemplateCode() != null && !request.notificationTemplateCode().isBlank()
+                ? request.notificationTemplateCode()
+                : NOTIFICATION_DEFAULT_TEMPLATE;
+
+        List<NotificationJobRequest.Recipient> recipients = mapRecipientsFromRequest(request, leadId);
+        if (recipients == null || recipients.isEmpty()) {
+            log.warn("Notification job skipped for lead {}: no recipients (provide recipients in request or email_to/lead email)", leadId);
+            return;
+        }
+
+        Map<String, Object> commonParams = request.commonParams() != null && !request.commonParams().isEmpty()
+                ? request.commonParams()
+                : null;
+        NotificationJobRequest jobRequest = new NotificationJobRequest(
+                NOTIFICATION_ORG_CLIENT_ID,
+                NOTIFICATION_ORG_CLIENT_ID,
+                "PROMOTIONAL",
+                "NORMAL",
+                List.of("EMAIL"),
+                new NotificationJobRequest.TemplateSpec(templateCode),
+                commonParams,
+                recipients
+        );
+        notificationClient.sendJob(jobRequest);
+    }
+
+    private List<NotificationJobRequest.Recipient> mapRecipientsFromRequest(CrmLogActivityRequest request, UUID leadId) {
+        if (request.recipients() != null && !request.recipients().isEmpty()) {
+            return request.recipients().stream()
+                    .filter(r -> r != null && r.to() != null)
+                    .map(r -> new NotificationJobRequest.Recipient(
+                            r.clientId(),
+                            new NotificationJobRequest.RecipientTo(r.to().email(), r.to().phone()),
+                            r.params() != null && !r.params().isEmpty() ? r.params() : null
+                    ))
+                    .toList();
+        }
+        CrmLeadDetailDto lead = leadService.getLeadById(leadId);
+        if (lead == null) return List.of();
+        List<String> toEmails = request.emailTo() != null && !request.emailTo().isEmpty()
+                ? request.emailTo()
+                : (lead.email() != null && !lead.email().isBlank() ? List.of(lead.email()) : List.of());
+        if (toEmails.isEmpty()) return List.of();
+        String firstName = lead.firstName() != null ? lead.firstName() : "";
+        String lastName = lead.lastName() != null ? lead.lastName() : "";
+        String rawDisplay = lead.fullName() != null && !lead.fullName().isBlank()
+                ? lead.fullName()
+                : (firstName + " " + lastName).trim();
+        final String displayName = (rawDisplay != null && !rawDisplay.isBlank())
+                ? rawDisplay
+                : (lead.email() != null ? lead.email() : "");
+        Map<String, Object> defaultParams = new LinkedHashMap<>();
+        defaultParams.put("firstName", firstName);
+        defaultParams.put("lastName", lastName);
+        defaultParams.put("displayName", displayName);
+        final Map<String, Object> params = defaultParams;
+        return toEmails.stream()
+                .filter(e -> e != null && !e.isBlank())
+                .map(email -> new NotificationJobRequest.Recipient(
+                        null,
+                        new NotificationJobRequest.RecipientTo(email, null),
+                        params
+                ))
+                .toList();
+    }
+
+    /** Build a single CrmLogActivityRequest from bulk request (bulk has no email/notification fields). */
+    private static CrmLogActivityRequest toLogActivityRequest(CrmBulkActivitiesRequest request) {
+        return new CrmLogActivityRequest(
+                request.activityTypeCode(),
+                request.activityStatusCode(),
+                request.activityVisibilityCode(),
+                request.activityOutcomeCode(),
+                request.subject(),
+                request.description(),
+                request.notes(),
+                request.startDateTime(),
+                request.endDateTime(),
+                request.assignedToUserId(),
+                request.callDirectionCode(),
+                request.callResultCode(),
+                request.callDurationSeconds(),
+                // email (7): emailTo, emailCc, emailBcc, emailSubject, emailBody, emailIdentityId, emailTemplateId
+                null, null, null, null, null, null, null,
+                // event (7)
+                null, null, null, null, null, null, null,
+                // task (7)
+                null, null, null, null, null, null, null,
+                // sms/whatsapp (6): to_phone, body, sms_template_id, sms_identity_id, whatsapp_template_id, whatsapp_identity_id
+                null, null, null, null, null, null,
+                // notification (3)
+                null, null, null
+        );
     }
 
     private UUID getOrgClientId() {
