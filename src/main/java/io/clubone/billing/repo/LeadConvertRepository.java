@@ -74,6 +74,16 @@ public class LeadConvertRepository {
         return null;
     }
 
+    /** Client agreement status by code (e.g. Draft, Active). */
+    public UUID resolveClientAgreementStatusIdByCode(String code) {
+        if (code == null || code.isBlank()) return null;
+        List<UUID> ids = jdbc.query("""
+                SELECT client_agreement_status_id FROM client_agreements.lu_client_agreement_status
+                WHERE UPPER(TRIM(code)) = UPPER(TRIM(?)) AND is_active = true LIMIT 1
+                """, (rs, i) -> (UUID) rs.getObject("client_agreement_status_id"), code.trim());
+        return ids.isEmpty() ? null : ids.get(0);
+    }
+
     /** Contact lifecycle: PROSPECT (crm.lu_contact_lifecycle, org-scoped). */
     public UUID resolveContactLifecycleIdProspect(UUID orgClientId) {
         return resolveIdByOrgAndCode("crm.lu_contact_lifecycle", "contact_lifecycle_id", "org_client_id", "code", orgClientId, "PROSPECT");

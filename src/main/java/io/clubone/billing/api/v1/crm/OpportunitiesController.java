@@ -202,4 +202,51 @@ public class OpportunitiesController {
         }
         return ResponseEntity.ok(dto);
     }
+
+    /**
+     * GET /api/crm/opportunities/{opportunityId}/trials
+     * Trial tab: Trial agreements available at the opportunity's home location. 404 if opportunity not found.
+     */
+    @GetMapping("/opportunities/{opportunityId}/trials")
+    public ResponseEntity<CrmOpportunityTrialResponse> getTrials(@PathVariable("opportunityId") UUID opportunityId) {
+        CrmOpportunityTrialResponse response = opportunityService.getTrials(opportunityId);
+        if (response == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * GET /api/crm/opportunities/{opportunityId}/trials/active
+     * All active trial client agreements for that opportunity (Trial type + Active status). 404 if opportunity not found.
+     */
+    @GetMapping("/opportunities/{opportunityId}/trials/active")
+    public ResponseEntity<ActiveTrialAgreementResponse> getActiveTrialAgreements(@PathVariable("opportunityId") UUID opportunityId) {
+        ActiveTrialAgreementResponse response = opportunityService.getActiveTrialAgreements(opportunityId);
+        if (response == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * POST /api/crm/opportunities/{opportunityId}/trials/client-agreement
+     * Create a client agreement for the selected trial; updates client_role_status.
+     * Body: agreement_id, agreement_location_id, start_date (required). end_date is auto-calculated from agreement term.
+     */
+    @PostMapping("/opportunities/{opportunityId}/trials/client-agreement")
+    public ResponseEntity<CreateTrialClientAgreementResponse> createTrialClientAgreement(
+            @PathVariable("opportunityId") UUID opportunityId,
+            @RequestBody CreateTrialClientAgreementRequest request) {
+        if (request == null || request.agreementId() == null || request.agreementId().isBlank()
+                || request.agreementLocationId() == null || request.agreementLocationId().isBlank()
+                || request.startDate() == null || request.startDate().isBlank()) {
+            return ResponseEntity.badRequest().build();
+        }
+        CreateTrialClientAgreementResponse response = opportunityService.createTrialClientAgreement(opportunityId, request);
+        if (response == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
 }

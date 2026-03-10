@@ -1,16 +1,22 @@
 package io.clubone.billing.service;
 
 import io.clubone.billing.api.dto.crm.*;
+import io.clubone.billing.repo.AgreementTrialRepository;
+import io.clubone.billing.repo.ClientAgreementRepository;
 import io.clubone.billing.repo.CrmContactRepository;
 import io.clubone.billing.repo.CrmOpportunityRepository;
+import io.clubone.billing.repo.LeadConvertRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -30,10 +36,19 @@ public class CrmOpportunityService {
 
     private final CrmOpportunityRepository repository;
     private final CrmContactRepository contactRepository;
+    private final AgreementTrialRepository agreementTrialRepository;
+    private final ClientAgreementRepository clientAgreementRepository;
+    private final LeadConvertRepository leadConvertRepository;
 
-    public CrmOpportunityService(CrmOpportunityRepository repository, CrmContactRepository contactRepository) {
+    public CrmOpportunityService(CrmOpportunityRepository repository, CrmContactRepository contactRepository,
+                                 AgreementTrialRepository agreementTrialRepository,
+                                 ClientAgreementRepository clientAgreementRepository,
+                                 LeadConvertRepository leadConvertRepository) {
         this.repository = repository;
         this.contactRepository = contactRepository;
+        this.agreementTrialRepository = agreementTrialRepository;
+        this.clientAgreementRepository = clientAgreementRepository;
+        this.leadConvertRepository = leadConvertRepository;
     }
 
     public CrmOpportunityListResponse list(String search, UUID opportunityStageId, String stageCode,
@@ -317,6 +332,233 @@ public class CrmOpportunityService {
         }
 
         return new CrmOpportunityLinkedDto(linkedContact, relatedCases, relatedAccount);
+    }
+
+    /**
+     * Trial tab: Trial agreements available at the opportunity's home location.
+     * Returns null if opportunity does not exist; otherwise response with trials list (empty if no location or no trials).
+     */
+    public CrmOpportunityTrialResponse getTrials(UUID opportunityId) {
+        if (opportunityId == null) return null;
+        UUID orgId = getOrgClientId();
+        if (!repository.exists(orgId, opportunityId)) return null;
+        Map<String, Object> opp = repository.findById(orgId, opportunityId);
+        if (opp == null) return null;
+        Object locationIdObj = opp.get("home_location_id");
+        UUID locationId = locationIdObj instanceof UUID ? (UUID) locationIdObj : null;
+        if (locationId == null && locationIdObj != null) {
+            try {
+                locationId = UUID.fromString(locationIdObj.toString());
+            } catch (Exception ignored) {
+                locationId = null;
+            }
+        }
+        List<Map<String, Object>> rows = agreementTrialRepository.findTrialAgreementsByLocationId(locationId);
+        List<CrmOpportunityTrialResponse.CrmTrialAgreementDto> trials = rows.stream()
+                .map(r -> new CrmOpportunityTrialResponse.CrmTrialAgreementDto(
+                        asString(r.get("agreement_id")),
+                        asString(r.get("agreement_code")),
+                        asString(r.get("agreement_name")),
+                        asString(r.get("agreement_type_name")),
+                        toIsoString(r.get("agreement_valid_from")),
+                        toIsoString(r.get("agreement_valid_to")),
+                        asInteger(r.get("version_no")),
+                        asString(r.get("agreement_location_id")),
+                        toIsoString(r.get("location_start_date")),
+                        toIsoString(r.get("location_end_date")),
+                        asInteger(r.get("duration_value")),
+                        asString(r.get("duration_unit_code")),
+                        asString(r.get("duration_unit_name"))
+                ))
+                .collect(Collectors.toList());
+        return new CrmOpportunityTrialResponse(trials);
+    }
+
+    /**
+     * Active trial agreements: client agreements for this opportunity's client that are Trial type and Active status.
+     * Returns null if opportunity not found; otherwise response with list (empty if no client or no active trials).
+     */
+    public ActiveTrialAgreementResponse getActiveTrialAgreements(UUID opportunityId) {
+        if (opportunityId == null) return null;
+        UUID orgId = getOrgClientId();
+        if (!repository.exists(orgId, opportunityId)) return null;
+        Map<String, Object> opp = repository.findById(orgId, opportunityId);
+        if (opp == null) return null;
+        Object clientIdObj = opp.get("client_id");
+        UUID clientRoleId = clientIdObj instanceof UUID ? (UUID) clientIdObj : null;
+        if (clientRoleId == null && clientIdObj != null) {
+            try { clientRoleId = UUID.fromString(clientIdObj.toString()); } catch (Exception ignored) {}
+        }
+        if (clientRoleId == null) {
+            return new ActiveTrialAgreementResponse(List.of());
+        }
+        List<Map<String, Object>> rows = clientAgreementRepository.findActiveTrialClientAgreementsByClientRoleId(clientRoleId);
+        List<ActiveTrialAgreementResponse.ActiveTrialAgreementDto> list = rows.stream()
+                .map(r -> new ActiveTrialAgreementResponse.ActiveTrialAgreementDto(
+                        asString(r.get("client_agreement_id")),
+                        asString(r.get("agreement_id")),
+                        asString(r.get("agreement_version_id")),
+                        asString(r.get("agreement_location_id")),
+                        asString(r.get("agreement_code")),
+                        asString(r.get("agreement_name")),
+                        asString(r.get("agreement_type_name")),
+                        asString(r.get("client_agreement_status_code")),
+                        asString(r.get("client_agreement_status_name")),
+                        toIsoString(r.get("start_date_utc")),
+                        toIsoString(r.get("end_date_utc")),
+                        toIsoString(r.get("purchased_on_utc"))
+                ))
+                .collect(Collectors.toList());
+        return new ActiveTrialAgreementResponse(list);
+    }
+
+    /**
+     * Creates a client agreement for the selected trial and updates client_role_status.
+     * Returns null if opportunity not found; throws IllegalArgumentException for invalid request (400).
+     */
+    @Transactional
+    public CreateTrialClientAgreementResponse createTrialClientAgreement(UUID opportunityId, CreateTrialClientAgreementRequest request) {
+        if (opportunityId == null || request == null) return null;
+        UUID orgId = getOrgClientId();
+        if (!repository.exists(orgId, opportunityId)) return null;
+        Map<String, Object> opp = repository.findById(orgId, opportunityId);
+        if (opp == null) return null;
+
+        Object clientIdObj = opp.get("client_id");
+        UUID clientRoleId = clientIdObj instanceof UUID ? (UUID) clientIdObj : null;
+        if (clientRoleId == null && clientIdObj != null) {
+            try { clientRoleId = UUID.fromString(clientIdObj.toString()); } catch (Exception ignored) {}
+        }
+        if (clientRoleId == null) {
+            throw new IllegalArgumentException("Opportunity has no client (client_id); cannot create client agreement.");
+        }
+
+        UUID agreementId = parseUuid(request.agreementId(), "agreement_id");
+        UUID agreementLocationId = parseUuid(request.agreementLocationId(), "agreement_location_id");
+        if (request.startDate() == null || request.startDate().isBlank()) {
+            throw new IllegalArgumentException("start_date is required.");
+        }
+
+        Map<String, Object> ag = clientAgreementRepository.findAgreementAndLocationForTrial(agreementId, agreementLocationId);
+        if (ag == null) {
+            throw new IllegalArgumentException("Agreement and agreement_location do not match or not found.");
+        }
+
+        UUID agreementVersionId = (UUID) ag.get("agreement_version_id");
+        Object classIdObj = ag.get("agreement_classification_id");
+        UUID agreementClassificationId = classIdObj instanceof UUID ? (UUID) classIdObj : null;
+        if (agreementClassificationId == null) {
+            agreementClassificationId = clientAgreementRepository.resolveDefaultAgreementClassificationId();
+        }
+        if (agreementClassificationId == null) {
+            throw new IllegalArgumentException("Agreement has no classification and no default agreement_classification found.");
+        }
+
+        UUID clientAgreementStatusId = leadConvertRepository.resolveClientAgreementStatusIdByCode("Active");
+        if (clientAgreementStatusId == null) {
+            throw new IllegalArgumentException("Client agreement status 'Active' not found.");
+        }
+
+        Object levelIdObj = ag.get("level_id");
+        UUID purchasedLevelId = levelIdObj instanceof UUID ? (UUID) levelIdObj : null;
+        if (purchasedLevelId == null && levelIdObj != null) {
+            try { purchasedLevelId = UUID.fromString(levelIdObj.toString()); } catch (Exception ignored) {}
+        }
+
+        Timestamp startDateUtc = parseStartDateToUtcTimestamp(request.startDate());
+        Integer durationValue = asInteger(ag.get("duration_value"));
+        String durationUnitCode = asString(ag.get("duration_unit_code"));
+        Timestamp endDateUtc = computeEndDateFromTerm(startDateUtc, durationValue, durationUnitCode);
+        if (endDateUtc == null) {
+            throw new IllegalArgumentException("Agreement has no term (duration_value/duration_unit); cannot auto-calculate end_date.");
+        }
+
+        Object ownerObj = opp.get("owner_user_id");
+        UUID salesAdvisorId = ownerObj instanceof UUID ? (UUID) ownerObj : null;
+        if (salesAdvisorId == null && ownerObj != null) {
+            try { salesAdvisorId = UUID.fromString(ownerObj.toString()); } catch (Exception ignored) {}
+        }
+
+        UUID clientAgreementId = clientAgreementRepository.insertClientAgreement(
+                agreementId, agreementVersionId, agreementLocationId, agreementClassificationId,
+                clientRoleId, purchasedLevelId, clientAgreementStatusId,
+                startDateUtc, endDateUtc,
+                salesAdvisorId, SYSTEM_USER_ID);
+
+        int updated = clientAgreementRepository.updateClientRoleStatusAgreementStatus(clientRoleId, clientAgreementStatusId);
+        if (updated == 0 && !clientAgreementRepository.hasClientRoleStatus(clientRoleId)) {
+            UUID accountStatusId = leadConvertRepository.resolveClientAccountStatusIdActive();
+            UUID statusId = leadConvertRepository.resolveClientStatusIdActive();
+            if (accountStatusId != null && statusId != null) {
+                leadConvertRepository.insertClientRoleStatus(clientRoleId, clientAgreementStatusId, accountStatusId, statusId, SYSTEM_USER_ID);
+            }
+        }
+
+        return new CreateTrialClientAgreementResponse(
+                clientAgreementId.toString(),
+                agreementId.toString(),
+                agreementVersionId.toString(),
+                agreementLocationId.toString(),
+                clientRoleId.toString(),
+                clientAgreementStatusId.toString(),
+                toIsoString(startDateUtc),
+                toIsoString(endDateUtc));
+    }
+
+    private static Timestamp toTimestamp(Object value) {
+        if (value == null) return null;
+        if (value instanceof Timestamp ts) return ts;
+        if (value instanceof java.time.OffsetDateTime odt) return Timestamp.from(odt.toInstant());
+        if (value instanceof java.time.Instant inst) return Timestamp.from(inst);
+        return null;
+    }
+
+    /** Parses start_date (ISO date or date-time) to start-of-day UTC timestamp. */
+    private static Timestamp parseStartDateToUtcTimestamp(String startDate) {
+        if (startDate == null || startDate.isBlank()) return null;
+        String s = startDate.trim();
+        try {
+            if (s.length() <= 10) {
+                LocalDate ld = LocalDate.parse(s);
+                return Timestamp.from(ld.atStartOfDay(ZoneOffset.UTC).toInstant());
+            }
+            OffsetDateTime odt = OffsetDateTime.parse(s);
+            return Timestamp.from(odt.toInstant());
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Invalid start_date format; use ISO date (yyyy-MM-dd) or ISO date-time: " + s);
+        }
+    }
+
+    /** Computes end_date_utc from start + agreement term (duration_value + duration_unit_code). Returns null if term missing. */
+    private static Timestamp computeEndDateFromTerm(Timestamp startDateUtc, Integer durationValue, String durationUnitCode) {
+        if (startDateUtc == null || durationValue == null || durationValue <= 0 || durationUnitCode == null || durationUnitCode.isBlank()) {
+            return null;
+        }
+        LocalDate start = startDateUtc.toInstant().atOffset(ZoneOffset.UTC).toLocalDate();
+        ChronoUnit unit = toChronoUnit(durationUnitCode);
+        if (unit == null) return null;
+        LocalDate end = start.plus(durationValue, unit);
+        return Timestamp.from(end.atStartOfDay(ZoneOffset.UTC).toInstant());
+    }
+
+    private static ChronoUnit toChronoUnit(String code) {
+        if (code == null) return null;
+        switch (code.toUpperCase().trim()) {
+            case "DAY":
+            case "DAYS":
+                return ChronoUnit.DAYS;
+            case "WEEK":
+            case "WEEKS":
+                return ChronoUnit.WEEKS;
+            case "MONTH":
+            case "MONTHS":
+                return ChronoUnit.MONTHS;
+            case "YEAR":
+            case "YEARS":
+                return ChronoUnit.YEARS;
+            default:
+                return null;
+        }
     }
 
     private UUID getOrgClientId() {

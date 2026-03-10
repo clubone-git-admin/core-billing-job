@@ -23,7 +23,7 @@ public class CrmOpportunityRepository {
     }
 
     private static final String LIST_SELECT = """
-        SELECT o.opportunity_id, o.opportunity_code, o.contact_id, c.contact_code, o.client_id,
+        SELECT o.opportunity_id, o.opportunity_code, o.contact_id, c.contact_code, cr.role_id as client_id,
                COALESCE(o.full_name, '') AS name, NULL::text AS client_status,
                loc.name AS club, o.opportunity_stage_id, os.code AS stage_code, os.display_name AS stage_display_name,
                o.lead_type_id, lt.display_name AS type_display_name, o.created_on, o.owner_user_id,
@@ -35,6 +35,7 @@ public class CrmOpportunityRepository {
         LEFT JOIN crm.lu_lead_type lt ON lt.lead_type_id = o.lead_type_id AND lt.org_client_id = o.org_client_id
         LEFT JOIN "access".access_user u ON u.user_id = o.owner_user_id
         LEFT JOIN locations."location" loc ON loc.location_id = o.home_location_id
+        LEFT JOIN clients.client_role cr ON cr.client_role_id = o.client_id
         WHERE o.org_client_id = ?
         """;
 
