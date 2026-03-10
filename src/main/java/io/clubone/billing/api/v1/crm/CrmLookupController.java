@@ -245,5 +245,17 @@ public class CrmLookupController {
         return ResponseEntity.ok(lookupService.getCampaignStatusesFull());
     }
 
+    @GetMapping("/opportunity-stages")
+    public ResponseEntity<List<CrmOpportunityStageLookupDto>> getOpportunityStages() {
+        log.debug("Getting CRM opportunity stages");
+        return ResponseEntity.ok(lookupService.getOpportunityStagesFull());
+    }
+
+    @GetMapping("/contact-methods")
+    public ResponseEntity<List<CrmContactMethodLookupDto>> getContactMethods() {
+        log.debug("Getting CRM contact methods");
+        return ResponseEntity.ok(lookupService.getContactMethods());
+    }
+
 }
 

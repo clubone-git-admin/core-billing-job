@@ -215,6 +215,23 @@ public class CrmLookupService {
                 .collect(Collectors.toList());
     }
 
+    public List<CrmOpportunityStageLookupDto> getOpportunityStagesFull() {
+        return repository.getOpportunityStagesFull(getOrgClientId()).stream()
+                .map(r -> new CrmOpportunityStageLookupDto(
+                        asStr(r.get("opportunity_stage_id")),
+                        asStr(r.get("code")),
+                        asStr(r.get("display_name")),
+                        r.get("display_order") != null ? ((Number) r.get("display_order")).intValue() : null,
+                        r.get("default_probability") != null ? ((Number) r.get("default_probability")).intValue() : null))
+                .collect(Collectors.toList());
+    }
+
+    public List<CrmContactMethodLookupDto> getContactMethods() {
+        return repository.getContactMethods(getOrgClientId()).stream()
+                .map(r -> new CrmContactMethodLookupDto(asStr(r.get("contact_method_id")), asStr(r.get("contact_method_name"))))
+                .collect(Collectors.toList());
+    }
+
     private static String asStr(Object v) { return v == null ? null : v.toString(); }
 
     private UUID getOrgClientId() {

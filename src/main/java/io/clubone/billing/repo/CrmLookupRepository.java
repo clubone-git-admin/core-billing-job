@@ -353,6 +353,18 @@ public class CrmLookupRepository {
         return jdbc.queryForList("SELECT campaign_status_id, code, display_name FROM crm.lu_campaign_status WHERE org_client_id = ? AND is_active = true" + LU_ORDER, orgClientId);
     }
 
+    public List<Map<String, Object>> getOpportunityStagesFull(UUID orgClientId) {
+        return jdbc.queryForList(
+                "SELECT opportunity_stage_id, code, display_name, display_order, COALESCE(default_probability, 0) AS default_probability FROM crm.lu_opportunity_stage WHERE org_client_id = ? AND is_active = true ORDER BY display_order, display_name",
+                orgClientId);
+    }
+
+    public List<Map<String, Object>> getContactMethods(UUID orgClientId) {
+        return jdbc.queryForList(
+                "SELECT contact_method_id, contact_method_name FROM crm.lu_contact_method WHERE org_client_id = ? ORDER BY contact_method_name",
+                orgClientId);
+    }
+
     public List<Map<String, Object>> getEmptyLookup() {
         return Collections.emptyList();
     }

@@ -40,6 +40,8 @@ public record CrmLeadActivityDto(
         @JsonProperty("whatsapp_delivery_status_display_name") String whatsappDeliveryStatusDisplayName,
         @JsonProperty("event_status_code") String eventStatusCode,
         @JsonProperty("event_status_display_name") String eventStatusDisplayName,
+        @JsonProperty("event_purpose_display_name") String eventPurposeDisplayName,
+        @JsonProperty("location") String location,
         @JsonProperty("task_type_code") String taskTypeCode,
         @JsonProperty("task_type_display_name") String taskTypeDisplayName,
         @JsonProperty("task_status_code") String taskStatusCode,

@@ -24,7 +24,7 @@ public class CrmActivityService {
     private static final UUID DEFAULT_ORG_CLIENT_ID = UUID.fromString("f21d42c1-5ca2-4c98-acac-4e9a1e081fc5");
     private static final UUID SYSTEM_USER_ID = UUID.fromString("53fbd2ad-fe27-4a3c-b37b-497d74ceb19d");
     private static final int DEFAULT_PAGE_SIZE = 50;
-    private static final int MAX_PAGE_SIZE = 200;
+    private static final int MAX_PAGE_SIZE = 500;
 
     private final CrmActivityRepository activityRepository;
 
@@ -74,6 +74,28 @@ public class CrmActivityService {
                 orgId, contactId, entityTypeId, typeCode, statusCode, outcomeCode, fromTs, toTs, search, limitVal, offsetVal);
         long total = activityRepository.countActivitiesByLead(
                 orgId, contactId, entityTypeId, typeCode, statusCode, outcomeCode, fromTs, toTs, search);
+        List<CrmLeadActivityDto> activities = rows.stream().map(this::mapToActivityDto).toList();
+        return new CrmLeadActivitiesResponse(activities, total);
+    }
+
+    public CrmLeadActivitiesResponse getOpportunityActivities(UUID opportunityId, String typeCode, String statusCode, String outcomeCode,
+                                                              String from, String to, String search, Integer limit, Integer offset) {
+        UUID orgId = getOrgClientId();
+        if (!activityRepository.opportunityExists(orgId, opportunityId)) {
+            return null;
+        }
+        UUID entityTypeId = activityRepository.resolveEntityTypeIdByCode(orgId, "OPPORTUNITY");
+        if (entityTypeId == null) {
+            return null;
+        }
+        Timestamp fromTs = parseIsoTimestamp(from);
+        Timestamp toTs = parseIsoTimestamp(to);
+        int limitVal = limit != null && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
+        int offsetVal = offset != null && offset >= 0 ? offset : 0;
+        List<Map<String, Object>> rows = activityRepository.findActivitiesByLead(
+                orgId, opportunityId, entityTypeId, typeCode, statusCode, outcomeCode, fromTs, toTs, search, limitVal, offsetVal);
+        long total = activityRepository.countActivitiesByLead(
+                orgId, opportunityId, entityTypeId, typeCode, statusCode, outcomeCode, fromTs, toTs, search);
         List<CrmLeadActivityDto> activities = rows.stream().map(this::mapToActivityDto).toList();
         return new CrmLeadActivitiesResponse(activities, total);
     }
@@ -157,10 +179,13 @@ public class CrmActivityService {
                 }
             }
         } else if ("TASK".equals(typeCode)) {
-            UUID taskTypeId = activityRepository.resolveTaskTypeIdByCode(orgId, request.taskTypeCode() != null && !request.taskTypeCode().isBlank() ? request.taskTypeCode() : "CALL");
+            UUID taskTypeId = activityRepository.resolveTaskTypeId(orgId, request.taskTypeCode() != null && !request.taskTypeCode().isBlank() ? request.taskTypeCode() : "CALL");
             if (taskTypeId == null) taskTypeId = activityRepository.resolveTaskTypeIdByCode(orgId, "OTHER");
-            UUID taskStatusId = activityRepository.resolveTaskStatusIdByCode(orgId, request.taskStatusCode() != null && !request.taskStatusCode().isBlank() ? request.taskStatusCode() : "OPEN");
-            UUID taskPriorityId = activityRepository.resolveTaskPriorityIdByCode(orgId, request.taskPriorityCode() != null && !request.taskPriorityCode().isBlank() ? request.taskPriorityCode() : "NORMAL");
+            UUID taskStatusId = activityRepository.resolveTaskStatusId(orgId, request.taskStatusCode() != null && !request.taskStatusCode().isBlank() ? request.taskStatusCode() : "OPEN");
+            UUID taskPriorityId = activityRepository.resolveTaskPriorityId(orgId, request.taskPriorityCode() != null && !request.taskPriorityCode().isBlank() ? request.taskPriorityCode() : "NORMAL");
+            if (taskTypeId == null) throw new IllegalArgumentException("Invalid or inactive task_type_code / task_type_id");
+            if (taskStatusId == null) throw new IllegalArgumentException("Invalid or inactive task_status_code / task_status_id");
+            if (taskPriorityId == null) throw new IllegalArgumentException("Invalid or inactive task_priority_code / task_priority_id");
             boolean reminderSet = request.reminderSet() != null && request.reminderSet();
             Timestamp reminderTime = parseIsoTimestamp(request.reminderStartDateTime());
             activityRepository.insertActivityTask(
@@ -247,10 +272,13 @@ public class CrmActivityService {
                 }
             }
         } else if ("TASK".equals(typeCode)) {
-            UUID taskTypeId = activityRepository.resolveTaskTypeIdByCode(orgId, request.taskTypeCode() != null && !request.taskTypeCode().isBlank() ? request.taskTypeCode() : "CALL");
+            UUID taskTypeId = activityRepository.resolveTaskTypeId(orgId, request.taskTypeCode() != null && !request.taskTypeCode().isBlank() ? request.taskTypeCode() : "CALL");
             if (taskTypeId == null) taskTypeId = activityRepository.resolveTaskTypeIdByCode(orgId, "OTHER");
-            UUID taskStatusId = activityRepository.resolveTaskStatusIdByCode(orgId, request.taskStatusCode() != null && !request.taskStatusCode().isBlank() ? request.taskStatusCode() : "OPEN");
-            UUID taskPriorityId = activityRepository.resolveTaskPriorityIdByCode(orgId, request.taskPriorityCode() != null && !request.taskPriorityCode().isBlank() ? request.taskPriorityCode() : "NORMAL");
+            UUID taskStatusId = activityRepository.resolveTaskStatusId(orgId, request.taskStatusCode() != null && !request.taskStatusCode().isBlank() ? request.taskStatusCode() : "OPEN");
+            UUID taskPriorityId = activityRepository.resolveTaskPriorityId(orgId, request.taskPriorityCode() != null && !request.taskPriorityCode().isBlank() ? request.taskPriorityCode() : "NORMAL");
+            if (taskTypeId == null) throw new IllegalArgumentException("Invalid or inactive task_type_code / task_type_id");
+            if (taskStatusId == null) throw new IllegalArgumentException("Invalid or inactive task_status_code / task_status_id");
+            if (taskPriorityId == null) throw new IllegalArgumentException("Invalid or inactive task_priority_code / task_priority_id");
             boolean reminderSet = request.reminderSet() != null && request.reminderSet();
             Timestamp reminderTime = parseIsoTimestamp(request.reminderStartDateTime());
             activityRepository.insertActivityTask(activityId, orgId, taskTypeId, taskStatusId, taskPriorityId, reminderSet, reminderTime, null, request.notes(), SYSTEM_USER_ID);
@@ -264,6 +292,96 @@ public class CrmActivityService {
             if (msgProviderId == null) throw new IllegalStateException("No message provider configured for WhatsApp");
             UUID whatsappTemplateId = request.whatsappTemplateId() != null && !request.whatsappTemplateId().isBlank() ? UUID.fromString(request.whatsappTemplateId()) : null;
             activityRepository.insertActivityWhatsapp(activityId, orgId, msgProviderId, request.toPhone(), request.body(), whatsappTemplateId, SYSTEM_USER_ID);
+        }
+        Map<String, Object> row = activityRepository.findActivityById(orgId, activityId);
+        return row != null ? mapToActivityDto(row) : null;
+    }
+
+    @Transactional
+    public CrmLeadActivityDto logActivityForOpportunity(UUID opportunityId, CrmLogActivityRequest request) {
+        if (request == null) throw new IllegalArgumentException("Request body is required");
+        if (request.activityTypeCode() == null || request.activityTypeCode().isBlank())
+            throw new IllegalArgumentException("activity_type_code is required");
+        if (request.activityStatusCode() == null || request.activityStatusCode().isBlank())
+            throw new IllegalArgumentException("activity_status_code is required");
+        if (request.activityVisibilityCode() == null || request.activityVisibilityCode().isBlank())
+            throw new IllegalArgumentException("activity_visibility_code is required");
+        UUID orgId = getOrgClientId();
+        if (!activityRepository.opportunityExists(orgId, opportunityId))
+            throw new IllegalArgumentException("Opportunity not found: " + opportunityId);
+        UUID entityTypeId = activityRepository.resolveEntityTypeIdByCode(orgId, "OPPORTUNITY");
+        if (entityTypeId == null) throw new IllegalStateException("Entity type OPPORTUNITY not found");
+        UUID activityTypeId = activityRepository.resolveActivityTypeIdByCode(orgId, request.activityTypeCode());
+        if (activityTypeId == null) throw new IllegalArgumentException("Unknown activity_type_code: " + request.activityTypeCode());
+        UUID activityStatusId = activityRepository.resolveActivityStatusIdByCode(orgId, request.activityStatusCode());
+        if (activityStatusId == null) throw new IllegalArgumentException("Unknown activity_status_code: " + request.activityStatusCode());
+        UUID activityVisibilityId = activityRepository.resolveActivityVisibilityIdByCode(orgId, request.activityVisibilityCode());
+        if (activityVisibilityId == null) throw new IllegalArgumentException("Unknown activity_visibility_code: " + request.activityVisibilityCode());
+        UUID activityOutcomeId = activityRepository.resolveActivityOutcomeIdByCode(orgId, request.activityOutcomeCode());
+        Timestamp startDt = parseIsoTimestamp(request.startDateTime());
+        Timestamp endDt = parseIsoTimestamp(request.endDateTime());
+        if (startDt != null && endDt != null && endDt.before(startDt))
+            throw new IllegalArgumentException("end_date_time must be >= start_date_time");
+        UUID assignedTo = request.assignedToUserId() != null ? UUID.fromString(request.assignedToUserId()) : SYSTEM_USER_ID;
+        UUID activityId = activityRepository.insertActivity(orgId, entityTypeId, opportunityId,
+                activityTypeId, activityStatusId, activityVisibilityId, activityOutcomeId,
+                request.subject(), request.description(), request.notes(),
+                startDt, endDt, assignedTo, assignedTo, SYSTEM_USER_ID);
+        String typeCode = request.activityTypeCode().toUpperCase();
+        if ("CALL".equals(typeCode)) {
+            UUID callDirId = request.callDirectionCode() != null ? activityRepository.resolveCallDirectionIdByCode(orgId, request.callDirectionCode()) : null;
+            UUID callResultId = request.callResultCode() != null ? activityRepository.resolveCallResultIdByCode(orgId, request.callResultCode()) : null;
+            activityRepository.insertActivityCall(activityId, orgId, callDirId, callResultId, request.callDurationSeconds(), SYSTEM_USER_ID);
+        } else if ("EMAIL".equals(typeCode)) {
+            if (request.emailIdentityId() == null || request.emailIdentityId().isBlank())
+                throw new IllegalArgumentException("email_identity_id is required for EMAIL activity");
+            UUID msgProviderId = activityRepository.resolveMessageProviderId(orgId);
+            if (msgProviderId == null) throw new IllegalStateException("No message provider configured for email");
+            String[] toArr = request.emailTo() != null ? request.emailTo().toArray(new String[0]) : null;
+            String[] ccArr = request.emailCc() != null ? request.emailCc().toArray(new String[0]) : null;
+            String[] bccArr = request.emailBcc() != null ? request.emailBcc().toArray(new String[0]) : null;
+            UUID emailIdentityId = UUID.fromString(request.emailIdentityId());
+            UUID emailTemplateId = request.emailTemplateId() != null && !request.emailTemplateId().isBlank() ? UUID.fromString(request.emailTemplateId()) : null;
+            activityRepository.insertActivityEmail(activityId, orgId, msgProviderId, toArr, ccArr, bccArr, request.emailSubject(), request.emailBody(), emailTemplateId, emailIdentityId, SYSTEM_USER_ID);
+        } else if ("EVENT".equals(typeCode)) {
+            if (request.eventPurposeId() == null || request.eventPurposeId().isBlank()) throw new IllegalArgumentException("event_purpose_id is required for EVENT activity");
+            if (request.eventStatusId() == null || request.eventStatusId().isBlank()) throw new IllegalArgumentException("event_status_id is required for EVENT activity");
+            if (request.location() == null || request.location().isBlank()) throw new IllegalArgumentException("location is required for EVENT activity");
+            UUID eventPurposeId = UUID.fromString(request.eventPurposeId());
+            UUID eventStatusId = UUID.fromString(request.eventStatusId());
+            String eventPlaceId = request.location();
+            activityRepository.insertActivityEvent(activityId, orgId, eventStatusId, eventPlaceId, eventPurposeId, SYSTEM_USER_ID);
+            if (request.attendees() != null) {
+                for (CrmLogActivityRequest.CrmEventAttendeeDto att : request.attendees()) {
+                    UUID rsvpId = att.rsvpStatusCode() != null ? activityRepository.resolveRsvpStatusIdByCode(orgId, att.rsvpStatusCode()) : null;
+                    activityRepository.insertActivityEventAttendee(activityId, orgId, att.attendeeName(), att.attendeeEmail(), rsvpId, SYSTEM_USER_ID);
+                }
+            }
+        } else if ("TASK".equals(typeCode)) {
+            UUID taskTypeId = activityRepository.resolveTaskTypeId(orgId, request.taskTypeCode() != null && !request.taskTypeCode().isBlank() ? request.taskTypeCode() : "CALL");
+            if (taskTypeId == null) taskTypeId = activityRepository.resolveTaskTypeIdByCode(orgId, "OTHER");
+            UUID taskStatusId = activityRepository.resolveTaskStatusId(orgId, request.taskStatusCode() != null && !request.taskStatusCode().isBlank() ? request.taskStatusCode() : "OPEN");
+            UUID taskPriorityId = activityRepository.resolveTaskPriorityId(orgId, request.taskPriorityCode() != null && !request.taskPriorityCode().isBlank() ? request.taskPriorityCode() : "NORMAL");
+            if (taskTypeId == null) throw new IllegalArgumentException("Invalid or inactive task_type_code / task_type_id");
+            if (taskStatusId == null) throw new IllegalArgumentException("Invalid or inactive task_status_code / task_status_id");
+            if (taskPriorityId == null) throw new IllegalArgumentException("Invalid or inactive task_priority_code / task_priority_id");
+            boolean reminderSet = request.reminderSet() != null && request.reminderSet();
+            Timestamp reminderTime = parseIsoTimestamp(request.reminderStartDateTime());
+            activityRepository.insertActivityTask(activityId, orgId, taskTypeId, taskStatusId, taskPriorityId, reminderSet, reminderTime, null, request.notes(), SYSTEM_USER_ID);
+        } else if ("SMS".equals(typeCode)) {
+            UUID msgProviderId = activityRepository.resolveMessageProviderId(orgId);
+            if (msgProviderId == null) throw new IllegalStateException("No message provider configured for SMS");
+            String body = request.body() != null ? request.body() : request.description();
+            if (body == null || body.isBlank()) throw new IllegalArgumentException("description or body is required for SMS activity");
+            UUID smsTemplateId = request.smsTemplateId() != null && !request.smsTemplateId().isBlank() ? UUID.fromString(request.smsTemplateId()) : null;
+            activityRepository.insertActivitySms(activityId, orgId, msgProviderId, request.toPhone(), body, smsTemplateId, SYSTEM_USER_ID);
+        } else if ("WHATSAPP".equals(typeCode)) {
+            UUID msgProviderId = activityRepository.resolveMessageProviderId(orgId);
+            if (msgProviderId == null) throw new IllegalStateException("No message provider configured for WhatsApp");
+            String body = request.body() != null ? request.body() : request.description();
+            if (body == null || body.isBlank()) throw new IllegalArgumentException("description or body is required for WhatsApp activity");
+            UUID whatsappTemplateId = request.whatsappTemplateId() != null && !request.whatsappTemplateId().isBlank() ? UUID.fromString(request.whatsappTemplateId()) : null;
+            activityRepository.insertActivityWhatsapp(activityId, orgId, msgProviderId, request.toPhone(), body, whatsappTemplateId, SYSTEM_USER_ID);
         }
         Map<String, Object> row = activityRepository.findActivityById(orgId, activityId);
         return row != null ? mapToActivityDto(row) : null;
@@ -382,6 +500,8 @@ public class CrmActivityService {
                 asString(row.get("whatsapp_delivery_status_display_name")),
                 asString(row.get("event_status_code")),
                 asString(row.get("event_status_display_name")),
+                asString(row.get("event_purpose_display_name")),
+                asString(row.get("location")),
                 asString(row.get("task_type_code")),
                 asString(row.get("task_type_display_name")),
                 asString(row.get("task_status_code")),

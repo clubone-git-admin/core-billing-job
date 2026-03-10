@@ -71,6 +71,45 @@ public class CrmActivityRepository {
         return resolveIdByCode("crm.lu_task_priority", "task_priority_id", orgClientId, code);
     }
 
+    /** Resolve task type by UUID (if value is UUID and exists for org) or by code. */
+    public UUID resolveTaskTypeId(UUID orgClientId, String value) {
+        if (value == null || value.isBlank()) return null;
+        try {
+            UUID id = UUID.fromString(value.trim());
+            List<UUID> list = jdbc.query(
+                    "SELECT task_type_id FROM crm.lu_task_type WHERE org_client_id = ? AND task_type_id = ? AND is_active = true LIMIT 1",
+                    (rs, i) -> (UUID) rs.getObject("task_type_id"), orgClientId, id);
+            if (!list.isEmpty()) return list.get(0);
+        } catch (IllegalArgumentException ignored) {}
+        return resolveTaskTypeIdByCode(orgClientId, value);
+    }
+
+    /** Resolve task status by UUID (if value is UUID and exists for org) or by code. */
+    public UUID resolveTaskStatusId(UUID orgClientId, String value) {
+        if (value == null || value.isBlank()) return null;
+        try {
+            UUID id = UUID.fromString(value.trim());
+            List<UUID> list = jdbc.query(
+                    "SELECT task_status_id FROM crm.lu_task_status WHERE org_client_id = ? AND task_status_id = ? AND is_active = true LIMIT 1",
+                    (rs, i) -> (UUID) rs.getObject("task_status_id"), orgClientId, id);
+            if (!list.isEmpty()) return list.get(0);
+        } catch (IllegalArgumentException ignored) {}
+        return resolveTaskStatusIdByCode(orgClientId, value);
+    }
+
+    /** Resolve task priority by UUID (if value is UUID and exists for org) or by code. */
+    public UUID resolveTaskPriorityId(UUID orgClientId, String value) {
+        if (value == null || value.isBlank()) return null;
+        try {
+            UUID id = UUID.fromString(value.trim());
+            List<UUID> list = jdbc.query(
+                    "SELECT task_priority_id FROM crm.lu_task_priority WHERE org_client_id = ? AND task_priority_id = ? AND is_active = true LIMIT 1",
+                    (rs, i) -> (UUID) rs.getObject("task_priority_id"), orgClientId, id);
+            if (!list.isEmpty()) return list.get(0);
+        } catch (IllegalArgumentException ignored) {}
+        return resolveTaskPriorityIdByCode(orgClientId, value);
+    }
+
     public UUID resolveMessageProviderId(UUID orgClientId) {
         List<UUID> ids = jdbc.query(
                 "SELECT message_provider_id FROM crm.lu_message_provider WHERE org_client_id = ? AND is_active = true LIMIT 1",
@@ -99,6 +138,13 @@ public class CrmActivityRepository {
         Boolean exists = jdbc.queryForObject(
                 "SELECT EXISTS(SELECT 1 FROM crm.contact WHERE org_client_id = ? AND contact_id = ?)",
                 Boolean.class, orgClientId, contactId);
+        return Boolean.TRUE.equals(exists);
+    }
+
+    public boolean opportunityExists(UUID orgClientId, UUID opportunityId) {
+        Boolean exists = jdbc.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM crm.opportunity WHERE org_client_id = ? AND opportunity_id = ?)",
+                Boolean.class, orgClientId, opportunityId);
         return Boolean.TRUE.equals(exists);
     }
 
