@@ -30,8 +30,9 @@ public class CrmContactService {
         this.context = context;
     }
 
-    public CrmContactListResponse listContacts(String view, String lifecycleCode, String search, UUID ownerId, Integer limit, Integer offset) {
+    public CrmContactListResponse listContacts(String view, String lifecycleCode, String search, Integer limit, Integer offset) {
         UUID orgId = context.getOrgClientId();
+        UUID ownerId = ("my".equalsIgnoreCase(view != null ? view.trim() : "")) ? context.getActorId() : null;
         int limitVal = limit != null && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
         int offsetVal = offset != null && offset >= 0 ? offset : 0;
         List<Map<String, Object>> rows = contactRepository.listContacts(orgId, view, lifecycleCode, search, ownerId, limitVal, offsetVal);
@@ -44,6 +45,32 @@ public class CrmContactService {
         if (contactId == null) return null;
         Map<String, Object> row = contactRepository.findContactById(context.getOrgClientId(), contactId);
         return row != null ? mapToDetail(row) : null;
+    }
+
+    /**
+     * Placeholder API: same response shape as leads (brandName, firstName, lastName, completionLink, fromName, fromNameTitle, salesAdvisorName, salesAdvisorTitle).
+     * Contact has no completion link; fromName/fromNameTitle and salesAdvisorName/salesAdvisorTitle come from sales_advisor_id.
+     * Returns null if contact does not exist.
+     */
+    public CrmLeadPlaceholderDto getContactPlaceholder(UUID contactId, UUID salesAdvisorId) {
+        if (contactId == null) return null;
+        Map<String, Object> row = contactRepository.findContactPlaceholderData(contactId, salesAdvisorId);
+        if (row == null) return null;
+        String brandName = asString(row.get("brand_name"));
+        String firstName = asString(row.get("first_name"));
+        String lastName = asString(row.get("last_name"));
+        String salesAdvisorName = asString(row.get("sales_advisor_name"));
+        String salesAdvisorTitle = asString(row.get("sales_advisor_title"));
+        return new CrmLeadPlaceholderDto(
+                brandName,
+                firstName,
+                lastName,
+                null, // completionLink – not used for contact
+                salesAdvisorName,
+                salesAdvisorTitle,
+                salesAdvisorName,
+                salesAdvisorTitle
+        );
     }
 
     @Transactional
@@ -290,7 +317,7 @@ public class CrmContactService {
         return new CrmContactNoteDto(
                 asString(r.get("note_id")),
                 asString(r.get("contact_id")),
-                asString(r.get("created_by")),
+                asString(r.get("author")),
                 CrmContactRepository.toIsoString(r.get("created_on")),
                 asString(r.get("content"))
         );

@@ -41,11 +41,10 @@ public class ContactsController {
             @RequestParam(name = "view", required = false) String view,
             @RequestParam(name = "lifecycle_code", required = false) String lifecycleCode,
             @RequestParam(name = "search", required = false) String search,
-            @RequestParam(name = "owner_id", required = false) UUID ownerId,
             @RequestParam(name = "limit", required = false) Integer limit,
             @RequestParam(name = "offset", required = false) Integer offset) {
         log.debug("Listing contacts: view={}, lifecycle_code={}, search={}", view, lifecycleCode, search);
-        CrmContactListResponse response = contactService.listContacts(view, lifecycleCode, search, ownerId, limit, offset);
+        CrmContactListResponse response = contactService.listContacts(view, lifecycleCode, search, limit, offset);
         return ResponseEntity.ok(response);
     }
 
@@ -77,6 +76,21 @@ public class ContactsController {
         }
         UUID ownerId = UUID.fromString(request.ownerId());
         CrmContactDetailDto dto = contactService.changeOwner(contactId, ownerId);
+        if (dto == null) return ResponseEntity.notFound().build();
+        return ResponseEntity.ok(dto);
+    }
+
+    /**
+     * GET /api/crm/contacts/{contactId}/placeholder
+     * Placeholder API: same as leads – brand name, contact first/last name, sales advisor name and title.
+     * Query param: sales_advisor_id (required). 404 if contact does not exist.
+     */
+    @GetMapping("/contacts/{contactId}/placeholder")
+    public ResponseEntity<CrmLeadPlaceholderDto> getContactPlaceholder(
+            @PathVariable("contactId") UUID contactId,
+            @RequestParam(name = "sales_advisor_id") UUID salesAdvisorId) {
+        log.debug("Getting placeholder for contact: contactId={}, salesAdvisorId={}", contactId, salesAdvisorId);
+        CrmLeadPlaceholderDto dto = contactService.getContactPlaceholder(contactId, salesAdvisorId);
         if (dto == null) return ResponseEntity.notFound().build();
         return ResponseEntity.ok(dto);
     }

@@ -45,8 +45,8 @@ public class CrmContactRepository {
                 cl.code AS lifecycle_code,
                 cl.display_name AS lifecycle_display_name,
                 loc.display_name AS home_club_name,
-                TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')) AS owner_name,
-                c.created_by AS owner_id,
+                TRIM(REGEXP_REPLACE(COALESCE(u.first_name,'') || ' ' || COALESCE(u.middle_name,'') || ' ' || COALESCE(u.last_name,''), ' +', ' ')) AS owner_name,
+                c.owner_user_id AS owner_id,
                 c.created_on
             FROM crm.contact c
             LEFT JOIN crm.lu_contact_lifecycle cl ON cl.contact_lifecycle_id = c.contact_lifecycle_id
@@ -63,7 +63,7 @@ public class CrmContactRepository {
             params.add(lifeCode);
         }
         if (ownerId != null) {
-            sql.append(" AND c.created_by = ? ");
+            sql.append(" AND c.owner_user_id = ? ");
             params.add(ownerId);
         }
         if (search != null && !search.isBlank()) {
@@ -99,7 +99,7 @@ public class CrmContactRepository {
             params.add(lifeCode);
         }
         if (ownerId != null) {
-            sql.append(" AND c.created_by = ? ");
+            sql.append(" AND c.owner_user_id = ? ");
             params.add(ownerId);
         }
         if (search != null && !search.isBlank()) {
@@ -143,8 +143,8 @@ public class CrmContactRepository {
                 acc.account_name,
                 c.home_location_id,
                 loc.display_name AS home_club_name,
-                c.created_by AS owner_id,
-                TRIM(COALESCE(own.first_name,'') || ' ' || COALESCE(own.last_name,'')) AS owner_name,
+                c.owner_user_id AS owner_id,
+                TRIM(REGEXP_REPLACE(COALESCE(own.first_name,'') || ' ' || COALESCE(own.middle_name,'') || ' ' || COALESCE(own.last_name,''), ' +', ' ')) AS owner_name,
                 sal.display_name AS salutation_display_name,
                 g.display_name AS gender_display_name,
                 c.date_of_birth,
@@ -161,7 +161,7 @@ public class CrmContactRepository {
             LEFT JOIN crm.lu_contact_lifecycle cl ON cl.contact_lifecycle_id = c.contact_lifecycle_id
             LEFT JOIN crm.account acc ON acc.account_id = c.account_id AND acc.org_client_id = c.org_client_id
             LEFT JOIN locations."location" loc ON loc.location_id = c.home_location_id
-            LEFT JOIN "access".access_user own ON own.user_id = c.created_by
+            LEFT JOIN "access".access_user own ON own.user_id = c.owner_user_id
             LEFT JOIN crm.lu_salutation sal ON sal.salutation_id = c.salutation_id
             LEFT JOIN crm.lu_gender g ON g.gender_id = c.gender_id
             LEFT JOIN clients.client_role cr ON cr.client_role_id = c.client_id
@@ -201,7 +201,7 @@ public class CrmContactRepository {
 
     public void updateContactOwner(UUID orgClientId, UUID contactId, UUID ownerId, UUID modifiedBy) {
         jdbc.update("""
-            UPDATE crm.contact SET created_by = ?, modified_on = CURRENT_TIMESTAMP, modified_by = ?
+            UPDATE crm.contact SET owner_user_id = ?, modified_on = CURRENT_TIMESTAMP, modified_by = ?
             WHERE org_client_id = ? AND contact_id = ?
             """, ownerId, modifiedBy, orgClientId, contactId);
     }
@@ -215,7 +215,7 @@ public class CrmContactRepository {
         params.add(orgClientId);
         params.addAll(contactIds);
         return jdbc.update("""
-            UPDATE crm.contact SET created_by = ?, modified_on = CURRENT_TIMESTAMP, modified_by = ?
+            UPDATE crm.contact SET owner_user_id = ?, modified_on = CURRENT_TIMESTAMP, modified_by = ?
             WHERE org_client_id = ? AND contact_id IN (""" + placeholders + ")",
                 params.toArray());
     }
@@ -231,7 +231,7 @@ public class CrmContactRepository {
     public List<Map<String, Object>> listNotes(UUID orgClientId, UUID entityTypeId, UUID contactId) {
         return jdbc.queryForList("""
             SELECT n.note_id, n.entity_id AS contact_id, n.created_on,
-                   COALESCE(TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')), 'Unknown') AS author,
+                   COALESCE(TRIM(REGEXP_REPLACE(COALESCE(u.first_name,'') || ' ' || COALESCE(u.middle_name,'') || ' ' || COALESCE(u.last_name,''), ' +', ' ')), 'Unknown') AS author,
                    n.content
             FROM crm.note n
             LEFT JOIN "access".access_user u ON u.user_id = n.created_by
@@ -247,8 +247,12 @@ public class CrmContactRepository {
             VALUES (?, ?, ?, ?, ?, false, 'INTERNAL', ?)
             """, noteId, orgClientId, entityTypeId, contactId, body, createdBy);
         List<Map<String, Object>> rows = jdbc.queryForList("""
-            SELECT n.note_id, n.entity_id AS contact_id, n.created_on, n.created_by::text, n.content
-            FROM crm.note n WHERE n.org_client_id = ? AND n.note_id = ?
+            SELECT n.note_id, n.entity_id AS contact_id, n.created_on,
+                   TRIM(REGEXP_REPLACE(COALESCE(u.first_name,'') || ' ' || COALESCE(u.middle_name,'') || ' ' || COALESCE(u.last_name,''), ' +', ' ')) AS author,
+                   n.content
+            FROM crm.note n
+            LEFT JOIN "access".access_user u ON u.user_id = n.created_by
+            WHERE n.org_client_id = ? AND n.note_id = ?
             """, orgClientId, noteId);
         return rows.isEmpty() ? null : rows.get(0);
     }
@@ -454,6 +458,32 @@ public class CrmContactRepository {
         params.add(caseId);
         String sql = "UPDATE crm.cases SET " + String.join(", ", setClauses) + " WHERE org_client_id = ? AND case_id = ?";
         return jdbc.update(sql, params.toArray());
+    }
+
+    /**
+     * Placeholder API: brand name (org), contact first/last name, sales advisor display name and role title.
+     * Same data shape as leads placeholder. Uses common.organization_client, crm.contact, access.access_user, access role lookup.
+     */
+    public Map<String, Object> findContactPlaceholderData(UUID contactId, UUID salesAdvisorId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+            SELECT
+                oc.name AS brand_name,
+                c.first_name,
+                c.last_name,
+                TRIM(COALESCE(u.first_name, '') || ' ' || COALESCE(u.last_name, '')) AS sales_advisor_name,
+                (SELECT r.name
+                 FROM "access".access_application_user aau
+                 JOIN "access".access_user_role_location aurl ON aurl.application_user_id = aau.application_user_id
+                 JOIN "access".access_role r ON r.role_id = aurl.role_id AND r.is_active = true
+                 WHERE aau.user_id = ?
+                   AND aau.is_active = true
+                 LIMIT 1) AS sales_advisor_title
+            FROM crm.contact c
+            JOIN common.organization_client oc ON oc.org_client_id = c.org_client_id
+            LEFT JOIN "access".access_user u ON u.user_id = ?
+            WHERE c.contact_id = ?
+            """, salesAdvisorId, salesAdvisorId, contactId);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     public static String toIsoString(Object value) {
