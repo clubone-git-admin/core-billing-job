@@ -23,11 +23,11 @@ public class CrmOpportunityRepository {
     }
 
     private static final String LIST_SELECT = """
-        SELECT o.opportunity_id, o.opportunity_code, o.contact_id, c.contact_code, cr.role_id as client_id,
+                      SELECT o.opportunity_id, o.opportunity_code, o.contact_id, c.contact_code, cr.role_id as client_id,
                COALESCE(o.full_name, '') AS name, NULL::text AS client_status,
                loc.name AS club, o.opportunity_stage_id, os.code AS stage_code, os.display_name AS stage_display_name,
                o.lead_type_id, lt.display_name AS type_display_name, o.created_on, o.owner_user_id,
-               TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')) AS owner_display_name,
+                              TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')) AS owner_display_name,
                0::double precision AS amount, NULL::date AS expected_close_date, c.full_name AS contact_name
         FROM crm.opportunity o
         LEFT JOIN crm.contact c ON c.contact_id = o.contact_id AND c.org_client_id = o.org_client_id
@@ -98,7 +98,7 @@ public class CrmOpportunityRepository {
         SELECT o.opportunity_id, o.opportunity_code, o.full_name, o.contact_id, c.full_name AS contact_display_name,
                o.client_id, NULL::text AS client_status, o.home_location_id, loc.name AS home_location_name,
                o.opportunity_stage_id, os.display_name AS stage_display_name, o.probability,
-               o.owner_user_id, TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')) AS owner_display_name,
+               o.owner_user_id, TRIM(REGEXP_REPLACE(COALESCE(u.first_name,'') || ' ' || COALESCE(u.middle_name,'') || ' ' || COALESCE(u.last_name,''), ' +', ' ')) AS owner_display_name,
                o.salutation_id, o.first_name, o.last_name, o.email, o.phone,
                o.lead_type_id, lt.display_name AS lead_type_display_name, o.gender_id, o.referred_by_contact_id,
                o.created_on, o.modified_on, o.created_by, o.modified_by

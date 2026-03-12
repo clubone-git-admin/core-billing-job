@@ -498,6 +498,7 @@ public class CrmActivityService {
         );
     }
 
+    /** Accepts ISO 8601 date-time with any offset (e.g. IST +05:30); stores the instant. Used for start_date_time, end_date_time, reminder_start_date_time. */
     private static Timestamp parseIsoTimestamp(String value) {
         if (value == null || value.isBlank()) return null;
         try {

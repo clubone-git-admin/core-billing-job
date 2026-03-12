@@ -32,6 +32,7 @@ public class OpportunitiesController {
 
     @GetMapping("/opportunities")
     public ResponseEntity<CrmOpportunityListResponse> listOpportunities(
+            @RequestParam(name = "view", required = false) String view,
             @RequestParam(name = "search", required = false) String search,
             @RequestParam(name = "opportunity_stage_id", required = false) UUID opportunityStageId,
             @RequestParam(name = "stage_code", required = false) String stageCode,
@@ -40,9 +41,9 @@ public class OpportunitiesController {
             @RequestParam(name = "limit", required = false) Integer limit,
             @RequestParam(name = "offset", required = false) Integer offset
     ) {
-        log.debug("Listing opportunities: search={}, stage={}, owner={}, limit={}, offset={}",
-                search, opportunityStageId, ownerUserId, limit, offset);
-        CrmOpportunityListResponse response = opportunityService.list(search, opportunityStageId, stageCode, ownerUserId, leadTypeId, limit, offset);
+        log.debug("Listing opportunities: view={}, search={}, stage={}, owner={}, limit={}, offset={}",
+                view, search, opportunityStageId, ownerUserId, limit, offset);
+        CrmOpportunityListResponse response = opportunityService.list(view, search, opportunityStageId, stageCode, ownerUserId, leadTypeId, limit, offset);
         return ResponseEntity.ok(response);
     }
 

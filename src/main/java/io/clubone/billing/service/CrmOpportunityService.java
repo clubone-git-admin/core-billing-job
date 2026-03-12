@@ -52,14 +52,17 @@ public class CrmOpportunityService {
         this.context = context;
     }
 
-    public CrmOpportunityListResponse list(String search, UUID opportunityStageId, String stageCode,
+    public CrmOpportunityListResponse list(String view, String search, UUID opportunityStageId, String stageCode,
                                            UUID ownerUserId, UUID leadTypeId, Integer limit, Integer offset) {
         UUID orgId = context.getOrgClientId();
         int pageSize = (limit == null || limit <= 0) ? DEFAULT_LIMIT : Math.min(limit, MAX_LIMIT);
         int pageOffset = (offset == null || offset < 0) ? 0 : offset;
 
-        var rows = repository.listOpportunities(orgId, search, opportunityStageId, stageCode, ownerUserId, leadTypeId, pageSize, pageOffset);
-        long total = repository.countOpportunities(orgId, search, opportunityStageId, stageCode, ownerUserId, leadTypeId);
+        UUID filterByOwnerForView = ("my".equalsIgnoreCase(view != null ? view.trim() : "")) ? context.getActorId() : null;
+        UUID effectiveOwnerFilter = (ownerUserId != null) ? ownerUserId : filterByOwnerForView;
+
+        var rows = repository.listOpportunities(orgId, search, opportunityStageId, stageCode, effectiveOwnerFilter, leadTypeId, pageSize, pageOffset);
+        long total = repository.countOpportunities(orgId, search, opportunityStageId, stageCode, effectiveOwnerFilter, leadTypeId);
 
         List<CrmOpportunitySummaryDto> items = rows.stream()
                 .map(this::mapToSummaryDto)
