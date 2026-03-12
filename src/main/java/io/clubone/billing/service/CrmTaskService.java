@@ -38,17 +38,17 @@ public class CrmTaskService {
     }
 
     public CrmTaskListResponse listTasks(String scope, String view, String search, UUID taskTypeId, UUID taskStatusId,
-                                         UUID taskPriorityId, Integer limit, Integer offset) {
+                                         UUID taskPriorityId, String sort, String order, Integer limit, Integer offset) {
         UUID orgId = context.getOrgClientId();
         UUID assignedFilter = "my".equalsIgnoreCase(scope != null ? scope.trim() : "") ? context.getActorId() : null;
         String viewVal = (view != null && !view.isBlank()) ? view.trim() : "today";
         int limitVal = limit != null && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
         int offsetVal = offset != null && offset >= 0 ? offset : 0;
         List<Map<String, Object>> rows = taskRepository.listTasks(orgId, assignedFilter, viewVal, search,
-                taskTypeId, taskStatusId, taskPriorityId, limitVal, offsetVal);
+                taskTypeId, taskStatusId, taskPriorityId, sort, order, limitVal, offsetVal);
         long total = taskRepository.countTasks(orgId, assignedFilter, viewVal, search, taskTypeId, taskStatusId, taskPriorityId);
-        List<CrmTaskSummaryDto> items = rows.stream().map(this::mapToSummary).toList();
-        return new CrmTaskListResponse(items, total);
+        List<CrmTaskSummaryDto> tasks = rows.stream().map(this::mapToSummary).toList();
+        return new CrmTaskListResponse(tasks, total);
     }
 
     public CrmTaskDetailDto getTaskById(UUID taskId) {
@@ -101,9 +101,9 @@ public class CrmTaskService {
         Timestamp reminderTime = parseIsoToTimestamp(request.reminderTime());
         UUID activityTypeId = activityRepository.resolveActivityTypeIdByCode(orgId, "TASK");
         if (activityTypeId == null) return null;
-        UUID activityStatusId = activityRepository.resolveActivityStatusIdByCode(orgId, "NOT_STARTED");
-        if (activityStatusId == null) activityStatusId = activityRepository.resolveActivityStatusIdByCode(orgId, "PENDING");
-        UUID visibilityId = activityRepository.resolveActivityVisibilityIdByCode(orgId, "INTERNAL");
+        UUID activityStatusId = activityRepository.resolveActivityStatusIdByCode(orgId, "QUEUED");
+        if (activityStatusId == null) activityStatusId = activityRepository.resolveActivityStatusIdByCode(orgId, "QUEUED");
+        UUID visibilityId = activityRepository.resolveActivityVisibilityIdByCode(orgId, "PUBLIC");
         if (visibilityId == null) visibilityId = activityRepository.resolveActivityVisibilityIdByCode(orgId, "PRIVATE");
         UUID taskId = taskRepository.insertTask(orgId, activityTypeId, activityStatusId, visibilityId,
                 existingActivityId != null ? null : entityTypeId, existingActivityId != null ? null : entityId,
@@ -199,12 +199,14 @@ public class CrmTaskService {
                 asString(r.get("task_type_id")),
                 asString(r.get("task_type_display_name")),
                 asString(r.get("task_status_id")),
+                asString(r.get("task_status_code")),
                 asString(r.get("task_status_display_name")),
                 asString(r.get("task_priority_id")),
                 asString(r.get("task_priority_display_name")),
                 asString(r.get("assigned_to_user_id")),
                 asString(r.get("assigned_to_display_name")),
                 asString(r.get("entity_type_id")),
+                asString(r.get("entity_type_code")),
                 asString(r.get("entity_id")),
                 asString(r.get("entity_display_name")),
                 asString(r.get("related_entity_type_id")),

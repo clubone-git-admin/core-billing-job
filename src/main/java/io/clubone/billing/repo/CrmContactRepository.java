@@ -492,4 +492,12 @@ public class CrmContactRepository {
         if (value instanceof Timestamp ts) return ts.toInstant().atOffset(ZoneOffset.UTC).toString();
         return value.toString();
     }
+
+    /** Formats timestamp as stored in DB (no UTC conversion). Use for created_on, sla_resolve_due_at, etc. when client expects as-saved value. */
+    public static String toTimestampStringAsStored(Object value) {
+        if (value == null) return null;
+        if (value instanceof Timestamp ts) return ts.toLocalDateTime().toString();
+        if (value instanceof OffsetDateTime odt) return odt.toLocalDateTime().toString();
+        return value.toString();
+    }
 }

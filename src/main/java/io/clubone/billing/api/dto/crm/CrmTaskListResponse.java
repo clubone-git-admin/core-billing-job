@@ -5,6 +5,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
 
 public record CrmTaskListResponse(
-        @JsonProperty("items") List<CrmTaskSummaryDto> items,
+        @JsonProperty("tasks") List<CrmTaskSummaryDto> tasks,
         @JsonProperty("total") long total
 ) {}

@@ -12,8 +12,16 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * REST API for CRM Accounts (list, detail, create).
+ * REST API for CRM Accounts (list, detail, create, update).
  * Base path: /api/crm
+ *
+ * <p>All requests must include the same three headers as other CRM APIs (enforced by interceptor):
+ * <ul>
+ *   <li>X-Application-Id – application/tenant context (resolved to org_client_id)</li>
+ *   <li>X-Location-Id – global selected location ID</li>
+ *   <li>X-Actor-Id – logged-in user ID (for audit, ownership)</li>
+ * </ul>
+ * No values are hardcoded; org and actor come from headers and context.
  */
 @RestController
 @RequestMapping("/api/crm")

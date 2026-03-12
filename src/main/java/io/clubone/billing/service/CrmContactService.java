@@ -332,8 +332,8 @@ public class CrmContactService {
                 asString(r.get("case_status_display_name")),
                 asString(r.get("case_priority_display_name")),
                 asString(r.get("owner_name")),
-                CrmContactRepository.toIsoString(r.get("created_on")),
-                CrmContactRepository.toIsoString(r.get("sla_resolve_due_at"))
+                CrmContactRepository.toTimestampStringAsStored(r.get("created_on")),
+                CrmContactRepository.toTimestampStringAsStored(r.get("sla_resolve_due_at"))
         );
     }
 

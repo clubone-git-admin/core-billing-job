@@ -14,6 +14,9 @@ import java.util.UUID;
 /**
  * REST API for CRM Tasks screen (/crm/tasks).
  * Base path: /api/crm
+ *
+ * <p>All requests must include: X-Application-Id (application UUID), X-Actor-Id (user UUID).
+ * Without these headers the interceptor returns 400 and the request is not processed.
  */
 @RestController
 @RequestMapping("/api/crm")
@@ -27,6 +30,11 @@ public class TasksController {
         this.taskService = taskService;
     }
 
+    /**
+     * List tasks for the CRM Tasks table. scope=all (default) or my; view=today (default), week, overdue, or all.
+     * sort=due_date|subject|status|priority|assigned_to|created_on|entity; order=asc|desc.
+     * Response: { "tasks": [...], "total": n }. Each task includes task_status_code and entity_type_code for table badges/links.
+     */
     @GetMapping("/tasks")
     public ResponseEntity<CrmTaskListResponse> listTasks(
             @RequestParam(name = "scope", required = false) String scope,
@@ -35,10 +43,12 @@ public class TasksController {
             @RequestParam(name = "task_type_id", required = false) UUID taskTypeId,
             @RequestParam(name = "task_status_id", required = false) UUID taskStatusId,
             @RequestParam(name = "task_priority_id", required = false) UUID taskPriorityId,
+            @RequestParam(name = "sort", required = false) String sort,
+            @RequestParam(name = "order", required = false) String order,
             @RequestParam(name = "limit", required = false) Integer limit,
             @RequestParam(name = "offset", required = false) Integer offset) {
-        log.debug("Listing tasks: scope={}, view={}, search={}", scope, view, search);
-        CrmTaskListResponse response = taskService.listTasks(scope, view, search, taskTypeId, taskStatusId, taskPriorityId, limit, offset);
+        log.debug("Listing tasks: scope={}, view={}, sort={}, order={}", scope, view, sort, order);
+        CrmTaskListResponse response = taskService.listTasks(scope, view, search, taskTypeId, taskStatusId, taskPriorityId, sort, order, limit, offset);
         return ResponseEntity.ok(response);
     }
 

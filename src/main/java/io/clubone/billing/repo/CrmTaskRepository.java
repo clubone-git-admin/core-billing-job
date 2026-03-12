@@ -36,11 +36,11 @@ public class CrmTaskRepository {
         SELECT t.task_id, a.subject,
                a.start_date_time AS due_date,
                t.task_type_id, tt.display_name AS task_type_display_name,
-               t.task_status_id, ts.display_name AS task_status_display_name,
+               t.task_status_id, ts.code AS task_status_code, ts.display_name AS task_status_display_name,
                t.task_priority_id, tp.display_name AS task_priority_display_name,
                a.assigned_to_user_id,
-               TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')) AS assigned_to_display_name,
-               a.entity_type_id, a.entity_id, """ + ENTITY_DISPLAY_SQL + " AS entity_display_name,\n" + """
+               TRIM(REGEXP_REPLACE(COALESCE(u.first_name,'') || ' ' || COALESCE(u.middle_name,'') || ' ' || COALESCE(u.last_name,''), ' +', ' ')) AS assigned_to_display_name,
+               a.entity_type_id, et.code AS entity_type_code, a.entity_id, """ + ENTITY_DISPLAY_SQL + " AS entity_display_name,\n" + """
                NULL::uuid AS related_entity_type_id, NULL::uuid AS related_entity_id, NULL::text AS related_entity_display_name,
                (a.start_date_time IS NOT NULL AND a.start_date_time::date < CURRENT_DATE
                 AND (ts.code IS NULL OR UPPER(ts.code) NOT IN ('COMPLETED','DONE','CLOSED'))) AS is_overdue,
@@ -51,12 +51,13 @@ public class CrmTaskRepository {
         LEFT JOIN crm.lu_task_status ts ON ts.task_status_id = t.task_status_id
         LEFT JOIN crm.lu_task_priority tp ON tp.task_priority_id = t.task_priority_id
         LEFT JOIN "access".access_user u ON u.user_id = a.assigned_to_user_id
+        LEFT JOIN crm.lu_entity_type et ON et.entity_type_id = a.entity_type_id AND et.org_client_id = a.org_client_id
         WHERE t.org_client_id = ? AND COALESCE(a.is_deleted, false) = false
         """;
 
     public List<Map<String, Object>> listTasks(UUID orgClientId, UUID assignedToUserId, String view,
                                                String search, UUID taskTypeId, UUID taskStatusId, UUID taskPriorityId,
-                                               int limit, int offset) {
+                                               String sort, String order, int limit, int offset) {
         StringBuilder sql = new StringBuilder(LIST_SELECT);
         List<Object> params = new ArrayList<>();
         params.add(orgClientId);
@@ -88,10 +89,37 @@ public class CrmTaskRepository {
         if (taskTypeId != null) { sql.append(" AND t.task_type_id = ? "); params.add(taskTypeId); }
         if (taskStatusId != null) { sql.append(" AND t.task_status_id = ? "); params.add(taskStatusId); }
         if (taskPriorityId != null) { sql.append(" AND t.task_priority_id = ? "); params.add(taskPriorityId); }
-        sql.append(" ORDER BY a.start_date_time ASC NULLS LAST, t.created_on DESC NULLS LAST LIMIT ? OFFSET ? ");
+        appendOrderBy(sql, sort, order);
         params.add(limit);
         params.add(offset);
         return jdbc.queryForList(sql.toString(), params.toArray());
+    }
+
+    /** Append ORDER BY from sort/order params. sort: due_date, subject, status, priority, assigned_to, created_on, entity. */
+    private void appendOrderBy(StringBuilder sql, String sort, String order) {
+        boolean desc = order != null && "desc".equalsIgnoreCase(order.trim());
+        String dir = desc ? " DESC" : " ASC";
+        String nulls = desc ? " NULLS FIRST" : " NULLS LAST";
+        String col;
+        if (sort != null && !sort.isBlank()) {
+            switch (sort.toLowerCase().trim()) {
+                case "subject" -> col = "a.subject";
+                case "status" -> col = "ts.display_name";
+                case "priority" -> col = "tp.display_name";
+                case "assigned_to" -> col = "assigned_to_display_name";
+                case "created_on" -> col = "t.created_on";
+                case "entity" -> col = "entity_display_name";
+                case "due_date", "due" -> col = "a.start_date_time";
+                default -> col = "a.start_date_time";
+            }
+        } else {
+            col = "a.start_date_time";
+        }
+        sql.append(" ORDER BY ").append(col).append(dir).append(nulls);
+        if (!"t.created_on".equals(col)) {
+            sql.append(", t.created_on DESC NULLS LAST");
+        }
+        sql.append(" LIMIT ? OFFSET ? ");
     }
 
     /** Tasks due today or overdue, not completed. For CRM Home "Today's Tasks" widget. */

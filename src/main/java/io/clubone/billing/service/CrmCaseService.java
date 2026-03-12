@@ -148,8 +148,8 @@ public class CrmCaseService {
                 asString(r.get("case_priority_display_name")),
                 asString(r.get("owner_user_id")),
                 asString(r.get("owner_name")),
-                CrmContactRepository.toIsoString(r.get("created_on")),
-                CrmContactRepository.toIsoString(r.get("sla_resolve_due_at")),
+                CrmContactRepository.toTimestampStringAsStored(r.get("created_on")),
+                CrmContactRepository.toTimestampStringAsStored(r.get("sla_resolve_due_at")),
                 asString(r.get("description"))
         );
     }
@@ -164,8 +164,8 @@ public class CrmCaseService {
                 asString(r.get("previous_case_status_id")),
                 asString(r.get("status_display_name")),
                 asString(r.get("previous_status_display_name")),
-                CrmContactRepository.toIsoString(r.get("entered_on")),
-                CrmContactRepository.toIsoString(r.get("exited_on")),
+                CrmContactRepository.toTimestampStringAsStored(r.get("entered_on")),
+                CrmContactRepository.toTimestampStringAsStored(r.get("exited_on")),
                 duration,
                 asString(r.get("changed_by_display_name")),
                 asString(r.get("change_reason")),
@@ -188,8 +188,8 @@ public class CrmCaseService {
                 asString(r.get("case_status_display_name")),
                 asString(r.get("case_priority_display_name")),
                 asString(r.get("owner_name")),
-                CrmContactRepository.toIsoString(r.get("created_on")),
-                CrmContactRepository.toIsoString(r.get("sla_resolve_due_at"))
+                CrmContactRepository.toTimestampStringAsStored(r.get("created_on")),
+                CrmContactRepository.toTimestampStringAsStored(r.get("sla_resolve_due_at"))
         );
     }
 
