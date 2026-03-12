@@ -182,12 +182,16 @@ public class CrmActivityRepository {
                 wds.display_name AS whatsapp_delivery_status_display_name,
                 es.code AS event_status_code,
                 es.display_name AS event_status_display_name,
+                ep.display_name AS event_purpose_display_name,
+                aev.event_place AS location,
                 tt.code AS task_type_code,
                 tt.display_name AS task_type_display_name,
                 ts.code AS task_status_code,
                 ts.display_name AS task_status_display_name,
                 tp.code AS task_priority_code,
-                tp.display_name AS task_priority_display_name
+                tp.display_name AS task_priority_display_name,
+                COALESCE(COALESCE(ei.from_email, ei.code), COALESCE(si.sender_name, si.code), COALESCE(wi.phone_number, wi.code)) AS channel_from,
+                COALESCE(et.template_name, et.template_code, st.template_name, st.template_code, wt.template_name, wt.template_code) AS channel_template
             FROM crm.activity a
             INNER JOIN crm.lu_activity_type at ON at.activity_type_id = a.activity_type_id
             INNER JOIN crm.lu_activity_status ast ON ast.activity_status_id = a.activity_status_id
@@ -200,12 +204,19 @@ public class CrmActivityRepository {
             LEFT JOIN crm.lu_call_result cr ON cr.call_result_id = ac.call_result_id
             LEFT JOIN crm.activity_email ae ON ae.activity_id = a.activity_id
             LEFT JOIN crm.lu_email_delivery_status eds ON eds.email_delivery_status_id = ae.email_delivery_status_id
+            LEFT JOIN crm.lu_email_identity ei ON ei.email_identity_id = ae.email_identity_id AND ei.org_client_id = a.org_client_id
+            LEFT JOIN notification.notification_template et ON et.template_id = ae.email_template_id AND et.org_client_id = a.org_client_id
             LEFT JOIN crm.activity_sms asms ON asms.activity_id = a.activity_id
             LEFT JOIN crm.lu_sms_delivery_status sds ON sds.sms_delivery_status_id = asms.sms_delivery_status_id
+            LEFT JOIN crm.lu_sms_identity si ON si.sms_identity_id = asms.sms_identity_id AND si.org_client_id = a.org_client_id
+            LEFT JOIN notification.notification_template st ON st.template_id = asms.sms_template_id AND st.org_client_id = a.org_client_id
             LEFT JOIN crm.activity_whatsapp aw ON aw.activity_id = a.activity_id
             LEFT JOIN crm.lu_whatsapp_delivery_status wds ON wds.whatsapp_delivery_status_id = aw.whatsapp_delivery_status_id
+            LEFT JOIN crm.lu_whatsapp_identity wi ON wi.whatsapp_identity_id = aw.whatsapp_identity_id AND wi.org_client_id = a.org_client_id
+            LEFT JOIN notification.notification_template wt ON wt.template_id = aw.whatsapp_template_id AND wt.org_client_id = a.org_client_id
             LEFT JOIN crm.activity_event aev ON aev.activity_id = a.activity_id
             LEFT JOIN crm.lu_event_status es ON es.event_status_id = aev.event_status_id
+            LEFT JOIN crm.lu_event_purpose ep ON ep.event_purpose_id = aev.event_purpose_id AND ep.org_client_id = a.org_client_id
             LEFT JOIN crm.activity_task atask ON atask.activity_id = a.activity_id
             LEFT JOIN crm.lu_task_type tt ON tt.task_type_id = atask.task_type_id
             LEFT JOIN crm.lu_task_status ts ON ts.task_status_id = atask.task_status_id
@@ -281,6 +292,33 @@ public class CrmActivityRepository {
         }
         Long count = jdbc.queryForObject(sql.toString(), Long.class, params.toArray());
         return count != null ? count : 0L;
+    }
+
+    /**
+     * Returns activity stats for a lead used to compute warmth score.
+     * Uses COALESCE(start_date_time, created_on) as activity time.
+     *
+     * @return map with "last_activity_at" (Timestamp, may be null) and "activity_count_90d" (Long, >= 0)
+     */
+    public Map<String, Object> getLeadActivityStatsForWarmth(UUID orgClientId, UUID leadId, UUID entityTypeId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+            SELECT
+                MAX(COALESCE(a.start_date_time, a.created_on)) AS last_activity_at,
+                COUNT(*) FILTER (WHERE (COALESCE(a.start_date_time, a.created_on)) >= (CURRENT_TIMESTAMP - INTERVAL '90 days')) AS activity_count_90d
+            FROM crm.activity a
+            WHERE a.org_client_id = ? AND a.entity_type_id = ? AND a.entity_id = ?
+              AND COALESCE(a.is_deleted, false) = false
+            """, orgClientId, entityTypeId, leadId);
+        if (rows.isEmpty()) {
+            return Map.of("last_activity_at", (Object) null, "activity_count_90d", 0L);
+        }
+        Map<String, Object> row = rows.get(0);
+        Object countObj = row.get("activity_count_90d");
+        long count90d = countObj instanceof Number n ? n.longValue() : 0L;
+        return Map.of(
+            "last_activity_at", row.get("last_activity_at"),
+            "activity_count_90d", count90d
+        );
     }
 
     public UUID insertActivity(UUID orgClientId, UUID entityTypeId, UUID entityId,
@@ -384,27 +422,27 @@ public class CrmActivityRepository {
     }
 
     public void insertActivitySms(UUID activityId, UUID orgClientId, UUID messageProviderId,
-                                  String toPhone, String body, UUID smsTemplateId, UUID createdBy) {
+                                  String toPhone, String body, UUID smsTemplateId, UUID smsIdentityId, UUID createdBy) {
         jdbc.update("""
             INSERT INTO crm.activity_sms (
                 activity_id, org_client_id, message_provider_id,
-                to_phone, sms_body, sms_template_id,
+                to_phone, sms_body, sms_template_id, sms_identity_id,
                 created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, activityId, orgClientId, messageProviderId,
-                toPhone, body, smsTemplateId, createdBy);
+                toPhone, body, smsTemplateId, smsIdentityId, createdBy);
     }
 
     public void insertActivityWhatsapp(UUID activityId, UUID orgClientId, UUID messageProviderId,
-                                       String toPhone, String body, UUID whatsappTemplateId, UUID createdBy) {
+                                       String toPhone, String body, UUID whatsappTemplateId, UUID whatsappIdentityId, UUID createdBy) {
         jdbc.update("""
             INSERT INTO crm.activity_whatsapp (
                 activity_id, org_client_id, message_provider_id,
-                to_phone, whatsapp_body, whatsapp_template_id,
+                to_phone, whatsapp_body, whatsapp_template_id, whatsapp_identity_id,
                 created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, activityId, orgClientId, messageProviderId,
-                toPhone, body, whatsappTemplateId, createdBy);
+                toPhone, body, whatsappTemplateId, whatsappIdentityId, createdBy);
     }
 
     /** Fetch one activity by id (same row shape as timeline for mapping). */
@@ -439,12 +477,16 @@ public class CrmActivityRepository {
                 wds.display_name AS whatsapp_delivery_status_display_name,
                 es.code AS event_status_code,
                 es.display_name AS event_status_display_name,
+                ep.display_name AS event_purpose_display_name,
+                aev.event_place AS location,
                 tt.code AS task_type_code,
                 tt.display_name AS task_type_display_name,
                 ts.code AS task_status_code,
                 ts.display_name AS task_status_display_name,
                 tp.code AS task_priority_code,
-                tp.display_name AS task_priority_display_name
+                tp.display_name AS task_priority_display_name,
+                COALESCE(COALESCE(ei.from_email, ei.code), COALESCE(si.sender_name, si.code), COALESCE(wi.phone_number, wi.code)) AS channel_from,
+                COALESCE(et.template_name, et.template_code, st.template_name, st.template_code, wt.template_name, wt.template_code) AS channel_template
             FROM crm.activity a
             INNER JOIN crm.lu_activity_type at ON at.activity_type_id = a.activity_type_id
             INNER JOIN crm.lu_activity_status ast ON ast.activity_status_id = a.activity_status_id
@@ -457,12 +499,19 @@ public class CrmActivityRepository {
             LEFT JOIN crm.lu_call_result cr ON cr.call_result_id = ac.call_result_id
             LEFT JOIN crm.activity_email ae ON ae.activity_id = a.activity_id
             LEFT JOIN crm.lu_email_delivery_status eds ON eds.email_delivery_status_id = ae.email_delivery_status_id
+            LEFT JOIN crm.lu_email_identity ei ON ei.email_identity_id = ae.email_identity_id AND ei.org_client_id = a.org_client_id
+            LEFT JOIN notification.notification_template et ON et.template_id = ae.email_template_id AND et.org_client_id = a.org_client_id
             LEFT JOIN crm.activity_sms asms ON asms.activity_id = a.activity_id
             LEFT JOIN crm.lu_sms_delivery_status sds ON sds.sms_delivery_status_id = asms.sms_delivery_status_id
+            LEFT JOIN crm.lu_sms_identity si ON si.sms_identity_id = asms.sms_identity_id AND si.org_client_id = a.org_client_id
+            LEFT JOIN notification.notification_template st ON st.template_id = asms.sms_template_id AND st.org_client_id = a.org_client_id
             LEFT JOIN crm.activity_whatsapp aw ON aw.activity_id = a.activity_id
             LEFT JOIN crm.lu_whatsapp_delivery_status wds ON wds.whatsapp_delivery_status_id = aw.whatsapp_delivery_status_id
+            LEFT JOIN crm.lu_whatsapp_identity wi ON wi.whatsapp_identity_id = aw.whatsapp_identity_id AND wi.org_client_id = a.org_client_id
+            LEFT JOIN notification.notification_template wt ON wt.template_id = aw.whatsapp_template_id AND wt.org_client_id = a.org_client_id
             LEFT JOIN crm.activity_event aev ON aev.activity_id = a.activity_id
             LEFT JOIN crm.lu_event_status es ON es.event_status_id = aev.event_status_id
+            LEFT JOIN crm.lu_event_purpose ep ON ep.event_purpose_id = aev.event_purpose_id AND ep.org_client_id = a.org_client_id
             LEFT JOIN crm.activity_task atask ON atask.activity_id = a.activity_id
             LEFT JOIN crm.lu_task_type tt ON tt.task_type_id = atask.task_type_id
             LEFT JOIN crm.lu_task_status ts ON ts.task_status_id = atask.task_status_id

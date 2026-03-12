@@ -2,6 +2,7 @@ package io.clubone.billing.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.notification.NotificationJobRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,18 +27,18 @@ public class NotificationClient {
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
-    private final String actorUserId;
+    private final CrmRequestContext context;
 
     public NotificationClient(
             RestTemplate restTemplate,
             ObjectMapper objectMapper,
             @Value("${clubone.notification.base-url:http://localhost:8000}") String baseUrl,
-            @Value("${clubone.notification.actor-user-id:11111111-1111-1111-1111-111111111111}") String actorUserId
+            CrmRequestContext context
     ) {
         this.restTemplate = restTemplate;
         this.objectMapper = objectMapper;
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
-        this.actorUserId = actorUserId;
+        this.context = context;
     }
 
     /**
@@ -52,7 +53,7 @@ public class NotificationClient {
         String url = baseUrl + SEND_PATH;
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set(HEADER_ACTOR_USER_ID, actorUserId);
+        headers.set(HEADER_ACTOR_USER_ID, context.getActorId().toString());
         HttpEntity<NotificationJobRequest> entity = new HttpEntity<>(request, headers);
 
         try {

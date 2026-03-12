@@ -1,5 +1,6 @@
 package io.clubone.billing.service;
 
+import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.repo.CrmLookupRepository;
 import org.springframework.stereotype.Service;
@@ -14,37 +15,36 @@ import java.util.stream.Collectors;
 @Service
 public class CrmLookupService {
 
-    // TODO: Wire from auth/tenant context when available
-    private static final UUID DEFAULT_ORG_CLIENT_ID = UUID.fromString("f21d42c1-5ca2-4c98-acac-4e9a1e081fc5");
-
     private final CrmLookupRepository repository;
+    private final CrmRequestContext context;
 
-    public CrmLookupService(CrmLookupRepository repository) {
+    public CrmLookupService(CrmLookupRepository repository, CrmRequestContext context) {
         this.repository = repository;
+        this.context = context;
     }
 
     public List<CrmLookupItemDto> getLeadStatuses() {
-        return toLookupItems(repository.getLeadStatuses(getOrgClientId()));
+        return toLookupItems(repository.getLeadStatuses(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getLeadSources() {
-        return toLookupItems(repository.getLeadSources(getOrgClientId()));
+        return toLookupItems(repository.getLeadSources(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getLeadTypes() {
-        return toLookupItems(repository.getLeadTypes(getOrgClientId()));
+        return toLookupItems(repository.getLeadTypes(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getLeadRecordTypes() {
-        return toLookupItems(repository.getLeadRecordTypes(getOrgClientId()));
+        return toLookupItems(repository.getLeadRecordTypes(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getSalutations() {
-        return toLookupItems(repository.getSalutations(getOrgClientId()));
+        return toLookupItems(repository.getSalutations(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getGenders() {
-        return toLookupItems(repository.getGenders(getOrgClientId()));
+        return toLookupItems(repository.getGenders(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getHomeClubs() {
@@ -52,7 +52,7 @@ public class CrmLookupService {
     }
 
     public List<CrmLookupItemDto> getUsers() {
-        return toLookupItems(repository.getMemberAdvisorUsers(getOrgClientId()));
+        return toLookupItems(repository.getMemberAdvisorUsers(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getCountries() {
@@ -64,79 +64,79 @@ public class CrmLookupService {
     }
 
     public List<CrmLookupItemDto> getAccountsForLeadRecordType(UUID leadRecordTypeId) {
-        return toLookupItems(repository.getAccountsForLeadRecordType(getOrgClientId(), leadRecordTypeId));
+        return toLookupItems(repository.getAccountsForLeadRecordType(context.getOrgClientId(), leadRecordTypeId));
     }
 
     public List<CrmLookupItemDto> getCampaigns() {
-        return toLookupItems(repository.getCampaigns(getOrgClientId()));
+        return toLookupItems(repository.getCampaigns(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getContacts() {
-        return toLookupItems(repository.getContacts(getOrgClientId()));
+        return toLookupItems(repository.getContacts(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getActivityTypes() {
-        return toLookupItems(repository.getActivityTypes(getOrgClientId()));
+        return toLookupItems(repository.getActivityTypes(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getActivityStatuses() {
-        return toLookupItems(repository.getActivityStatuses(getOrgClientId()));
+        return toLookupItems(repository.getActivityStatuses(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getActivityOutcomes() {
-        return toLookupItems(repository.getActivityOutcomes(getOrgClientId()));
+        return toLookupItems(repository.getActivityOutcomes(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getActivityVisibilities() {
-        return toLookupItems(repository.getActivityVisibilities(getOrgClientId()));
+        return toLookupItems(repository.getActivityVisibilities(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getEntityTypes() {
-        return toLookupItems(repository.getEntityTypes(getOrgClientId()));
+        return toLookupItems(repository.getEntityTypes(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getCallDirections() {
-        return toLookupItems(repository.getCallDirections(getOrgClientId()));
+        return toLookupItems(repository.getCallDirections(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getCallResults() {
-        return toLookupItems(repository.getCallResults(getOrgClientId()));
+        return toLookupItems(repository.getCallResults(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getEmailDeliveryStatuses() {
-        return toLookupItems(repository.getEmailDeliveryStatuses(getOrgClientId()));
+        return toLookupItems(repository.getEmailDeliveryStatuses(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getSmsDeliveryStatuses() {
-        return toLookupItems(repository.getSmsDeliveryStatuses(getOrgClientId()));
+        return toLookupItems(repository.getSmsDeliveryStatuses(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getWhatsappDeliveryStatuses() {
-        return toLookupItems(repository.getWhatsappDeliveryStatuses(getOrgClientId()));
+        return toLookupItems(repository.getWhatsappDeliveryStatuses(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getEventStatuses() {
-        return toLookupItems(repository.getEventStatuses(getOrgClientId()));
+        return toLookupItems(repository.getEventStatuses(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getEventPurposes() {
-        return toLookupItems(repository.getEventPurposes(getOrgClientId()));
+        return toLookupItems(repository.getEventPurposes(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getRsvpStatuses() {
-        return toLookupItems(repository.getRsvpStatuses(getOrgClientId()));
+        return toLookupItems(repository.getRsvpStatuses(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getTaskTypes() {
-        return toLookupItems(repository.getTaskTypes(getOrgClientId()));
+        return toLookupItems(repository.getTaskTypes(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getTaskStatuses() {
-        return toLookupItems(repository.getTaskStatuses(getOrgClientId()));
+        return toLookupItems(repository.getTaskStatuses(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getTaskPriorities() {
-        return toLookupItems(repository.getTaskPriorities(getOrgClientId()));
+        return toLookupItems(repository.getTaskPriorities(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getEmpty() {
@@ -144,87 +144,87 @@ public class CrmLookupService {
     }
 
     public List<CrmLookupItemDto> getEmailFromAddresses() {
-        return toLookupItems(repository.getEmailFromAddresses(getOrgClientId()));
+        return toLookupItems(repository.getEmailFromAddresses(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getEmailTemplates() {
-        return toLookupItems(repository.getEmailTemplates(getOrgClientId()));
+        return toLookupItems(repository.getEmailTemplates(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getSmsIdentities() {
-        return toLookupItems(repository.getSmsIdentities(getOrgClientId()));
+        return toLookupItems(repository.getSmsIdentities(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getWhatsappIdentities() {
-        return toLookupItems(repository.getWhatsappIdentities(getOrgClientId()));
+        return toLookupItems(repository.getWhatsappIdentities(context.getOrgClientId()));
     }
 
     public List<CrmLookupItemDto> getContactLifecycles() {
-        return toLookupItems(repository.getContactLifecycles(getOrgClientId()));
+        return toLookupItems(repository.getContactLifecycles(context.getOrgClientId()));
     }
 
     public List<CrmCaseTypeLookupDto> getCaseTypes() {
-        return repository.getCaseTypes(getOrgClientId()).stream()
+        return repository.getCaseTypes(context.getOrgClientId()).stream()
                 .map(r -> new CrmCaseTypeLookupDto(asStr(r.get("case_type_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
                 .collect(Collectors.toList());
     }
 
     public List<CrmCaseStatusLookupDto> getCaseStatuses() {
-        return repository.getCaseStatuses(getOrgClientId()).stream()
+        return repository.getCaseStatuses(context.getOrgClientId()).stream()
                 .map(r -> new CrmCaseStatusLookupDto(asStr(r.get("case_status_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
                 .collect(Collectors.toList());
     }
 
     public List<CrmCasePriorityLookupDto> getCasePriorities() {
-        return repository.getCasePriorities(getOrgClientId()).stream()
+        return repository.getCasePriorities(context.getOrgClientId()).stream()
                 .map(r -> new CrmCasePriorityLookupDto(asStr(r.get("case_priority_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
                 .collect(Collectors.toList());
     }
 
     public List<CrmAccountTypeLookupDto> getAccountTypes() {
-        return repository.getAccountTypes(getOrgClientId()).stream()
+        return repository.getAccountTypes(context.getOrgClientId()).stream()
                 .map(r -> new CrmAccountTypeLookupDto(asStr(r.get("account_type_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
                 .collect(Collectors.toList());
     }
 
     public List<CrmTaskTypeLookupDto> getTaskTypesFull() {
-        return repository.getTaskTypesFull(getOrgClientId()).stream()
+        return repository.getTaskTypesFull(context.getOrgClientId()).stream()
                 .map(r -> new CrmTaskTypeLookupDto(asStr(r.get("task_type_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
                 .collect(Collectors.toList());
     }
 
     public List<CrmTaskStatusLookupDto> getTaskStatusesFull() {
-        return repository.getTaskStatusesFull(getOrgClientId()).stream()
+        return repository.getTaskStatusesFull(context.getOrgClientId()).stream()
                 .map(r -> new CrmTaskStatusLookupDto(asStr(r.get("task_status_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
                 .collect(Collectors.toList());
     }
 
     public List<CrmTaskPriorityLookupDto> getTaskPrioritiesFull() {
-        return repository.getTaskPrioritiesFull(getOrgClientId()).stream()
+        return repository.getTaskPrioritiesFull(context.getOrgClientId()).stream()
                 .map(r -> new CrmTaskPriorityLookupDto(asStr(r.get("task_priority_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
                 .collect(Collectors.toList());
     }
 
     public List<CrmEntityTypeLookupDto> getEntityTypesFull() {
-        return repository.getEntityTypesFull(getOrgClientId()).stream()
+        return repository.getEntityTypesFull(context.getOrgClientId()).stream()
                 .map(r -> new CrmEntityTypeLookupDto(asStr(r.get("entity_type_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
                 .collect(Collectors.toList());
     }
 
     public List<CrmCampaignTypeLookupDto> getCampaignTypesFull() {
-        return repository.getCampaignTypesFull(getOrgClientId()).stream()
+        return repository.getCampaignTypesFull(context.getOrgClientId()).stream()
                 .map(r -> new CrmCampaignTypeLookupDto(asStr(r.get("campaign_type_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
                 .collect(Collectors.toList());
     }
 
     public List<CrmCampaignStatusLookupDto> getCampaignStatusesFull() {
-        return repository.getCampaignStatusesFull(getOrgClientId()).stream()
+        return repository.getCampaignStatusesFull(context.getOrgClientId()).stream()
                 .map(r -> new CrmCampaignStatusLookupDto(asStr(r.get("campaign_status_id")), asStr(r.get("code")), asStr(r.get("display_name"))))
                 .collect(Collectors.toList());
     }
 
     public List<CrmOpportunityStageLookupDto> getOpportunityStagesFull() {
-        return repository.getOpportunityStagesFull(getOrgClientId()).stream()
+        return repository.getOpportunityStagesFull(context.getOrgClientId()).stream()
                 .map(r -> new CrmOpportunityStageLookupDto(
                         asStr(r.get("opportunity_stage_id")),
                         asStr(r.get("code")),
@@ -235,16 +235,12 @@ public class CrmLookupService {
     }
 
     public List<CrmContactMethodLookupDto> getContactMethods() {
-        return repository.getContactMethods(getOrgClientId()).stream()
+        return repository.getContactMethods(context.getOrgClientId()).stream()
                 .map(r -> new CrmContactMethodLookupDto(asStr(r.get("contact_method_id")), asStr(r.get("contact_method_name"))))
                 .collect(Collectors.toList());
     }
 
     private static String asStr(Object v) { return v == null ? null : v.toString(); }
-
-    private UUID getOrgClientId() {
-        return DEFAULT_ORG_CLIENT_ID;
-    }
 
     private static List<CrmLookupItemDto> toLookupItems(List<java.util.Map<String, Object>> rows) {
         return rows.stream()

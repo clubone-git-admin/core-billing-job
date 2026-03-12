@@ -1,5 +1,6 @@
 package io.clubone.billing.service;
 
+import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.repo.CrmCampaignRepository;
 import org.springframework.stereotype.Service;
@@ -17,21 +18,21 @@ import java.util.UUID;
 @Service
 public class CrmCampaignService {
 
-    private static final UUID DEFAULT_ORG_CLIENT_ID = UUID.fromString("f21d42c1-5ca2-4c98-acac-4e9a1e081fc5");
-    private static final UUID CURRENT_USER_ID = UUID.fromString("53fbd2ad-fe27-4a3c-b37b-497d74ceb19d");
     private static final int DEFAULT_PAGE_SIZE = 50;
     private static final int MAX_PAGE_SIZE = 200;
     private static final int MAX_CAMPAIGN_NAME_LENGTH = 255;
 
     private final CrmCampaignRepository campaignRepository;
+    private final CrmRequestContext context;
 
-    public CrmCampaignService(CrmCampaignRepository campaignRepository) {
+    public CrmCampaignService(CrmCampaignRepository campaignRepository, CrmRequestContext context) {
         this.campaignRepository = campaignRepository;
+        this.context = context;
     }
 
     public CrmCampaignListResponse listCampaigns(String search, UUID campaignTypeId, UUID campaignStatusId,
                                                   Integer limit, Integer offset) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         int limitVal = limit != null && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
         int offsetVal = offset != null && offset >= 0 ? offset : 0;
         List<Map<String, Object>> rows = campaignRepository.listCampaigns(orgId, search, campaignTypeId, campaignStatusId, limitVal, offsetVal);
@@ -42,13 +43,13 @@ public class CrmCampaignService {
 
     public CrmCampaignDetailDto getCampaignById(UUID campaignId) {
         if (campaignId == null) return null;
-        Map<String, Object> row = campaignRepository.findCampaignById(getOrgClientId(), campaignId);
+        Map<String, Object> row = campaignRepository.findCampaignById(context.getOrgClientId(), campaignId);
         return row != null ? mapToDetail(row) : null;
     }
 
     public CrmCampaignMemberListResponse listCampaignMembers(UUID campaignId, Integer limit, Integer offset) {
         if (campaignId == null) return new CrmCampaignMemberListResponse(List.of(), 0L);
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!campaignRepository.campaignExists(orgId, campaignId)) return null;
         int limitVal = limit != null && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
         int offsetVal = offset != null && offset >= 0 ? offset : 0;
@@ -65,7 +66,7 @@ public class CrmCampaignService {
         if (campaignName == null || campaignName.isBlank()) throw new IllegalArgumentException("campaign_name is required");
         if (campaignName.length() > MAX_CAMPAIGN_NAME_LENGTH) throw new IllegalArgumentException("campaign_name must be at most " + MAX_CAMPAIGN_NAME_LENGTH + " characters");
         if (request.campaignTypeId() == null || request.campaignTypeId().isBlank()) throw new IllegalArgumentException("campaign_type_id is required");
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         UUID campaignTypeId = UUID.fromString(request.campaignTypeId());
         if (!campaignRepository.campaignTypeExists(orgId, campaignTypeId)) throw new IllegalArgumentException("campaign_type_id must exist");
         UUID campaignStatusId = null;
@@ -85,14 +86,14 @@ public class CrmCampaignService {
         Integer expectedLeads = request.expectedLeads() != null ? request.expectedLeads() : 0;
         BigDecimal expectedRevenue = request.expectedRevenue() != null ? BigDecimal.valueOf(request.expectedRevenue()) : null;
         UUID campaignId = campaignRepository.insertCampaign(orgId, campaignName.trim(), campaignTypeId, campaignStatusId,
-                request.description(), startDate, endDate, budget, expectedLeads, expectedRevenue, marketingCode, CURRENT_USER_ID);
+                request.description(), startDate, endDate, budget, expectedLeads, expectedRevenue, marketingCode, context.getActorId());
         return getCampaignById(campaignId);
     }
 
     @Transactional
     public CrmCampaignDetailDto updateCampaign(UUID campaignId, Map<String, Object> body) {
         if (campaignId == null || body == null) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!campaignRepository.campaignExists(orgId, campaignId)) return null;
         Map<String, Object> updates = new HashMap<>();
         if (body.containsKey("campaign_name")) {
@@ -133,16 +134,16 @@ public class CrmCampaignService {
                 throw new IllegalArgumentException("marketing_code must be unique for this org");
             updates.put("marketing_code", mc);
         }
-        campaignRepository.updateCampaign(orgId, campaignId, updates, CURRENT_USER_ID);
+        campaignRepository.updateCampaign(orgId, campaignId, updates, context.getActorId());
         return getCampaignById(campaignId);
     }
 
     @Transactional
     public boolean deleteCampaign(UUID campaignId) {
         if (campaignId == null) return false;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!campaignRepository.campaignExists(orgId, campaignId)) return false;
-        return campaignRepository.deleteCampaign(orgId, campaignId, CURRENT_USER_ID) > 0;
+        return campaignRepository.deleteCampaign(orgId, campaignId, context.getActorId()) > 0;
     }
 
     private CrmCampaignSummaryDto mapToSummary(Map<String, Object> r) {
@@ -248,5 +249,4 @@ public class CrmCampaignService {
         try { return UUID.fromString(s); } catch (Exception e) { return null; }
     }
 
-    private UUID getOrgClientId() { return DEFAULT_ORG_CLIENT_ID; }
 }

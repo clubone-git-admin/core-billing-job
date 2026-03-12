@@ -41,10 +41,10 @@ public class CrmLeadRepository {
                 l.full_name,
                 l.email,
                 l.phone,
-                NULL::text AS company,
+                acc.account_name AS company,
                 ls.code AS status_code,
                 ls.display_name AS status_display_name,
-                COALESCE(l.owner_user_id::text, '') AS owner_name,
+                TRIM(REGEXP_REPLACE(COALESCE(owner_u.first_name,'') || ' ' || COALESCE(owner_u.middle_name,'') || ' ' || COALESCE(owner_u.last_name,''), ' +', ' ')) AS owner_name,
                 src.display_name AS source_display_name,
                 l.created_on AS created_at,
                 l.last_contacted_on,
@@ -52,6 +52,8 @@ public class CrmLeadRepository {
             FROM crm.leads l
             LEFT JOIN crm.lu_lead_status ls ON ls.lead_status_id = l.lead_status_id
             LEFT JOIN crm.lu_lead_source src ON src.lead_source_id = l.lead_source_id
+            LEFT JOIN "access".access_user owner_u ON owner_u.user_id = l.owner_user_id
+            LEFT JOIN crm.account acc ON acc.account_id = l.account_id AND acc.org_client_id = l.org_client_id
             WHERE l.org_client_id = ?
             """);
 
@@ -114,6 +116,14 @@ public class CrmLeadRepository {
         return count != null ? count : 0L;
     }
 
+    /** Returns all lead IDs for the org (e.g. for batch warmth recalc). */
+    public List<UUID> listLeadIdsByOrg(UUID orgClientId) {
+        return jdbc.query(
+            "SELECT lead_id FROM crm.leads WHERE org_client_id = ? AND COALESCE(is_deleted, false) = false",
+            (rs, i) -> (UUID) rs.getObject("lead_id"),
+            orgClientId);
+    }
+
     /**
      * Returns lead row with fields needed for conversion (client, contact, opportunity).
      */
@@ -141,7 +151,7 @@ public class CrmLeadRepository {
                 l.last_name,
                 l.email,
                 l.phone,
-                NULL::text AS company,
+                acc.account_name AS company,
                 l.lead_status_id AS status_id,
                 ls.code AS status_code,
                 ls.display_name AS status_display_name,
@@ -331,6 +341,23 @@ public class CrmLeadRepository {
         return jdbc.update(sql.toString(), params.toArray());
     }
 
+    /**
+     * Updates lead warmth_score and last_contacted_on (e.g. after recalculating from activities).
+     */
+    public int updateWarmthAndLastContacted(UUID orgClientId, UUID leadId, int warmthScore, java.time.Instant lastContactedOn) {
+        if (lastContactedOn == null) {
+            return jdbc.update("""
+                UPDATE crm.leads SET warmth_score = ?, last_contacted_on = NULL, modified_on = CURRENT_TIMESTAMP
+                WHERE org_client_id = ? AND lead_id = ?
+                """, Math.max(0, Math.min(100, warmthScore)), orgClientId, leadId);
+        }
+        Timestamp ts = Timestamp.from(lastContactedOn);
+        return jdbc.update("""
+            UPDATE crm.leads SET warmth_score = ?, last_contacted_on = ?, modified_on = CURRENT_TIMESTAMP
+            WHERE org_client_id = ? AND lead_id = ?
+            """, Math.max(0, Math.min(100, warmthScore)), ts, orgClientId, leadId);
+    }
+
     public UUID resolveDefaultLeadStatusId(UUID orgClientId) {
         List<UUID> ids = jdbc.query("""
                 SELECT lead_status_id
@@ -363,6 +390,22 @@ public class CrmLeadRepository {
                 orgClientId, code
         );
         return ids.isEmpty() ? null : ids.get(0);
+    }
+
+    /**
+     * Returns the current lead status code (e.g. NEW, CONTACTED, QUALIFIED) for a lead.
+     */
+    public String getLeadStatusCode(UUID orgClientId, UUID leadId) {
+        if (leadId == null) return null;
+        List<String> codes = jdbc.query("""
+                SELECT ls.code FROM crm.leads l
+                INNER JOIN crm.lu_lead_status ls ON ls.lead_status_id = l.lead_status_id
+                WHERE l.org_client_id = ? AND l.lead_id = ? AND ls.is_active = true
+                LIMIT 1
+                """,
+                (rs, i) -> rs.getString("code"),
+                orgClientId, leadId);
+        return codes.isEmpty() ? null : codes.get(0);
     }
 
     /**
@@ -430,10 +473,10 @@ public class CrmLeadRepository {
                 l.full_name,
                 l.email,
                 l.phone,
-                NULL::text AS company,
+                acc.account_name AS company,
                 ls.code AS status_code,
                 ls.display_name AS status_display_name,
-                COALESCE(l.owner_user_id::text, '') AS owner_name,
+                TRIM(REGEXP_REPLACE(COALESCE(owner_u.first_name,'') || ' ' || COALESCE(owner_u.middle_name,'') || ' ' || COALESCE(owner_u.last_name,''), ' +', ' ')) AS owner_name,
                 src.display_name AS source_display_name,
                 l.created_on AS created_at,
                 l.last_contacted_on,
@@ -443,6 +486,8 @@ public class CrmLeadRepository {
             FROM crm.leads l
             LEFT JOIN crm.lu_lead_status ls ON ls.lead_status_id = l.lead_status_id
             LEFT JOIN crm.lu_lead_source src ON src.lead_source_id = l.lead_source_id
+            LEFT JOIN "access".access_user owner_u ON owner_u.user_id = l.owner_user_id
+            LEFT JOIN crm.account acc ON acc.account_id = l.account_id AND acc.org_client_id = l.org_client_id
             WHERE l.org_client_id = ?
               AND l.lead_id = ?
             """, orgClientId, leadId);
@@ -567,7 +612,7 @@ public class CrmLeadRepository {
                 null as amount,
                 null as expected_close_date,
                 c.full_name AS contact_name,
-                COALESCE(o.owner_user_id::text, '') AS owner_name
+                TRIM(REGEXP_REPLACE(COALESCE(owner_u.first_name,'') || ' ' || COALESCE(owner_u.middle_name,'') || ' ' || COALESCE(owner_u.last_name,''), ' +', ' ')) AS owner_name
             FROM crm.leads l
             JOIN crm.opportunity o
               ON o.opportunity_id = l.converted_opportunity_id
@@ -577,6 +622,7 @@ public class CrmLeadRepository {
             LEFT JOIN crm.contact c
               ON c.contact_id = o.contact_id
              AND c.org_client_id = o.org_client_id
+            LEFT JOIN "access".access_user owner_u ON owner_u.user_id = o.owner_user_id
             WHERE l.org_client_id = ?
               AND l.lead_id = ?
               AND l.converted_opportunity_id IS NOT NULL

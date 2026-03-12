@@ -29,11 +29,13 @@ public class BillingBatchApplication {
 		return new WebMvcConfigurer() {
 			@Override
 			public void addCorsMappings(CorsRegistry registry) {
-				registry.addMapping("/**") // Adjust the mapping pattern as per your requirements
-						.allowedOriginPatterns("*") // Set the allowed origins or "*" for all origins
-						.allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH") // Set the allowed HTTP methods
-						.allowedHeaders("*")// Set the allowed headers
-						.allowCredentials(true); // Allow credentials, if needed
+				registry.addMapping("/**")
+						.allowedOriginPatterns("*")
+						.allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD")
+						.allowedHeaders("*")
+						.exposedHeaders("Content-Type", "Content-Length", "Location", "X-Application-Id", "X-Location-Id", "X-Actor-Id")
+						.allowCredentials(false)
+						.maxAge(3600);
 			}
 		};
 	}

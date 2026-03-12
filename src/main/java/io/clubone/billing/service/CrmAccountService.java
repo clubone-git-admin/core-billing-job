@@ -1,5 +1,6 @@
 package io.clubone.billing.service;
 
+import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.repo.CrmAccountRepository;
 import org.springframework.stereotype.Service;
@@ -13,19 +14,19 @@ import java.util.UUID;
 @Service
 public class CrmAccountService {
 
-    private static final UUID DEFAULT_ORG_CLIENT_ID = UUID.fromString("f21d42c1-5ca2-4c98-acac-4e9a1e081fc5");
-    private static final UUID SYSTEM_USER_ID = UUID.fromString("53fbd2ad-fe27-4a3c-b37b-497d74ceb19d");
     private static final int DEFAULT_PAGE_SIZE = 50;
     private static final int MAX_PAGE_SIZE = 200;
 
     private final CrmAccountRepository accountRepository;
+    private final CrmRequestContext context;
 
-    public CrmAccountService(CrmAccountRepository accountRepository) {
+    public CrmAccountService(CrmAccountRepository accountRepository, CrmRequestContext context) {
         this.accountRepository = accountRepository;
+        this.context = context;
     }
 
     public CrmAccountListResponse listAccounts(String search, UUID accountTypeId, Integer limit, Integer offset) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         int limitVal = limit != null && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
         int offsetVal = offset != null && offset >= 0 ? offset : 0;
         List<Map<String, Object>> rows = accountRepository.listAccounts(orgId, search, accountTypeId, limitVal, offsetVal);
@@ -36,7 +37,7 @@ public class CrmAccountService {
 
     public CrmAccountDetailDto getAccountById(UUID accountId) {
         if (accountId == null) return null;
-        Map<String, Object> row = accountRepository.findAccountById(getOrgClientId(), accountId);
+        Map<String, Object> row = accountRepository.findAccountById(context.getOrgClientId(), accountId);
         return row != null ? mapToDetail(row) : null;
     }
 
@@ -47,7 +48,7 @@ public class CrmAccountService {
         if (accountName == null || accountName.isBlank()) return null;
         if (accountName.length() > 255) return null;
         if (request.accountTypeId() == null || request.accountTypeId().isBlank()) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         UUID accountTypeId = UUID.fromString(request.accountTypeId());
         if (!accountRepository.accountTypeExists(orgId, accountTypeId)) return null;
         UUID parentAccountId = parseUuid(request.parentAccountId());
@@ -56,7 +57,7 @@ public class CrmAccountService {
         UUID accountId = accountRepository.insertAccount(orgId, accountName.trim(), accountTypeId,
                 nullIfBlank(request.industry()), nullIfBlank(request.website()), nullIfBlank(request.phone()),
                 nullIfBlank(request.email()), parentAccountId, relationshipManagerId, nullIfBlank(request.description()),
-                SYSTEM_USER_ID);
+                context.getActorId());
         return getAccountById(accountId);
     }
 
@@ -68,7 +69,7 @@ public class CrmAccountService {
     @Transactional
     public CrmAccountDetailDto updateAccount(UUID accountId, Map<String, Object> body) {
         if (accountId == null || body == null) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!accountRepository.accountExists(orgId, accountId)) return null;
         Map<String, Object> updates = new HashMap<>();
         if (body.containsKey("account_name")) {
@@ -96,7 +97,7 @@ public class CrmAccountService {
         }
         if (body.containsKey("description")) updates.put("description", nullIfBlankObj(body.get("description")));
         if (updates.isEmpty()) return getAccountById(accountId);
-        int n = accountRepository.updateAccount(orgId, accountId, updates, SYSTEM_USER_ID);
+        int n = accountRepository.updateAccount(orgId, accountId, updates, context.getActorId());
         return n > 0 ? getAccountById(accountId) : null;
     }
 
@@ -158,5 +159,4 @@ public class CrmAccountService {
         try { return UUID.fromString(s); } catch (Exception e) { return null; }
     }
 
-    private UUID getOrgClientId() { return DEFAULT_ORG_CLIENT_ID; }
 }

@@ -1,5 +1,6 @@
 package io.clubone.billing.service;
 
+import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.crm.CrmCaseDetailDto;
 import io.clubone.billing.api.dto.crm.CrmCaseHistoryItemDto;
 import io.clubone.billing.api.dto.crm.CrmContactCaseDto;
@@ -18,18 +19,17 @@ import java.util.UUID;
 @Service
 public class CrmCaseService {
 
-    private static final UUID DEFAULT_ORG_CLIENT_ID = UUID.fromString("f21d42c1-5ca2-4c98-acac-4e9a1e081fc5");
-    /** Current user for scope=my and default owner/created_by (TODO: resolve from auth context). */
-    private static final UUID CURRENT_USER_ID = UUID.fromString("53fbd2ad-fe27-4a3c-b37b-497d74ceb19d");
     private static final int DEFAULT_PAGE_SIZE = 50;
     private static final int MAX_PAGE_SIZE = 200;
 
     private final CrmCaseRepository caseRepository;
     private final CrmContactRepository contactRepository;
+    private final CrmRequestContext context;
 
-    public CrmCaseService(CrmCaseRepository caseRepository, CrmContactRepository contactRepository) {
+    public CrmCaseService(CrmCaseRepository caseRepository, CrmContactRepository contactRepository, CrmRequestContext context) {
         this.caseRepository = caseRepository;
         this.contactRepository = contactRepository;
+        this.context = context;
     }
 
     /**
@@ -37,8 +37,8 @@ public class CrmCaseService {
      */
     public CrmContactCasesResponse listCases(String scope, String search, UUID caseTypeId, UUID caseStatusId,
                                               UUID casePriorityId, Integer limit, Integer offset) {
-        UUID orgId = getOrgClientId();
-        UUID ownerFilter = "my".equalsIgnoreCase(scope != null ? scope.trim() : "") ? CURRENT_USER_ID : null;
+        UUID orgId = context.getOrgClientId();
+        UUID ownerFilter = "my".equalsIgnoreCase(scope != null ? scope.trim() : "") ? context.getActorId() : null;
         int limitVal = limit != null && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
         int offsetVal = offset != null && offset >= 0 ? offset : 0;
         List<Map<String, Object>> rows = caseRepository.listCases(orgId, ownerFilter, search,
@@ -59,7 +59,7 @@ public class CrmCaseService {
         if (subject == null || subject.isBlank()) return null;
         if (subject.length() > 255) return null;
         if (request.caseTypeId() == null || request.caseTypeId().isBlank()) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         UUID caseTypeId = UUID.fromString(request.caseTypeId());
         if (!contactRepository.caseTypeExists(orgId, caseTypeId)) return null;
         UUID caseStatusId = null;
@@ -78,9 +78,9 @@ public class CrmCaseService {
         UUID contactId = parseUuid(request.contactId());
         UUID accountId = parseUuid(request.accountId());
         UUID ownerUserId = parseUuid(request.ownerUserId());
-        if (ownerUserId == null) ownerUserId = CURRENT_USER_ID;
+        if (ownerUserId == null) ownerUserId = context.getActorId();
         UUID caseId = contactRepository.insertCase(orgId, contactId, caseTypeId, caseStatusId, casePriorityId,
-                accountId, null, ownerUserId, null, subject, request.description(), request.internalNotes(), CURRENT_USER_ID);
+                accountId, null, ownerUserId, null, subject, request.description(), request.internalNotes(), context.getActorId());
         Map<String, Object> row = contactRepository.findCaseById(orgId, caseId);
         return row != null ? mapToCase(row) : null;
     }
@@ -88,7 +88,7 @@ public class CrmCaseService {
     /** Get case by ID for detail view (with IDs for operations). Returns null if not found. */
     public CrmCaseDetailDto getCaseById(UUID caseId) {
         if (caseId == null) return null;
-        Map<String, Object> row = contactRepository.findCaseDetailById(getOrgClientId(), caseId);
+        Map<String, Object> row = contactRepository.findCaseDetailById(context.getOrgClientId(), caseId);
         return row != null ? mapToCaseDetail(row) : null;
     }
 
@@ -99,7 +99,7 @@ public class CrmCaseService {
     @Transactional
     public CrmCaseDetailDto updateCase(UUID caseId, Map<String, Object> body) {
         if (caseId == null || body == null) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (contactRepository.findCaseDetailById(orgId, caseId) == null) return null;
         Map<String, Object> updates = new HashMap<>();
         if (body.containsKey("case_status_id")) {
@@ -122,14 +122,14 @@ public class CrmCaseService {
             updates.put("owner_user_id", ownerId);
         }
         if (updates.isEmpty()) return getCaseById(caseId);
-        contactRepository.updateCase(orgId, caseId, updates, CURRENT_USER_ID);
+        contactRepository.updateCase(orgId, caseId, updates, context.getActorId());
         return getCaseById(caseId);
     }
 
     /** Case status history for detail screen, newest first. Returns null if case not found. */
     public List<CrmCaseHistoryItemDto> getCaseHistory(UUID caseId) {
         if (caseId == null) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (contactRepository.findCaseDetailById(orgId, caseId) == null) return null;
         List<Map<String, Object>> rows = caseRepository.listCaseStatusHistory(orgId, caseId);
         return rows.stream().map(this::mapToHistoryItem).toList();
@@ -195,5 +195,4 @@ public class CrmCaseService {
 
     private static String asString(Object v) { return v == null ? null : v.toString(); }
 
-    private UUID getOrgClientId() { return DEFAULT_ORG_CLIENT_ID; }
 }

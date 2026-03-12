@@ -2,6 +2,7 @@ package io.clubone.billing.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.repo.CrmLeadRepository;
 import io.clubone.billing.repo.LeadConvertRepository;
@@ -23,28 +24,28 @@ public class CrmLeadService {
 
     private static final Logger log = LoggerFactory.getLogger(CrmLeadService.class);
 
-    // TODO: Wire from auth/tenant context when available
-    private static final UUID DEFAULT_ORG_CLIENT_ID = UUID.fromString("f21d42c1-5ca2-4c98-acac-4e9a1e081fc5");
-    private static final UUID SYSTEM_USER_ID = UUID.fromString("8ad0558a-2f87-4609-9a1f-2aa62703c4c5");
-
     private static final Set<String> REVERTIBLE_STATUS_CODES = Set.of("NEW", "CONTACTED", "QUALIFIED", "DISQUALIFIED");
     private static final String CONVERTED_STATUS_CODE = "CONVERTED";
 
     private final CrmLeadRepository repository;
     private final LeadConvertRepository leadConvertRepository;
+    private final LeadWarmthService leadWarmthService;
     private final ObjectMapper objectMapper;
     private final String completionLinkBase;
+    private final CrmRequestContext context;
 
-    public CrmLeadService(CrmLeadRepository repository, LeadConvertRepository leadConvertRepository, ObjectMapper objectMapper,
-                           @Value("${clubone.crm.completion-link-base:}") String completionLinkBase) {
+    public CrmLeadService(CrmLeadRepository repository, LeadConvertRepository leadConvertRepository, LeadWarmthService leadWarmthService, ObjectMapper objectMapper,
+                           @Value("${clubone.crm.completion-link-base:}") String completionLinkBase, CrmRequestContext context) {
         this.repository = repository;
         this.leadConvertRepository = leadConvertRepository;
+        this.leadWarmthService = leadWarmthService;
         this.objectMapper = objectMapper;
         this.completionLinkBase = completionLinkBase != null ? completionLinkBase : "";
+        this.context = context;
     }
 
     public CrmLeadListResponse listLeads(String statusFilter, String search, Integer limit, Integer offset) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         int pageSize = (limit == null || limit <= 0) ? 50 : limit;
         int pageOffset = (offset == null || offset < 0) ? 0 : offset;
 
@@ -59,7 +60,7 @@ public class CrmLeadService {
     }
 
     public CrmLeadDetailDto getLeadById(UUID leadId) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         var row = repository.findLeadDetail(orgId, leadId);
         if (row == null) {
             return null;
@@ -70,7 +71,7 @@ public class CrmLeadService {
     public CrmLeadDetailDto createLead(CrmLeadUpsertRequest request) {
         validateCreateRequest(request);
 
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         UUID leadId = UUID.randomUUID();
 
         UUID defaultStatusId = repository.resolveDefaultLeadStatusId(orgId);
@@ -79,14 +80,14 @@ public class CrmLeadService {
         }
 
         Map<String, Object> fields = buildFieldMapForInsert(request);
-        fields.put("created_by", SYSTEM_USER_ID);
+        fields.put("created_by", context.getActorId());
 
         repository.insertLead(orgId, leadId, defaultStatusId, fields);
 
         if (request.notes() != null && !request.notes().isBlank()) {
             UUID entityTypeId = repository.resolveEntityTypeIdForLead(orgId);
             if (entityTypeId != null) {
-                repository.insertNote(orgId, entityTypeId, leadId, SYSTEM_USER_ID, request.notes());
+                repository.insertNote(orgId, entityTypeId, leadId, context.getActorId(), request.notes());
             } else {
                 log.warn("No entity_type 'LEAD' configured; skipping note creation for lead {}", leadId);
             }
@@ -101,13 +102,13 @@ public class CrmLeadService {
             throw new IllegalArgumentException("Request body is required");
         }
 
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         Map<String, Object> fields = buildFieldMapForUpdate(request);
         if (fields.isEmpty()) {
             return getLeadById(leadId);
         }
 
-        fields.put("modified_by", SYSTEM_USER_ID);
+        fields.put("modified_by", context.getActorId());
 
         int updated = repository.updateLead(orgId, leadId, fields);
         if (updated == 0) {
@@ -124,7 +125,7 @@ public class CrmLeadService {
             throw new IllegalArgumentException("lead_status_id is required (UUID from crm.lu_lead_status)");
         }
 
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         UUID newStatusId = request.leadStatusId();
 
         String statusCode = repository.resolveLeadStatusCodeById(orgId, newStatusId);
@@ -150,10 +151,12 @@ public class CrmLeadService {
             throw new IllegalArgumentException("Lead status must be one of: NEW, CONTACTED, QUALIFIED, DISQUALIFIED, or CONVERTED");
         }
 
-        int updated = repository.updateLeadStatus(orgId, leadId, newStatusId, SYSTEM_USER_ID);
+        int updated = repository.updateLeadStatus(orgId, leadId, newStatusId, context.getActorId());
         if (updated == 0) {
             return null;
         }
+
+        leadWarmthService.recalculateWarmthForLead(leadId);
 
         var row = repository.findLeadSummaryById(orgId, leadId);
         return row == null ? null : mapToSummaryDto(row);
@@ -194,28 +197,28 @@ public class CrmLeadService {
         UUID phoneTypeId = leadConvertRepository.resolvePhoneContactMechanismTypeIdPrimary();
         UUID postalTypeId = leadConvertRepository.resolvePostalContactMechanismTypeIdPrimary();
 
-        UUID clientRoleId = leadConvertRepository.insertClientRole(prospectTypeId, locationId, SYSTEM_USER_ID);
+        UUID clientRoleId = leadConvertRepository.insertClientRole(prospectTypeId, locationId, context.getActorId());
 
         if (firstNameTypeId != null) {
-            leadConvertRepository.insertClientCharacteristic(clientRoleId, firstNameTypeId, asString(lead.get("first_name")), SYSTEM_USER_ID);
+            leadConvertRepository.insertClientCharacteristic(clientRoleId, firstNameTypeId, asString(lead.get("first_name")), context.getActorId());
         }
         if (lastNameTypeId != null) {
-            leadConvertRepository.insertClientCharacteristic(clientRoleId, lastNameTypeId, asString(lead.get("last_name")), SYSTEM_USER_ID);
+            leadConvertRepository.insertClientCharacteristic(clientRoleId, lastNameTypeId, asString(lead.get("last_name")), context.getActorId());
         }
         if (emailTypeId != null) {
-            leadConvertRepository.insertEmailContactMechanism(clientRoleId, emailTypeId, asString(lead.get("email")), SYSTEM_USER_ID);
+            leadConvertRepository.insertEmailContactMechanism(clientRoleId, emailTypeId, asString(lead.get("email")), context.getActorId());
         }
         if (phoneTypeId != null) {
-            leadConvertRepository.insertPhoneContactMechanism(clientRoleId, phoneTypeId, null, asString(lead.get("phone")), SYSTEM_USER_ID);
+            leadConvertRepository.insertPhoneContactMechanism(clientRoleId, phoneTypeId, null, asString(lead.get("phone")), context.getActorId());
         }
         if (postalTypeId != null && lead.get("state_id") != null && lead.get("country_id") != null) {
             String address = asString(lead.get("address"));
             leadConvertRepository.insertPostalContactMechanism(
                     clientRoleId, postalTypeId, address != null ? address : "", asString(lead.get("city")),
-                    (UUID) lead.get("state_id"), asString(lead.get("zip_code")), (UUID) lead.get("country_id"), SYSTEM_USER_ID);
+                    (UUID) lead.get("state_id"), asString(lead.get("zip_code")), (UUID) lead.get("country_id"), context.getActorId());
         }
 
-        leadConvertRepository.insertClientRoleStatus(clientRoleId, agreementStatusId, accountStatusId, clientStatusId, SYSTEM_USER_ID);
+        leadConvertRepository.insertClientRoleStatus(clientRoleId, agreementStatusId, accountStatusId, clientStatusId, context.getActorId());
 
         String firstName = asString(lead.get("first_name"));
         String lastName = asString(lead.get("last_name"));
@@ -231,28 +234,28 @@ public class CrmLeadService {
                 asString(lead.get("date_of_birth")),
                 asBoolean(lead.get("consent_to_contact")), asBoolean(lead.get("consent_to_marketing")),
                 asBoolean(lead.get("has_opt_out_sms")), asBoolean(lead.get("has_opt_out_email")),
-                SYSTEM_USER_ID);
+                context.getActorId());
 
         UUID ownerUserId = (UUID) lead.get("owner_user_id");
         if (ownerUserId == null) {
-            ownerUserId = SYSTEM_USER_ID;
+            ownerUserId = context.getActorId();
         }
 
         UUID opportunityId = leadConvertRepository.insertOpportunity(
                 orgId, clientRoleId, opportunityStageId, contactId, ownerUserId,
                 (UUID) lead.get("home_location_id"), (UUID) lead.get("salutation_id"),
                 firstName, lastName, fullName, asString(lead.get("email")), asString(lead.get("phone")),
-                (UUID) lead.get("lead_type_id"), (UUID) lead.get("gender_id"), (UUID) lead.get("referred_by_contact_id"), SYSTEM_USER_ID);
+                (UUID) lead.get("lead_type_id"), (UUID) lead.get("gender_id"), (UUID) lead.get("referred_by_contact_id"), context.getActorId());
 
-        repository.updateLeadStatus(orgId, leadId, convertedStatusId, SYSTEM_USER_ID);
-        repository.updateLeadConvertedIds(orgId, leadId, contactId, opportunityId, SYSTEM_USER_ID);
+        repository.updateLeadStatus(orgId, leadId, convertedStatusId, context.getActorId());
+        repository.updateLeadConvertedIds(orgId, leadId, contactId, opportunityId, context.getActorId());
 
         var row = repository.findLeadSummaryById(orgId, leadId);
         return row == null ? null : mapToSummaryDto(row);
     }
 
     public List<CrmLeadNoteDto> listNotes(UUID leadId) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         UUID entityTypeId = repository.resolveEntityTypeIdForLead(orgId);
         if (entityTypeId == null) {
             log.warn("No entity_type 'LEAD' configured; returning empty notes");
@@ -276,13 +279,13 @@ public class CrmLeadService {
             throw new IllegalArgumentException("body is required");
         }
 
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         UUID entityTypeId = repository.resolveEntityTypeIdForLead(orgId);
         if (entityTypeId == null) {
             throw new IllegalStateException("No entity_type 'LEAD' configured");
         }
 
-        var row = repository.insertNote(orgId, entityTypeId, leadId, SYSTEM_USER_ID, request.body());
+        var row = repository.insertNote(orgId, entityTypeId, leadId, context.getActorId(), request.body());
         if (row == null) {
             return null;
         }
@@ -297,7 +300,7 @@ public class CrmLeadService {
     }
 
     public List<CrmLeadHistoryItemDto> listHistory(UUID leadId) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         var rows = repository.listStatusHistory(orgId, leadId);
         return rows.stream()
                 .map(r -> new CrmLeadHistoryItemDto(
@@ -313,7 +316,7 @@ public class CrmLeadService {
     }
 
     public CrmLeadRelatedDto getRelated(UUID leadId) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
 
         var contactRow = repository.findConvertedContact(orgId, leadId);
         var opportunityRow = repository.findConvertedOpportunity(orgId, leadId);
@@ -602,10 +605,6 @@ public class CrmLeadService {
                 CrmLeadRepository.toIsoString(row.get("created_date")),
                 CrmLeadRepository.toIsoString(row.get("last_modified_date"))
         );
-    }
-
-    private UUID getOrgClientId() {
-        return DEFAULT_ORG_CLIENT_ID;
     }
 
     private String toJsonStringOrNull(Object value, String defaultJson) {

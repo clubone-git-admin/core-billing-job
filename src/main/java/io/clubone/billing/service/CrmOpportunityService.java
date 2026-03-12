@@ -1,5 +1,6 @@
 package io.clubone.billing.service;
 
+import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.repo.AgreementTrialRepository;
 import io.clubone.billing.repo.ClientAgreementRepository;
@@ -28,9 +29,6 @@ public class CrmOpportunityService {
 
     private static final Logger log = LoggerFactory.getLogger(CrmOpportunityService.class);
 
-    private static final UUID DEFAULT_ORG_CLIENT_ID = UUID.fromString("f21d42c1-5ca2-4c98-acac-4e9a1e081fc5");
-    private static final UUID SYSTEM_USER_ID = UUID.fromString("8ad0558a-2f87-4609-9a1f-2aa62703c4c5");
-
     private static final int DEFAULT_LIMIT = 50;
     private static final int MAX_LIMIT = 200;
 
@@ -39,21 +37,24 @@ public class CrmOpportunityService {
     private final AgreementTrialRepository agreementTrialRepository;
     private final ClientAgreementRepository clientAgreementRepository;
     private final LeadConvertRepository leadConvertRepository;
+    private final CrmRequestContext context;
 
     public CrmOpportunityService(CrmOpportunityRepository repository, CrmContactRepository contactRepository,
                                  AgreementTrialRepository agreementTrialRepository,
                                  ClientAgreementRepository clientAgreementRepository,
-                                 LeadConvertRepository leadConvertRepository) {
+                                 LeadConvertRepository leadConvertRepository,
+                                 CrmRequestContext context) {
         this.repository = repository;
         this.contactRepository = contactRepository;
         this.agreementTrialRepository = agreementTrialRepository;
         this.clientAgreementRepository = clientAgreementRepository;
         this.leadConvertRepository = leadConvertRepository;
+        this.context = context;
     }
 
     public CrmOpportunityListResponse list(String search, UUID opportunityStageId, String stageCode,
                                            UUID ownerUserId, UUID leadTypeId, Integer limit, Integer offset) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         int pageSize = (limit == null || limit <= 0) ? DEFAULT_LIMIT : Math.min(limit, MAX_LIMIT);
         int pageOffset = (offset == null || offset < 0) ? 0 : offset;
 
@@ -67,7 +68,7 @@ public class CrmOpportunityService {
     }
 
     public CrmOpportunityDetailDto getById(UUID opportunityId) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         var row = repository.findById(orgId, opportunityId);
         return row == null ? null : mapToDetailDto(row);
     }
@@ -84,7 +85,7 @@ public class CrmOpportunityService {
             throw new IllegalArgumentException("full_name is required");
         }
 
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!repository.contactExists(orgId, contactId)) {
             throw new IllegalArgumentException("Contact not found or does not belong to organization: " + request.contactId());
         }
@@ -114,7 +115,7 @@ public class CrmOpportunityService {
 
         UUID opportunityId = repository.insert(orgId, contactId, fullName.trim(), opportunityStageId, ownerUserId,
                 request.firstName(), request.lastName(), request.email(), request.phone(),
-                homeLocationId, leadTypeId, probability, SYSTEM_USER_ID);
+                homeLocationId, leadTypeId, probability, context.getActorId());
 
         var row = repository.findById(orgId, opportunityId);
         return mapToDetailDto(row);
@@ -124,7 +125,7 @@ public class CrmOpportunityService {
         if (body == null || body.isEmpty()) {
             return getById(opportunityId);
         }
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!repository.exists(orgId, opportunityId)) {
             return null;
         }
@@ -171,7 +172,7 @@ public class CrmOpportunityService {
     }
 
     public boolean delete(UUID opportunityId) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!repository.exists(orgId, opportunityId)) {
             return false;
         }
@@ -187,12 +188,12 @@ public class CrmOpportunityService {
         if (request.opportunityStageId() == null || request.opportunityStageId().isBlank()) {
             throw new IllegalArgumentException("opportunity_stage_id is required");
         }
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         List<UUID> ids = request.opportunityIds().stream()
                 .map(s -> parseUuid(s, "opportunity_ids"))
                 .collect(Collectors.toList());
         UUID newStageId = parseUuid(request.opportunityStageId(), "opportunity_stage_id");
-        return repository.bulkUpdateStage(orgId, ids, newStageId, SYSTEM_USER_ID,
+        return repository.bulkUpdateStage(orgId, ids, newStageId, context.getActorId(),
                 request.changeReason(), request.notes());
     }
 
@@ -203,7 +204,7 @@ public class CrmOpportunityService {
         if (request.ownerUserId() == null || request.ownerUserId().isBlank()) {
             throw new IllegalArgumentException("owner_user_id is required");
         }
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         List<UUID> ids = request.opportunityIds().stream()
                 .map(s -> parseUuid(s, "opportunity_ids"))
                 .collect(Collectors.toList());
@@ -215,7 +216,7 @@ public class CrmOpportunityService {
     }
 
     public CrmOpportunityContactMethodListResponse listContactMethods(UUID opportunityId) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!repository.exists(orgId, opportunityId)) {
             return null;
         }
@@ -231,7 +232,7 @@ public class CrmOpportunityService {
         if (request == null || request.contactMethodId() == null || request.contactMethodId().isBlank()) {
             throw new IllegalArgumentException("contact_method_id is required");
         }
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!repository.exists(orgId, opportunityId)) {
             return null;
         }
@@ -240,7 +241,7 @@ public class CrmOpportunityService {
             throw new IllegalArgumentException("Contact method not found: " + request.contactMethodId());
         }
         boolean isPrimary = request.isPrimary() != null && request.isPrimary();
-        UUID id = repository.addContactMethod(opportunityId, contactMethodId, isPrimary, SYSTEM_USER_ID);
+        UUID id = repository.addContactMethod(opportunityId, contactMethodId, isPrimary, context.getActorId());
         var rows = repository.listContactMethods(orgId, opportunityId);
         return rows.stream()
                 .filter(r -> id.equals(r.get("client_contact_method_id")))
@@ -251,7 +252,7 @@ public class CrmOpportunityService {
     }
 
     public boolean removeContactMethod(UUID opportunityId, UUID clientContactMethodId) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!repository.exists(orgId, opportunityId)) {
             return false;
         }
@@ -285,7 +286,7 @@ public class CrmOpportunityService {
      */
     public CrmOpportunityLinkedDto getLinked(UUID opportunityId) {
         if (opportunityId == null) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!repository.exists(orgId, opportunityId)) return null;
         Map<String, Object> oppRow = repository.findById(orgId, opportunityId);
         if (oppRow == null) return null;
@@ -340,7 +341,7 @@ public class CrmOpportunityService {
      */
     public CrmOpportunityTrialResponse getTrials(UUID opportunityId) {
         if (opportunityId == null) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!repository.exists(orgId, opportunityId)) return null;
         Map<String, Object> opp = repository.findById(orgId, opportunityId);
         if (opp == null) return null;
@@ -380,7 +381,7 @@ public class CrmOpportunityService {
      */
     public ActiveTrialAgreementResponse getActiveTrialAgreements(UUID opportunityId) {
         if (opportunityId == null) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!repository.exists(orgId, opportunityId)) return null;
         Map<String, Object> opp = repository.findById(orgId, opportunityId);
         if (opp == null) return null;
@@ -419,7 +420,7 @@ public class CrmOpportunityService {
     @Transactional
     public CreateTrialClientAgreementResponse createTrialClientAgreement(UUID opportunityId, CreateTrialClientAgreementRequest request) {
         if (opportunityId == null || request == null) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!repository.exists(orgId, opportunityId)) return null;
         Map<String, Object> opp = repository.findById(orgId, opportunityId);
         if (opp == null) return null;
@@ -483,14 +484,14 @@ public class CrmOpportunityService {
                 agreementId, agreementVersionId, agreementLocationId, agreementClassificationId,
                 clientRoleId, purchasedLevelId, clientAgreementStatusId,
                 startDateUtc, endDateUtc,
-                salesAdvisorId, SYSTEM_USER_ID);
+                salesAdvisorId, context.getActorId());
 
         int updated = clientAgreementRepository.updateClientRoleStatusAgreementStatus(clientRoleId, clientAgreementStatusId);
         if (updated == 0 && !clientAgreementRepository.hasClientRoleStatus(clientRoleId)) {
             UUID accountStatusId = leadConvertRepository.resolveClientAccountStatusIdActive();
             UUID statusId = leadConvertRepository.resolveClientStatusIdActive();
             if (accountStatusId != null && statusId != null) {
-                leadConvertRepository.insertClientRoleStatus(clientRoleId, clientAgreementStatusId, accountStatusId, statusId, SYSTEM_USER_ID);
+                leadConvertRepository.insertClientRoleStatus(clientRoleId, clientAgreementStatusId, accountStatusId, statusId, context.getActorId());
             }
         }
 
@@ -559,10 +560,6 @@ public class CrmOpportunityService {
             default:
                 return null;
         }
-    }
-
-    private UUID getOrgClientId() {
-        return DEFAULT_ORG_CLIENT_ID;
     }
 
     private static UUID parseUuid(String value, String fieldName) {

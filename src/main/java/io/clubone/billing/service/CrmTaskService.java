@@ -1,5 +1,6 @@
 package io.clubone.billing.service;
 
+import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.repo.CrmActivityRepository;
 import io.clubone.billing.repo.CrmEntitySearchRepository;
@@ -20,26 +21,26 @@ import java.util.UUID;
 @Service
 public class CrmTaskService {
 
-    private static final UUID DEFAULT_ORG_CLIENT_ID = UUID.fromString("f21d42c1-5ca2-4c98-acac-4e9a1e081fc5");
-    private static final UUID CURRENT_USER_ID = UUID.fromString("53fbd2ad-fe27-4a3c-b37b-497d74ceb19d");
     private static final int DEFAULT_PAGE_SIZE = 50;
     private static final int MAX_PAGE_SIZE = 200;
 
     private final CrmTaskRepository taskRepository;
     private final CrmActivityRepository activityRepository;
     private final CrmEntitySearchRepository entitySearchRepository;
+    private final CrmRequestContext context;
 
     public CrmTaskService(CrmTaskRepository taskRepository, CrmActivityRepository activityRepository,
-                          CrmEntitySearchRepository entitySearchRepository) {
+                          CrmEntitySearchRepository entitySearchRepository, CrmRequestContext context) {
         this.taskRepository = taskRepository;
         this.activityRepository = activityRepository;
         this.entitySearchRepository = entitySearchRepository;
+        this.context = context;
     }
 
     public CrmTaskListResponse listTasks(String scope, String view, String search, UUID taskTypeId, UUID taskStatusId,
                                          UUID taskPriorityId, Integer limit, Integer offset) {
-        UUID orgId = getOrgClientId();
-        UUID assignedFilter = "my".equalsIgnoreCase(scope != null ? scope.trim() : "") ? CURRENT_USER_ID : null;
+        UUID orgId = context.getOrgClientId();
+        UUID assignedFilter = "my".equalsIgnoreCase(scope != null ? scope.trim() : "") ? context.getActorId() : null;
         String viewVal = (view != null && !view.isBlank()) ? view.trim() : "today";
         int limitVal = limit != null && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
         int offsetVal = offset != null && offset >= 0 ? offset : 0;
@@ -52,7 +53,7 @@ public class CrmTaskService {
 
     public CrmTaskDetailDto getTaskById(UUID taskId) {
         if (taskId == null) return null;
-        Map<String, Object> row = taskRepository.findTaskById(getOrgClientId(), taskId);
+        Map<String, Object> row = taskRepository.findTaskById(context.getOrgClientId(), taskId);
         return row != null ? mapToDetail(row) : null;
     }
 
@@ -63,7 +64,7 @@ public class CrmTaskService {
         if (subject == null || subject.isBlank()) return null;
         if (subject.length() > 255) return null;
         if (request.taskTypeId() == null || request.taskTypeId().isBlank()) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
 
         UUID existingActivityId = parseUuid(request.activityId());
         UUID entityTypeId = parseUuid(request.entityTypeId());
@@ -107,16 +108,16 @@ public class CrmTaskService {
         UUID taskId = taskRepository.insertTask(orgId, activityTypeId, activityStatusId, visibilityId,
                 existingActivityId != null ? null : entityTypeId, existingActivityId != null ? null : entityId,
                 relatedEntityTypeId, relatedEntityId, existingActivityId,
-                subject, dueDateTime, assignedToUserId, CURRENT_USER_ID,
+                subject, dueDateTime, assignedToUserId, context.getActorId(),
                 taskTypeId, taskStatusId, taskPriorityId,
-                reminderSet, reminderTime, request.comments(), CURRENT_USER_ID);
+                reminderSet, reminderTime, request.comments(), context.getActorId());
         return getTaskById(taskId);
     }
 
     @Transactional
     public CrmTaskDetailDto updateTask(UUID taskId, Map<String, Object> body) {
         if (taskId == null || body == null) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!taskRepository.taskExists(orgId, taskId)) return null;
         Map<String, Object> activityUpdates = new HashMap<>();
         Map<String, Object> taskUpdates = new HashMap<>();
@@ -177,16 +178,16 @@ public class CrmTaskService {
             activityUpdates.put("related_entity_type_id", relTypeId);
             activityUpdates.put("related_entity_id", relId);
         }
-        taskRepository.updateTask(orgId, taskId, activityUpdates, taskUpdates, CURRENT_USER_ID);
+        taskRepository.updateTask(orgId, taskId, activityUpdates, taskUpdates, context.getActorId());
         return getTaskById(taskId);
     }
 
     @Transactional
     public boolean deleteTask(UUID taskId) {
         if (taskId == null) return false;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!taskRepository.taskExists(orgId, taskId)) return false;
-        return taskRepository.deleteTask(orgId, taskId, CURRENT_USER_ID) > 0;
+        return taskRepository.deleteTask(orgId, taskId, context.getActorId()) > 0;
     }
 
     private CrmTaskSummaryDto mapToSummary(Map<String, Object> r) {
@@ -266,5 +267,4 @@ public class CrmTaskService {
         }
     }
 
-    private UUID getOrgClientId() { return DEFAULT_ORG_CLIENT_ID; }
 }

@@ -1,5 +1,6 @@
 package io.clubone.billing.service;
 
+import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.repo.CrmHomeRepository;
 import io.clubone.billing.repo.CrmTaskRepository;
@@ -14,8 +15,6 @@ import java.util.UUID;
 @Service
 public class CrmHomeService {
 
-    private static final UUID DEFAULT_ORG_CLIENT_ID = UUID.fromString("f21d42c1-5ca2-4c98-acac-4e9a1e081fc5");
-    private static final UUID CURRENT_USER_ID = UUID.fromString("53fbd2ad-fe27-4a3c-b37b-497d74ceb19d");
     private static final int HOME_KEY_DEALS_LIMIT = 20;
     private static final int HOME_EVENTS_LIMIT = 20;
     private static final int HOME_TASKS_LIMIT = 20;
@@ -23,14 +22,16 @@ public class CrmHomeService {
 
     private final CrmHomeRepository homeRepository;
     private final CrmTaskRepository taskRepository;
+    private final CrmRequestContext context;
 
-    public CrmHomeService(CrmHomeRepository homeRepository, CrmTaskRepository taskRepository) {
+    public CrmHomeService(CrmHomeRepository homeRepository, CrmTaskRepository taskRepository, CrmRequestContext context) {
         this.homeRepository = homeRepository;
         this.taskRepository = taskRepository;
+        this.context = context;
     }
 
     public CrmPipelineSummaryDto getPipelineSummary() {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         List<Map<String, Object>> rows = homeRepository.getPipelineSummary(orgId);
         List<CrmPipelineStageSummaryDto> stages = rows.stream()
                 .map(r -> new CrmPipelineStageSummaryDto(
@@ -45,16 +46,16 @@ public class CrmHomeService {
     }
 
     public CrmKeyDealsResponse getKeyDeals(String filter) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         String f = (filter != null && !filter.isBlank()) ? filter.trim().toLowerCase() : "my";
-        UUID userId = "my".equals(f) ? getCurrentUserId() : null;
+        UUID userId = "my".equals(f) ? context.getActorId() : null;
         List<Map<String, Object>> rows = homeRepository.getKeyDeals(orgId, userId, f, HOME_KEY_DEALS_LIMIT);
         List<CrmKeyDealDto> items = rows.stream().map(this::mapKeyDeal).toList();
         return new CrmKeyDealsResponse(items);
     }
 
     public CrmTodaysEventsResponse getTodaysEvents(String dateYyyyMmDd) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         String date = (dateYyyyMmDd != null && !dateYyyyMmDd.isBlank()) ? dateYyyyMmDd : LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
         List<Map<String, Object>> rows = homeRepository.getTodaysEvents(orgId, date, HOME_EVENTS_LIMIT);
         List<CrmEventSummaryDto> items = rows.stream().map(this::mapEvent).toList();
@@ -62,16 +63,16 @@ public class CrmHomeService {
     }
 
     public CrmTodaysTasksResponse getTodaysTasks(String scope) {
-        UUID orgId = getOrgClientId();
-        UUID assignedTo = "my".equalsIgnoreCase(scope != null ? scope.trim() : "my") ? getCurrentUserId() : null;
+        UUID orgId = context.getOrgClientId();
+        UUID assignedTo = "my".equalsIgnoreCase(scope != null ? scope.trim() : "my") ? context.getActorId() : null;
         List<Map<String, Object>> rows = taskRepository.listTasksForHome(orgId, assignedTo, HOME_TASKS_LIMIT);
         List<CrmHomeTaskDto> items = rows.stream().map(this::mapHomeTask).toList();
         return new CrmTodaysTasksResponse(items);
     }
 
     public CrmItemsToApproveResponse getItemsToApprove() {
-        UUID orgId = getOrgClientId();
-        UUID userId = getCurrentUserId();
+        UUID orgId = context.getOrgClientId();
+        UUID userId = context.getActorId();
         try {
             List<Map<String, Object>> rows = homeRepository.getItemsToApprove(orgId, userId, HOME_APPROVALS_LIMIT);
             List<CrmApprovalItemDto> items = rows.stream().map(this::mapApprovalItem).toList();
@@ -83,12 +84,12 @@ public class CrmHomeService {
 
     public boolean approve(UUID approvalId) {
         if (approvalId == null) return false;
-        return homeRepository.approve(getOrgClientId(), approvalId, getCurrentUserId());
+        return homeRepository.approve(context.getOrgClientId(), approvalId, context.getActorId());
     }
 
     public boolean reject(UUID approvalId) {
         if (approvalId == null) return false;
-        return homeRepository.reject(getOrgClientId(), approvalId, getCurrentUserId());
+        return homeRepository.reject(context.getOrgClientId(), approvalId, context.getActorId());
     }
 
     private CrmKeyDealDto mapKeyDeal(Map<String, Object> r) {
@@ -172,6 +173,4 @@ public class CrmHomeService {
         try { return Integer.parseInt(v.toString()); } catch (Exception e) { return 0; }
     }
 
-    private UUID getOrgClientId() { return DEFAULT_ORG_CLIENT_ID; }
-    private UUID getCurrentUserId() { return CURRENT_USER_ID; }
 }

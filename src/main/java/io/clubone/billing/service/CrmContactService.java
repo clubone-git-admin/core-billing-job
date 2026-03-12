@@ -1,6 +1,7 @@
 package io.clubone.billing.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.repo.CrmContactRepository;
 import org.slf4j.Logger;
@@ -14,22 +15,23 @@ import java.util.*;
 public class CrmContactService {
 
     private static final Logger log = LoggerFactory.getLogger(CrmContactService.class);
-    private static final UUID DEFAULT_ORG_CLIENT_ID = UUID.fromString("f21d42c1-5ca2-4c98-acac-4e9a1e081fc5");
-    private static final UUID SYSTEM_USER_ID = UUID.fromString("53fbd2ad-fe27-4a3c-b37b-497d74ceb19d");
     private static final int DEFAULT_PAGE_SIZE = 50;
     private static final int MAX_PAGE_SIZE = 200;
 
     private final CrmContactRepository contactRepository;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+    private final CrmRequestContext context;
 
     public CrmContactService(CrmContactRepository contactRepository,
-                             com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
+                             com.fasterxml.jackson.databind.ObjectMapper objectMapper,
+                             CrmRequestContext context) {
         this.contactRepository = contactRepository;
         this.objectMapper = objectMapper;
+        this.context = context;
     }
 
     public CrmContactListResponse listContacts(String view, String lifecycleCode, String search, UUID ownerId, Integer limit, Integer offset) {
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         int limitVal = limit != null && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
         int offsetVal = offset != null && offset >= 0 ? offset : 0;
         List<Map<String, Object>> rows = contactRepository.listContacts(orgId, view, lifecycleCode, search, ownerId, limitVal, offsetVal);
@@ -40,14 +42,14 @@ public class CrmContactService {
 
     public CrmContactDetailDto getContactById(UUID contactId) {
         if (contactId == null) return null;
-        Map<String, Object> row = contactRepository.findContactById(getOrgClientId(), contactId);
+        Map<String, Object> row = contactRepository.findContactById(context.getOrgClientId(), contactId);
         return row != null ? mapToDetail(row) : null;
     }
 
     @Transactional
     public CrmContactDetailDto updateContact(UUID contactId, CrmContactUpdateRequest request) {
         if (contactId == null || request == null) return null;
-        if (!contactRepository.contactExists(getOrgClientId(), contactId))
+        if (!contactRepository.contactExists(context.getOrgClientId(), contactId))
             return null;
         Map<String, Object> updates = new HashMap<>();
         if (request.firstName() != null) updates.put("first_name", request.firstName());
@@ -76,15 +78,15 @@ public class CrmContactService {
                 log.warn("Failed to serialize tags: {}", e.getMessage());
             }
         }
-        contactRepository.updateContact(getOrgClientId(), contactId, updates, SYSTEM_USER_ID);
+        contactRepository.updateContact(context.getOrgClientId(), contactId, updates, context.getActorId());
         return getContactById(contactId);
     }
 
     @Transactional
     public CrmContactDetailDto changeOwner(UUID contactId, UUID ownerId) {
         if (contactId == null || ownerId == null) return null;
-        if (!contactRepository.contactExists(getOrgClientId(), contactId)) return null;
-        contactRepository.updateContactOwner(getOrgClientId(), contactId, ownerId, SYSTEM_USER_ID);
+        if (!contactRepository.contactExists(context.getOrgClientId(), contactId)) return null;
+        contactRepository.updateContactOwner(context.getOrgClientId(), contactId, ownerId, context.getActorId());
         return getContactById(contactId);
     }
 
@@ -95,31 +97,31 @@ public class CrmContactService {
         }
         UUID ownerId = UUID.fromString(ownerIdStr);
         List<UUID> ids = contactIds.stream().map(UUID::fromString).toList();
-        int n = contactRepository.bulkUpdateOwner(getOrgClientId(), ids, ownerId, SYSTEM_USER_ID);
+        int n = contactRepository.bulkUpdateOwner(context.getOrgClientId(), ids, ownerId, context.getActorId());
         return new CrmContactBulkOwnerResponse(n);
     }
 
     public List<CrmContactNoteDto> listNotes(UUID contactId) {
         if (contactId == null) return List.of();
-        UUID entityTypeId = contactRepository.resolveEntityTypeIdForContact(getOrgClientId());
+        UUID entityTypeId = contactRepository.resolveEntityTypeIdForContact(context.getOrgClientId());
         if (entityTypeId == null) return List.of();
-        List<Map<String, Object>> rows = contactRepository.listNotes(getOrgClientId(), entityTypeId, contactId);
+        List<Map<String, Object>> rows = contactRepository.listNotes(context.getOrgClientId(), entityTypeId, contactId);
         return rows.stream().map(this::mapToNote).toList();
     }
 
     @Transactional
     public CrmContactNoteDto addNote(UUID contactId, CrmCreateLeadNoteRequest request) {
         if (contactId == null || request == null || request.body() == null) return null;
-        if (!contactRepository.contactExists(getOrgClientId(), contactId)) return null;
-        UUID entityTypeId = contactRepository.resolveEntityTypeIdForContact(getOrgClientId());
+        if (!contactRepository.contactExists(context.getOrgClientId(), contactId)) return null;
+        UUID entityTypeId = contactRepository.resolveEntityTypeIdForContact(context.getOrgClientId());
         if (entityTypeId == null) return null;
-        Map<String, Object> row = contactRepository.insertNote(getOrgClientId(), entityTypeId, contactId, SYSTEM_USER_ID, request.body());
+        Map<String, Object> row = contactRepository.insertNote(context.getOrgClientId(), entityTypeId, contactId, context.getActorId(), request.body());
         return row != null ? mapToNoteFromInsert(row) : null;
     }
 
     public CrmContactLinkedDto getLinked(UUID contactId) {
         if (contactId == null) return new CrmContactLinkedDto(null, List.of(), List.of());
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!contactRepository.contactExists(orgId, contactId))
             return new CrmContactLinkedDto(null, List.of(), List.of());
         CrmLeadRelatedDto.RelatedAccount account = null;
@@ -157,12 +159,12 @@ public class CrmContactService {
 
     public CrmContactCasesResponse getCases(UUID contactId, String search, String status, Integer limit, Integer offset) {
         if (contactId == null) return new CrmContactCasesResponse(List.of(), 0L);
-        if (!contactRepository.contactExists(getOrgClientId(), contactId))
+        if (!contactRepository.contactExists(context.getOrgClientId(), contactId))
             return new CrmContactCasesResponse(List.of(), 0L);
         int limitVal = limit != null && limit > 0 ? Math.min(limit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
         int offsetVal = offset != null && offset >= 0 ? offset : 0;
-        List<Map<String, Object>> rows = contactRepository.findCasesByContact(getOrgClientId(), contactId, search, status, limitVal, offsetVal);
-        long total = contactRepository.countCasesByContact(getOrgClientId(), contactId, search, status);
+        List<Map<String, Object>> rows = contactRepository.findCasesByContact(context.getOrgClientId(), contactId, search, status, limitVal, offsetVal);
+        long total = contactRepository.countCasesByContact(context.getOrgClientId(), contactId, search, status);
         List<CrmContactCaseDto> cases = rows.stream().map(this::mapToCase).toList();
         return new CrmContactCasesResponse(cases, total);
     }
@@ -174,7 +176,7 @@ public class CrmContactService {
     @Transactional
     public CrmContactCaseDto createCase(UUID contactId, CrmCreateCaseRequest request) {
         if (contactId == null || request == null) return null;
-        UUID orgId = getOrgClientId();
+        UUID orgId = context.getOrgClientId();
         if (!contactRepository.contactExists(orgId, contactId)) return null;
         // Required: subject (non-empty, max 255)
         String subject = request.subject();
@@ -202,7 +204,7 @@ public class CrmContactService {
         UUID opportunityId = parseUuid(request.opportunityId());
         UUID ownerUserId = parseUuid(request.ownerUserId());
         UUID createdCaseId = contactRepository.insertCase(orgId, contactId, caseTypeId, caseStatusId, casePriorityId,
-                accountId, opportunityId, ownerUserId, request.channelCode(), subject, request.description(), request.internalNotes(), SYSTEM_USER_ID);
+                accountId, opportunityId, ownerUserId, request.channelCode(), subject, request.description(), request.internalNotes(), context.getActorId());
         Map<String, Object> row = contactRepository.findCaseByIdAndContact(orgId, contactId, createdCaseId);
         return row != null ? mapToCase(row) : null;
     }
@@ -320,5 +322,4 @@ public class CrmContactService {
         return Boolean.parseBoolean(v.toString());
     }
 
-    private UUID getOrgClientId() { return DEFAULT_ORG_CLIENT_ID; }
 }

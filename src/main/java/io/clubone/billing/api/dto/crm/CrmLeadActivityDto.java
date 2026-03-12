@@ -41,12 +41,15 @@ public record CrmLeadActivityDto(
         @JsonProperty("event_status_code") String eventStatusCode,
         @JsonProperty("event_status_display_name") String eventStatusDisplayName,
         @JsonProperty("event_purpose_display_name") String eventPurposeDisplayName,
+        @JsonProperty("meeting_purpose") String meetingPurpose,
         @JsonProperty("location") String location,
         @JsonProperty("task_type_code") String taskTypeCode,
         @JsonProperty("task_type_display_name") String taskTypeDisplayName,
         @JsonProperty("task_status_code") String taskStatusCode,
         @JsonProperty("task_status_display_name") String taskStatusDisplayName,
         @JsonProperty("task_priority_code") String taskPriorityCode,
-        @JsonProperty("task_priority_display_name") String taskPriorityDisplayName
+        @JsonProperty("task_priority_display_name") String taskPriorityDisplayName,
+        @JsonProperty("from") String from,
+        @JsonProperty("template") String template
 ) {
 }
