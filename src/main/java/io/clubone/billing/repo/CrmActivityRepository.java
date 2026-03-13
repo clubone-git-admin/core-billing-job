@@ -520,4 +520,24 @@ public class CrmActivityRepository {
             """, orgClientId, activityId);
         return rows.isEmpty() ? null : rows.get(0);
     }
+
+    /** Get sender_id from crm.lu_sms_identity for notification job commonParams.FromPhoneNo. */
+    public String getSmsIdentitySenderId(UUID orgClientId, UUID smsIdentityId) {
+        if (smsIdentityId == null) return null;
+        List<String> rows = jdbc.query(
+                "SELECT sender_id FROM crm.lu_sms_identity WHERE org_client_id = ? AND sms_identity_id = ? AND is_active = true",
+                (rs, i) -> rs.getString("sender_id"),
+                orgClientId, smsIdentityId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    /** Get phone_number from crm.lu_whatsapp_identity for notification job commonParams.FromPhoneNo. */
+    public String getWhatsappIdentityPhoneNumber(UUID orgClientId, UUID whatsappIdentityId) {
+        if (whatsappIdentityId == null) return null;
+        List<String> rows = jdbc.query(
+                "SELECT phone_number FROM crm.lu_whatsapp_identity WHERE org_client_id = ? AND whatsapp_identity_id = ? AND is_active = true",
+                (rs, i) -> rs.getString("phone_number"),
+                orgClientId, whatsappIdentityId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
 }

@@ -4,6 +4,7 @@ import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.api.dto.notification.NotificationJobRequest;
 import io.clubone.billing.repo.CrmActivityRepository;
+import io.clubone.billing.repo.CrmOpportunityRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -26,17 +27,20 @@ public class CrmActivityService {
     private static final Logger log = LoggerFactory.getLogger(CrmActivityService.class);
     private static final int DEFAULT_PAGE_SIZE = 50;
     private static final int MAX_PAGE_SIZE = 500;
-    private static final String NOTIFICATION_DEFAULT_TEMPLATE = "EXPIRING_MEMBER_TEMPLATE";
 
     private final CrmActivityRepository activityRepository;
     private final CrmLeadService leadService;
+    private final CrmContactService contactService;
+    private final CrmOpportunityRepository opportunityRepository;
     private final NotificationClient notificationClient;
     private final LeadWarmthService leadWarmthService;
     private final CrmRequestContext context;
 
-    public CrmActivityService(CrmActivityRepository activityRepository, CrmLeadService leadService, NotificationClient notificationClient, LeadWarmthService leadWarmthService, CrmRequestContext context) {
+    public CrmActivityService(CrmActivityRepository activityRepository, CrmLeadService leadService, CrmContactService contactService, CrmOpportunityRepository opportunityRepository, NotificationClient notificationClient, LeadWarmthService leadWarmthService, CrmRequestContext context) {
         this.activityRepository = activityRepository;
         this.leadService = leadService;
+        this.contactService = contactService;
+        this.opportunityRepository = opportunityRepository;
         this.notificationClient = notificationClient;
         this.leadWarmthService = leadWarmthService;
         this.context = context;
@@ -212,6 +216,7 @@ public class CrmActivityService {
                     ? UUID.fromString(request.smsIdentityId())
                     : null;
             activityRepository.insertActivitySms(activityId, orgId, msgProviderId, request.toPhone(), request.body(), smsTemplateId, smsIdentityId, context.getActorId());
+            sendNotificationJobForLeadSms(leadId, request);
         } else if ("WHATSAPP".equals(typeCode)) {
             UUID msgProviderId = activityRepository.resolveMessageProviderId(orgId);
             if (msgProviderId == null) throw new IllegalStateException("No message provider configured for WhatsApp");
@@ -222,6 +227,7 @@ public class CrmActivityService {
                     ? UUID.fromString(request.whatsappIdentityId())
                     : null;
             activityRepository.insertActivityWhatsapp(activityId, orgId, msgProviderId, request.toPhone(), request.body(), whatsappTemplateId, whatsappIdentityId, context.getActorId());
+            sendNotificationJobForLeadWhatsapp(leadId, request);
         }
 
         leadWarmthService.recalculateWarmthForLead(leadId);
@@ -276,6 +282,7 @@ public class CrmActivityService {
             UUID emailIdentityId = UUID.fromString(request.emailIdentityId());
             UUID emailTemplateId = request.emailTemplateId() != null && !request.emailTemplateId().isBlank() ? UUID.fromString(request.emailTemplateId()) : null;
             activityRepository.insertActivityEmail(activityId, orgId, msgProviderId, toArr, ccArr, bccArr, request.emailSubject(), request.emailBody(), emailTemplateId, emailIdentityId, context.getActorId());
+            sendNotificationJobForContactEmail(contactId, request);
         } else if ("EVENT".equals(typeCode)) {
             if (request.eventPurposeId() == null || request.eventPurposeId().isBlank()) throw new IllegalArgumentException("event_purpose_id is required for EVENT activity");
             if (request.eventStatusId() == null || request.eventStatusId().isBlank()) throw new IllegalArgumentException("event_status_id is required for EVENT activity");
@@ -307,12 +314,14 @@ public class CrmActivityService {
             UUID smsTemplateId = request.smsTemplateId() != null && !request.smsTemplateId().isBlank() ? UUID.fromString(request.smsTemplateId()) : null;
             UUID smsIdentityId = request.smsIdentityId() != null && !request.smsIdentityId().isBlank() ? UUID.fromString(request.smsIdentityId()) : null;
             activityRepository.insertActivitySms(activityId, orgId, msgProviderId, request.toPhone(), request.body(), smsTemplateId, smsIdentityId, context.getActorId());
+            sendNotificationJobForContactSms(contactId, request);
         } else if ("WHATSAPP".equals(typeCode)) {
             UUID msgProviderId = activityRepository.resolveMessageProviderId(orgId);
             if (msgProviderId == null) throw new IllegalStateException("No message provider configured for WhatsApp");
             UUID whatsappTemplateId = request.whatsappTemplateId() != null && !request.whatsappTemplateId().isBlank() ? UUID.fromString(request.whatsappTemplateId()) : null;
             UUID whatsappIdentityId = request.whatsappIdentityId() != null && !request.whatsappIdentityId().isBlank() ? UUID.fromString(request.whatsappIdentityId()) : null;
             activityRepository.insertActivityWhatsapp(activityId, orgId, msgProviderId, request.toPhone(), request.body(), whatsappTemplateId, whatsappIdentityId, context.getActorId());
+            sendNotificationJobForContactWhatsapp(contactId, request);
         }
         Map<String, Object> row = activityRepository.findActivityById(orgId, activityId);
         return row != null ? mapToActivityDto(row) : null;
@@ -364,6 +373,7 @@ public class CrmActivityService {
             UUID emailIdentityId = UUID.fromString(request.emailIdentityId());
             UUID emailTemplateId = request.emailTemplateId() != null && !request.emailTemplateId().isBlank() ? UUID.fromString(request.emailTemplateId()) : null;
             activityRepository.insertActivityEmail(activityId, orgId, msgProviderId, toArr, ccArr, bccArr, request.emailSubject(), request.emailBody(), emailTemplateId, emailIdentityId, context.getActorId());
+            sendNotificationJobForOpportunityEmail(opportunityId, request);
         } else if ("EVENT".equals(typeCode)) {
             if (request.eventPurposeId() == null || request.eventPurposeId().isBlank()) throw new IllegalArgumentException("event_purpose_id is required for EVENT activity");
             if (request.eventStatusId() == null || request.eventStatusId().isBlank()) throw new IllegalArgumentException("event_status_id is required for EVENT activity");
@@ -397,6 +407,7 @@ public class CrmActivityService {
             UUID smsTemplateId = request.smsTemplateId() != null && !request.smsTemplateId().isBlank() ? UUID.fromString(request.smsTemplateId()) : null;
             UUID smsIdentityId = request.smsIdentityId() != null && !request.smsIdentityId().isBlank() ? UUID.fromString(request.smsIdentityId()) : null;
             activityRepository.insertActivitySms(activityId, orgId, msgProviderId, request.toPhone(), body, smsTemplateId, smsIdentityId, context.getActorId());
+            sendNotificationJobForOpportunitySms(opportunityId, request);
         } else if ("WHATSAPP".equals(typeCode)) {
             UUID msgProviderId = activityRepository.resolveMessageProviderId(orgId);
             if (msgProviderId == null) throw new IllegalStateException("No message provider configured for WhatsApp");
@@ -405,6 +416,7 @@ public class CrmActivityService {
             UUID whatsappTemplateId = request.whatsappTemplateId() != null && !request.whatsappTemplateId().isBlank() ? UUID.fromString(request.whatsappTemplateId()) : null;
             UUID whatsappIdentityId = request.whatsappIdentityId() != null && !request.whatsappIdentityId().isBlank() ? UUID.fromString(request.whatsappIdentityId()) : null;
             activityRepository.insertActivityWhatsapp(activityId, orgId, msgProviderId, request.toPhone(), body, whatsappTemplateId, whatsappIdentityId, context.getActorId());
+            sendNotificationJobForOpportunityWhatsapp(opportunityId, request);
         }
         Map<String, Object> row = activityRepository.findActivityById(orgId, activityId);
         return row != null ? mapToActivityDto(row) : null;
@@ -526,13 +538,14 @@ public class CrmActivityService {
     }
 
     /**
-     * For EMAIL activity: call notification service job/send. Uses common_params and recipients from request body when provided;
-     * otherwise falls back to building recipients from email_to and lead data (commonParams then null).
+     * For EMAIL activity: call notification service job/send.
+     * When template is selected: pass template only, do not pass channelContent (null).
+     * When template is null: pass channelContent.EMAIL (subject + body); do not pass template.
      */
     private void sendNotificationJobForLeadEmail(UUID leadId, CrmLogActivityRequest request) {
         String templateCode = request.notificationTemplateCode() != null && !request.notificationTemplateCode().isBlank()
-                ? request.notificationTemplateCode()
-                : NOTIFICATION_DEFAULT_TEMPLATE;
+                ? request.notificationTemplateCode().trim()
+                : null;
 
         List<NotificationJobRequest.Recipient> recipients = mapRecipientsFromRequest(request, leadId);
         if (recipients == null || recipients.isEmpty()) {
@@ -543,17 +556,506 @@ public class CrmActivityService {
         Map<String, Object> commonParams = request.commonParams() != null && !request.commonParams().isEmpty()
                 ? request.commonParams()
                 : null;
+
+        NotificationJobRequest.TemplateSpec templateSpec = templateCode != null
+                ? new NotificationJobRequest.TemplateSpec(templateCode)
+                : null;
+
+        Map<String, Object> channelContent = null;
+        if (templateCode == null) {
+            /* Only set channelContent when no template; when template is selected, channelContent stays null */
+            Map<String, Object> emailBody = new LinkedHashMap<>();
+            emailBody.put("format", "HTML");
+            emailBody.put("value", request.emailBody() != null ? request.emailBody() : "");
+            Map<String, Object> emailContent = new LinkedHashMap<>();
+            emailContent.put("subject", request.emailSubject() != null ? request.emailSubject() : "");
+            emailContent.put("body", emailBody);
+            channelContent = new LinkedHashMap<>();
+            channelContent.put("EMAIL", emailContent);
+        }
+
         NotificationJobRequest jobRequest = new NotificationJobRequest(
                 context.getOrgClientId().toString(),
-                context.getOrgClientId().toString(),
-                "PROMOTIONAL",
+                context.getApplicationId().toString(),
+                "CRM",
                 "NORMAL",
                 List.of("EMAIL"),
-                new NotificationJobRequest.TemplateSpec(templateCode),
+                templateSpec,
                 commonParams,
-                recipients
+                recipients,
+                channelContent
         );
         notificationClient.sendJob(jobRequest);
+    }
+
+    /**
+     * For SMS activity: call notification service job/send.
+     * When template is selected: pass template only, do not pass channelContent (null).
+     * When template is null: pass channelContent.SMS (body format "TEXT"); do not pass template.
+     */
+    private void sendNotificationJobForLeadSms(UUID leadId, CrmLogActivityRequest request) {
+        String templateCode = request.notificationTemplateCode() != null && !request.notificationTemplateCode().isBlank()
+                ? request.notificationTemplateCode().trim()
+                : null;
+
+        List<NotificationJobRequest.Recipient> recipients = mapRecipientsFromRequestForPhone(request, leadId);
+        if (recipients == null || recipients.isEmpty()) {
+            log.warn("Notification job skipped for lead {} SMS: no recipients (provide recipients with phone or to_phone/lead phone)", leadId);
+            return;
+        }
+
+        Map<String, Object> commonParams = new LinkedHashMap<>();
+        if (request.commonParams() != null && !request.commonParams().isEmpty()) {
+            commonParams.putAll(request.commonParams());
+        }
+        if (request.smsIdentityId() != null && !request.smsIdentityId().isBlank()) {
+            try {
+                UUID smsIdentityId = UUID.fromString(request.smsIdentityId().trim());
+                String fromPhoneNo = activityRepository.getSmsIdentitySenderId(context.getOrgClientId(), smsIdentityId);
+                if (fromPhoneNo != null && !fromPhoneNo.isBlank()) {
+                    commonParams.put("FromPhoneNo", fromPhoneNo);
+                }
+            } catch (Exception e) {
+                log.warn("Could not resolve sender_id for sms_identity_id {}: {}", request.smsIdentityId(), e.getMessage());
+            }
+        }
+
+        NotificationJobRequest.TemplateSpec templateSpec = templateCode != null
+                ? new NotificationJobRequest.TemplateSpec(templateCode)
+                : null;
+
+        Map<String, Object> channelContent = null;
+        if (templateCode == null) {
+            /* Only set channelContent when no template; when template is selected, channelContent stays null */
+            String smsText = (request.body() != null && !request.body().isBlank())
+                    ? request.body()
+                    : (request.description() != null ? request.description() : "");
+            Map<String, Object> smsBody = new LinkedHashMap<>();
+            smsBody.put("format", "TEXT");
+            smsBody.put("value", smsText);
+            Map<String, Object> smsContent = new LinkedHashMap<>();
+            smsContent.put("body", smsBody);
+            channelContent = new LinkedHashMap<>();
+            channelContent.put("SMS", smsContent);
+        }
+
+        NotificationJobRequest jobRequest = new NotificationJobRequest(
+                context.getOrgClientId().toString(),
+                context.getApplicationId().toString(),
+                "CRM",
+                "NORMAL",
+                List.of("SMS"),
+                templateSpec,
+                commonParams.isEmpty() ? null : commonParams,
+                recipients,
+                channelContent
+        );
+        notificationClient.sendJob(jobRequest);
+    }
+
+    /**
+     * For WhatsApp activity: call notification service job/send.
+     * When template is selected: pass template only, do not pass channelContent (null).
+     * When template is null: pass channelContent.WHATSAPP (body format "TEXT"); do not pass template.
+     */
+    private void sendNotificationJobForLeadWhatsapp(UUID leadId, CrmLogActivityRequest request) {
+        String templateCode = request.notificationTemplateCode() != null && !request.notificationTemplateCode().isBlank()
+                ? request.notificationTemplateCode().trim()
+                : null;
+
+        List<NotificationJobRequest.Recipient> recipients = mapRecipientsFromRequestForPhone(request, leadId);
+        if (recipients == null || recipients.isEmpty()) {
+            log.warn("Notification job skipped for lead {} WhatsApp: no recipients (provide recipients with phone or to_phone/lead phone)", leadId);
+            return;
+        }
+
+        Map<String, Object> commonParams = new LinkedHashMap<>();
+        if (request.commonParams() != null && !request.commonParams().isEmpty()) {
+            commonParams.putAll(request.commonParams());
+        }
+        if (request.whatsappIdentityId() != null && !request.whatsappIdentityId().isBlank()) {
+            try {
+                UUID whatsappIdentityId = UUID.fromString(request.whatsappIdentityId().trim());
+                String fromPhoneNo = activityRepository.getWhatsappIdentityPhoneNumber(context.getOrgClientId(), whatsappIdentityId);
+                if (fromPhoneNo != null && !fromPhoneNo.isBlank()) {
+                    commonParams.put("FromPhoneNo", fromPhoneNo);
+                }
+            } catch (Exception e) {
+                log.warn("Could not resolve phone_number for whatsapp_identity_id {}: {}", request.whatsappIdentityId(), e.getMessage());
+            }
+        }
+
+        NotificationJobRequest.TemplateSpec templateSpec = templateCode != null
+                ? new NotificationJobRequest.TemplateSpec(templateCode)
+                : null;
+
+        Map<String, Object> channelContent = null;
+        if (templateCode == null) {
+            /* Only set channelContent when no template; when template is selected, channelContent stays null */
+            String whatsappText = (request.body() != null && !request.body().isBlank())
+                    ? request.body()
+                    : (request.description() != null ? request.description() : "");
+            Map<String, Object> whatsappBody = new LinkedHashMap<>();
+            whatsappBody.put("format", "TEXT");
+            whatsappBody.put("value", whatsappText);
+            Map<String, Object> whatsappContent = new LinkedHashMap<>();
+            whatsappContent.put("body", whatsappBody);
+            channelContent = new LinkedHashMap<>();
+            channelContent.put("WHATSAPP", whatsappContent);
+        }
+
+        NotificationJobRequest jobRequest = new NotificationJobRequest(
+                context.getOrgClientId().toString(),
+                context.getApplicationId().toString(),
+                "CRM",
+                "NORMAL",
+                List.of("WHATSAPP"),
+                templateSpec,
+                commonParams.isEmpty() ? null : commonParams,
+                recipients,
+                channelContent
+        );
+        notificationClient.sendJob(jobRequest);
+    }
+
+    /** For EMAIL activity on contact: same as lead (template vs channelContent, commonParams, recipients from contact). */
+    private void sendNotificationJobForContactEmail(UUID contactId, CrmLogActivityRequest request) {
+        String templateCode = request.notificationTemplateCode() != null && !request.notificationTemplateCode().isBlank()
+                ? request.notificationTemplateCode().trim()
+                : null;
+        List<NotificationJobRequest.Recipient> recipients = mapRecipientsFromRequestForContact(request, contactId);
+        if (recipients == null || recipients.isEmpty()) {
+            log.warn("Notification job skipped for contact {}: no recipients (provide recipients in request or email_to/contact email)", contactId);
+            return;
+        }
+        Map<String, Object> commonParams = request.commonParams() != null && !request.commonParams().isEmpty()
+                ? request.commonParams()
+                : null;
+        NotificationJobRequest.TemplateSpec templateSpec = templateCode != null
+                ? new NotificationJobRequest.TemplateSpec(templateCode)
+                : null;
+        Map<String, Object> channelContent = null;
+        if (templateCode == null) {
+            Map<String, Object> emailBody = new LinkedHashMap<>();
+            emailBody.put("format", "HTML");
+            emailBody.put("value", request.emailBody() != null ? request.emailBody() : "");
+            Map<String, Object> emailContent = new LinkedHashMap<>();
+            emailContent.put("subject", request.emailSubject() != null ? request.emailSubject() : "");
+            emailContent.put("body", emailBody);
+            channelContent = new LinkedHashMap<>();
+            channelContent.put("EMAIL", emailContent);
+        }
+        NotificationJobRequest jobRequest = new NotificationJobRequest(
+                context.getOrgClientId().toString(),
+                context.getApplicationId().toString(),
+                "CRM",
+                "NORMAL",
+                List.of("EMAIL"),
+                templateSpec,
+                commonParams,
+                recipients,
+                channelContent
+        );
+        notificationClient.sendJob(jobRequest);
+    }
+
+    /** For SMS activity on contact: same as lead (template vs channelContent, commonParams + FromPhoneNo, recipients from contact). */
+    private void sendNotificationJobForContactSms(UUID contactId, CrmLogActivityRequest request) {
+        String templateCode = request.notificationTemplateCode() != null && !request.notificationTemplateCode().isBlank()
+                ? request.notificationTemplateCode().trim()
+                : null;
+        List<NotificationJobRequest.Recipient> recipients = mapRecipientsFromRequestForPhoneContact(request, contactId);
+        if (recipients == null || recipients.isEmpty()) {
+            log.warn("Notification job skipped for contact {} SMS: no recipients (provide recipients with phone or to_phone/contact phone)", contactId);
+            return;
+        }
+        Map<String, Object> commonParams = new LinkedHashMap<>();
+        if (request.commonParams() != null && !request.commonParams().isEmpty()) {
+            commonParams.putAll(request.commonParams());
+        }
+        if (request.smsIdentityId() != null && !request.smsIdentityId().isBlank()) {
+            try {
+                UUID smsIdentityId = UUID.fromString(request.smsIdentityId().trim());
+                String fromPhoneNo = activityRepository.getSmsIdentitySenderId(context.getOrgClientId(), smsIdentityId);
+                if (fromPhoneNo != null && !fromPhoneNo.isBlank()) {
+                    commonParams.put("FromPhoneNo", fromPhoneNo);
+                }
+            } catch (Exception e) {
+                log.warn("Could not resolve sender_id for sms_identity_id {}: {}", request.smsIdentityId(), e.getMessage());
+            }
+        }
+        NotificationJobRequest.TemplateSpec templateSpec = templateCode != null
+                ? new NotificationJobRequest.TemplateSpec(templateCode)
+                : null;
+        Map<String, Object> channelContent = null;
+        if (templateCode == null) {
+            String smsText = (request.body() != null && !request.body().isBlank())
+                    ? request.body()
+                    : (request.description() != null ? request.description() : "");
+            Map<String, Object> smsBody = new LinkedHashMap<>();
+            smsBody.put("format", "TEXT");
+            smsBody.put("value", smsText);
+            Map<String, Object> smsContent = new LinkedHashMap<>();
+            smsContent.put("body", smsBody);
+            channelContent = new LinkedHashMap<>();
+            channelContent.put("SMS", smsContent);
+        }
+        NotificationJobRequest jobRequest = new NotificationJobRequest(
+                context.getOrgClientId().toString(),
+                context.getApplicationId().toString(),
+                "CRM",
+                "NORMAL",
+                List.of("SMS"),
+                templateSpec,
+                commonParams.isEmpty() ? null : commonParams,
+                recipients,
+                channelContent
+        );
+        notificationClient.sendJob(jobRequest);
+    }
+
+    /** For WhatsApp activity on contact: same as lead (template vs channelContent, commonParams + FromPhoneNo, recipients from contact). */
+    private void sendNotificationJobForContactWhatsapp(UUID contactId, CrmLogActivityRequest request) {
+        String templateCode = request.notificationTemplateCode() != null && !request.notificationTemplateCode().isBlank()
+                ? request.notificationTemplateCode().trim()
+                : null;
+        List<NotificationJobRequest.Recipient> recipients = mapRecipientsFromRequestForPhoneContact(request, contactId);
+        if (recipients == null || recipients.isEmpty()) {
+            log.warn("Notification job skipped for contact {} WhatsApp: no recipients (provide recipients with phone or to_phone/contact phone)", contactId);
+            return;
+        }
+        Map<String, Object> commonParams = new LinkedHashMap<>();
+        if (request.commonParams() != null && !request.commonParams().isEmpty()) {
+            commonParams.putAll(request.commonParams());
+        }
+        if (request.whatsappIdentityId() != null && !request.whatsappIdentityId().isBlank()) {
+            try {
+                UUID whatsappIdentityId = UUID.fromString(request.whatsappIdentityId().trim());
+                String fromPhoneNo = activityRepository.getWhatsappIdentityPhoneNumber(context.getOrgClientId(), whatsappIdentityId);
+                if (fromPhoneNo != null && !fromPhoneNo.isBlank()) {
+                    commonParams.put("FromPhoneNo", fromPhoneNo);
+                }
+            } catch (Exception e) {
+                log.warn("Could not resolve phone_number for whatsapp_identity_id {}: {}", request.whatsappIdentityId(), e.getMessage());
+            }
+        }
+        NotificationJobRequest.TemplateSpec templateSpec = templateCode != null
+                ? new NotificationJobRequest.TemplateSpec(templateCode)
+                : null;
+        Map<String, Object> channelContent = null;
+        if (templateCode == null) {
+            String whatsappText = (request.body() != null && !request.body().isBlank())
+                    ? request.body()
+                    : (request.description() != null ? request.description() : "");
+            Map<String, Object> whatsappBody = new LinkedHashMap<>();
+            whatsappBody.put("format", "TEXT");
+            whatsappBody.put("value", whatsappText);
+            Map<String, Object> whatsappContent = new LinkedHashMap<>();
+            whatsappContent.put("body", whatsappBody);
+            channelContent = new LinkedHashMap<>();
+            channelContent.put("WHATSAPP", whatsappContent);
+        }
+        NotificationJobRequest jobRequest = new NotificationJobRequest(
+                context.getOrgClientId().toString(),
+                context.getApplicationId().toString(),
+                "CRM",
+                "NORMAL",
+                List.of("WHATSAPP"),
+                templateSpec,
+                commonParams.isEmpty() ? null : commonParams,
+                recipients,
+                channelContent
+        );
+        notificationClient.sendJob(jobRequest);
+    }
+
+    /**
+     * For EMAIL activity: call notification service job/send.
+     * When template is selected: pass template only, do not pass channelContent (null).
+     * When template is null: pass channelContent.EMAIL (subject + body); do not pass template.
+     */
+    private void sendNotificationJobForOpportunityEmail(UUID opportunityId, CrmLogActivityRequest request) {
+        String templateCode = request.notificationTemplateCode() != null && !request.notificationTemplateCode().isBlank()
+                ? request.notificationTemplateCode().trim()
+                : null;
+
+        List<NotificationJobRequest.Recipient> recipients = mapRecipientsFromRequestForOpportunityEmail(request, opportunityId);
+        if (recipients == null || recipients.isEmpty()) {
+            log.warn("Notification job skipped for opportunity {}: no recipients (provide recipients in request or email_to/linked contact email)", opportunityId);
+            return;
+        }
+
+        Map<String, Object> commonParams = request.commonParams() != null && !request.commonParams().isEmpty()
+                ? request.commonParams()
+                : null;
+
+        NotificationJobRequest.TemplateSpec templateSpec = templateCode != null
+                ? new NotificationJobRequest.TemplateSpec(templateCode)
+                : null;
+
+        Map<String, Object> channelContent = null;
+        if (templateCode == null) {
+            /* Only set channelContent when no template; when template is selected, channelContent stays null */
+            Map<String, Object> emailBody = new LinkedHashMap<>();
+            emailBody.put("format", "HTML");
+            emailBody.put("value", request.emailBody() != null ? request.emailBody() : "");
+            Map<String, Object> emailContent = new LinkedHashMap<>();
+            emailContent.put("subject", request.emailSubject() != null ? request.emailSubject() : "");
+            emailContent.put("body", emailBody);
+            channelContent = new LinkedHashMap<>();
+            channelContent.put("EMAIL", emailContent);
+        }
+
+        NotificationJobRequest jobRequest = new NotificationJobRequest(
+                context.getOrgClientId().toString(),
+                context.getApplicationId().toString(),
+                "CRM",
+                "NORMAL",
+                List.of("EMAIL"),
+                templateSpec,
+                commonParams,
+                recipients,
+                channelContent
+        );
+        notificationClient.sendJob(jobRequest);
+    }
+
+    /** For SMS activity on opportunity: recipients from linked contact or request only. */
+    private void sendNotificationJobForOpportunitySms(UUID opportunityId, CrmLogActivityRequest request) {
+        String templateCode = request.notificationTemplateCode() != null && !request.notificationTemplateCode().isBlank()
+                ? request.notificationTemplateCode().trim()
+                : null;
+        List<NotificationJobRequest.Recipient> recipients = mapRecipientsFromRequestForOpportunityPhone(request, opportunityId);
+        if (recipients == null || recipients.isEmpty()) {
+            log.warn("Notification job skipped for opportunity {} SMS: no recipients (provide recipients with phone or to_phone/linked contact phone)", opportunityId);
+            return;
+        }
+        Map<String, Object> commonParams = new LinkedHashMap<>();
+        if (request.commonParams() != null && !request.commonParams().isEmpty()) {
+            commonParams.putAll(request.commonParams());
+        }
+        if (request.smsIdentityId() != null && !request.smsIdentityId().isBlank()) {
+            try {
+                UUID smsIdentityId = UUID.fromString(request.smsIdentityId().trim());
+                String fromPhoneNo = activityRepository.getSmsIdentitySenderId(context.getOrgClientId(), smsIdentityId);
+                if (fromPhoneNo != null && !fromPhoneNo.isBlank()) {
+                    commonParams.put("FromPhoneNo", fromPhoneNo);
+                }
+            } catch (Exception e) {
+                log.warn("Could not resolve sender_id for sms_identity_id {}: {}", request.smsIdentityId(), e.getMessage());
+            }
+        }
+        NotificationJobRequest.TemplateSpec templateSpec = templateCode != null
+                ? new NotificationJobRequest.TemplateSpec(templateCode)
+                : null;
+        Map<String, Object> channelContent = null;
+        if (templateCode == null) {
+            String smsText = (request.body() != null && !request.body().isBlank())
+                    ? request.body()
+                    : (request.description() != null ? request.description() : "");
+            Map<String, Object> smsBody = new LinkedHashMap<>();
+            smsBody.put("format", "TEXT");
+            smsBody.put("value", smsText);
+            Map<String, Object> smsContent = new LinkedHashMap<>();
+            smsContent.put("body", smsBody);
+            channelContent = new LinkedHashMap<>();
+            channelContent.put("SMS", smsContent);
+        }
+        NotificationJobRequest jobRequest = new NotificationJobRequest(
+                context.getOrgClientId().toString(),
+                context.getApplicationId().toString(),
+                "CRM",
+                "NORMAL",
+                List.of("SMS"),
+                templateSpec,
+                commonParams.isEmpty() ? null : commonParams,
+                recipients,
+                channelContent
+        );
+        notificationClient.sendJob(jobRequest);
+    }
+
+    /** For WhatsApp activity on opportunity: recipients from linked contact or request only. */
+    private void sendNotificationJobForOpportunityWhatsapp(UUID opportunityId, CrmLogActivityRequest request) {
+        String templateCode = request.notificationTemplateCode() != null && !request.notificationTemplateCode().isBlank()
+                ? request.notificationTemplateCode().trim()
+                : null;
+        List<NotificationJobRequest.Recipient> recipients = mapRecipientsFromRequestForOpportunityPhone(request, opportunityId);
+        if (recipients == null || recipients.isEmpty()) {
+            log.warn("Notification job skipped for opportunity {} WhatsApp: no recipients (provide recipients with phone or to_phone/linked contact phone)", opportunityId);
+            return;
+        }
+        Map<String, Object> commonParams = new LinkedHashMap<>();
+        if (request.commonParams() != null && !request.commonParams().isEmpty()) {
+            commonParams.putAll(request.commonParams());
+        }
+        if (request.whatsappIdentityId() != null && !request.whatsappIdentityId().isBlank()) {
+            try {
+                UUID whatsappIdentityId = UUID.fromString(request.whatsappIdentityId().trim());
+                String fromPhoneNo = activityRepository.getWhatsappIdentityPhoneNumber(context.getOrgClientId(), whatsappIdentityId);
+                if (fromPhoneNo != null && !fromPhoneNo.isBlank()) {
+                    commonParams.put("FromPhoneNo", fromPhoneNo);
+                }
+            } catch (Exception e) {
+                log.warn("Could not resolve phone_number for whatsapp_identity_id {}: {}", request.whatsappIdentityId(), e.getMessage());
+            }
+        }
+        NotificationJobRequest.TemplateSpec templateSpec = templateCode != null
+                ? new NotificationJobRequest.TemplateSpec(templateCode)
+                : null;
+        Map<String, Object> channelContent = null;
+        if (templateCode == null) {
+            String whatsappText = (request.body() != null && !request.body().isBlank())
+                    ? request.body()
+                    : (request.description() != null ? request.description() : "");
+            Map<String, Object> whatsappBody = new LinkedHashMap<>();
+            whatsappBody.put("format", "TEXT");
+            whatsappBody.put("value", whatsappText);
+            Map<String, Object> whatsappContent = new LinkedHashMap<>();
+            whatsappContent.put("body", whatsappBody);
+            channelContent = new LinkedHashMap<>();
+            channelContent.put("WHATSAPP", whatsappContent);
+        }
+        NotificationJobRequest jobRequest = new NotificationJobRequest(
+                context.getOrgClientId().toString(),
+                context.getApplicationId().toString(),
+                "CRM",
+                "NORMAL",
+                List.of("WHATSAPP"),
+                templateSpec,
+                commonParams.isEmpty() ? null : commonParams,
+                recipients,
+                channelContent
+        );
+        notificationClient.sendJob(jobRequest);
+    }
+
+    /** Phone recipients for SMS/WhatsApp: from request.recipients (to.phone) or request.to_phone/lead.phone(). */
+    private List<NotificationJobRequest.Recipient> mapRecipientsFromRequestForPhone(CrmLogActivityRequest request, UUID leadId) {
+        if (request.recipients() != null && !request.recipients().isEmpty()) {
+            List<NotificationJobRequest.Recipient> withPhone = request.recipients().stream()
+                    .filter(r -> r != null && r.to() != null && r.to().phone() != null && !r.to().phone().isBlank())
+                    .map(r -> new NotificationJobRequest.Recipient(
+                            r.clientId(),
+                            new NotificationJobRequest.RecipientTo(r.to().email(), r.to().phone()),
+                            r.params() != null && !r.params().isEmpty() ? r.params() : null
+                    ))
+                    .toList();
+            if (!withPhone.isEmpty()) return withPhone;
+        }
+        String phone = request.toPhone() != null && !request.toPhone().isBlank()
+                ? request.toPhone()
+                : null;
+        if (phone == null && leadId != null) {
+            CrmLeadDetailDto lead = leadService.getLeadById(leadId);
+            if (lead != null && lead.phone() != null && !lead.phone().isBlank()) phone = lead.phone();
+        }
+        if (phone == null || phone.isBlank()) return List.of();
+        return List.of(new NotificationJobRequest.Recipient(
+                null,
+                new NotificationJobRequest.RecipientTo(null, phone),
+                null
+        ));
     }
 
     private List<NotificationJobRequest.Recipient> mapRecipientsFromRequest(CrmLogActivityRequest request, UUID leadId) {
@@ -594,6 +1096,142 @@ public class CrmActivityService {
                         params
                 ))
                 .toList();
+    }
+
+    /** Email recipients for contact: from request.recipients or request.emailTo/contact email and name params. */
+    private List<NotificationJobRequest.Recipient> mapRecipientsFromRequestForContact(CrmLogActivityRequest request, UUID contactId) {
+        if (request.recipients() != null && !request.recipients().isEmpty()) {
+            return request.recipients().stream()
+                    .filter(r -> r != null && r.to() != null)
+                    .map(r -> new NotificationJobRequest.Recipient(
+                            r.clientId(),
+                            new NotificationJobRequest.RecipientTo(r.to().email(), r.to().phone()),
+                            r.params() != null && !r.params().isEmpty() ? r.params() : null
+                    ))
+                    .toList();
+        }
+        CrmContactDetailDto contact = contactService.getContactById(contactId);
+        if (contact == null) return List.of();
+        List<String> toEmails = request.emailTo() != null && !request.emailTo().isEmpty()
+                ? request.emailTo()
+                : (contact.email() != null && !contact.email().isBlank() ? List.of(contact.email()) : List.of());
+        if (toEmails.isEmpty()) return List.of();
+        String firstName = contact.firstName() != null ? contact.firstName() : "";
+        String lastName = contact.lastName() != null ? contact.lastName() : "";
+        String rawDisplay = contact.fullName() != null && !contact.fullName().isBlank()
+                ? contact.fullName()
+                : (firstName + " " + lastName).trim();
+        final String displayName = (rawDisplay != null && !rawDisplay.isBlank())
+                ? rawDisplay
+                : (contact.email() != null ? contact.email() : "");
+        Map<String, Object> defaultParams = new LinkedHashMap<>();
+        defaultParams.put("firstName", firstName);
+        defaultParams.put("lastName", lastName);
+        defaultParams.put("displayName", displayName);
+        final Map<String, Object> params = defaultParams;
+        return toEmails.stream()
+                .filter(e -> e != null && !e.isBlank())
+                .map(email -> new NotificationJobRequest.Recipient(
+                        null,
+                        new NotificationJobRequest.RecipientTo(email, null),
+                        params
+                ))
+                .toList();
+    }
+
+    /** Phone recipients for contact: from request.recipients (to.phone) or request.to_phone/contact.phone(). */
+    private List<NotificationJobRequest.Recipient> mapRecipientsFromRequestForPhoneContact(CrmLogActivityRequest request, UUID contactId) {
+        if (request.recipients() != null && !request.recipients().isEmpty()) {
+            List<NotificationJobRequest.Recipient> withPhone = request.recipients().stream()
+                    .filter(r -> r != null && r.to() != null && r.to().phone() != null && !r.to().phone().isBlank())
+                    .map(r -> new NotificationJobRequest.Recipient(
+                            r.clientId(),
+                            new NotificationJobRequest.RecipientTo(r.to().email(), r.to().phone()),
+                            r.params() != null && !r.params().isEmpty() ? r.params() : null
+                    ))
+                    .toList();
+            if (!withPhone.isEmpty()) return withPhone;
+        }
+        String phone = request.toPhone() != null && !request.toPhone().isBlank()
+                ? request.toPhone()
+                : null;
+        if (phone == null && contactId != null) {
+            CrmContactDetailDto contact = contactService.getContactById(contactId);
+            if (contact != null && contact.phone() != null && !contact.phone().isBlank()) phone = contact.phone();
+        }
+        if (phone == null || phone.isBlank()) return List.of();
+        return List.of(new NotificationJobRequest.Recipient(
+                null,
+                new NotificationJobRequest.RecipientTo(null, phone),
+                null
+        ));
+    }
+
+    /** Email recipients for opportunity: from linked contact (when present) or request.recipients/request.emailTo only. */
+    private List<NotificationJobRequest.Recipient> mapRecipientsFromRequestForOpportunityEmail(CrmLogActivityRequest request, UUID opportunityId) {
+        UUID orgId = context.getOrgClientId();
+        Map<String, Object> opp = opportunityRepository.findById(orgId, opportunityId);
+        UUID contactId = null;
+        if (opp != null && opp.get("contact_id") != null) {
+            Object cid = opp.get("contact_id");
+            contactId = cid instanceof UUID ? (UUID) cid : UUID.fromString(cid.toString());
+        }
+        if (contactId != null) {
+            return mapRecipientsFromRequestForContact(request, contactId);
+        }
+        if (request.recipients() != null && !request.recipients().isEmpty()) {
+            return request.recipients().stream()
+                    .filter(r -> r != null && r.to() != null && r.to().email() != null && !r.to().email().isBlank())
+                    .map(r -> new NotificationJobRequest.Recipient(
+                            r.clientId(),
+                            new NotificationJobRequest.RecipientTo(r.to().email(), r.to().phone()),
+                            r.params() != null && !r.params().isEmpty() ? r.params() : null
+                    ))
+                    .toList();
+        }
+        if (request.emailTo() != null && !request.emailTo().isEmpty()) {
+            return request.emailTo().stream()
+                    .filter(e -> e != null && !e.isBlank())
+                    .map(email -> new NotificationJobRequest.Recipient(
+                            null,
+                            new NotificationJobRequest.RecipientTo(email, null),
+                            null
+                    ))
+                    .toList();
+        }
+        return List.of();
+    }
+
+    /** Phone recipients for opportunity: from linked contact (when present) or request.recipients/request.to_phone only. */
+    private List<NotificationJobRequest.Recipient> mapRecipientsFromRequestForOpportunityPhone(CrmLogActivityRequest request, UUID opportunityId) {
+        UUID orgId = context.getOrgClientId();
+        Map<String, Object> opp = opportunityRepository.findById(orgId, opportunityId);
+        UUID contactId = null;
+        if (opp != null && opp.get("contact_id") != null) {
+            Object cid = opp.get("contact_id");
+            contactId = cid instanceof UUID ? (UUID) cid : UUID.fromString(cid.toString());
+        }
+        if (contactId != null) {
+            return mapRecipientsFromRequestForPhoneContact(request, contactId);
+        }
+        if (request.recipients() != null && !request.recipients().isEmpty()) {
+            List<NotificationJobRequest.Recipient> withPhone = request.recipients().stream()
+                    .filter(r -> r != null && r.to() != null && r.to().phone() != null && !r.to().phone().isBlank())
+                    .map(r -> new NotificationJobRequest.Recipient(
+                            r.clientId(),
+                            new NotificationJobRequest.RecipientTo(r.to().email(), r.to().phone()),
+                            r.params() != null && !r.params().isEmpty() ? r.params() : null
+                    ))
+                    .toList();
+            if (!withPhone.isEmpty()) return withPhone;
+        }
+        String phone = request.toPhone() != null && !request.toPhone().isBlank() ? request.toPhone() : null;
+        if (phone == null || phone.isBlank()) return List.of();
+        return List.of(new NotificationJobRequest.Recipient(
+                null,
+                new NotificationJobRequest.RecipientTo(null, phone),
+                null
+        ));
     }
 
     /** Build a single CrmLogActivityRequest from bulk request (bulk has no email/notification fields). */
