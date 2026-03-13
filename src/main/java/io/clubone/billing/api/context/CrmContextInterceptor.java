@@ -100,6 +100,7 @@ public class CrmContextInterceptor implements HandlerInterceptor {
             return false;
         }
 
+        context.setApplicationId(applicationId);
         context.setOrgClientId(orgClientId);
         context.setLocationId(locationId);
         context.setActorId(actorId);
