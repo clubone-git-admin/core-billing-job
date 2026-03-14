@@ -16,14 +16,17 @@ import lombok.extern.slf4j.Slf4j;
 @Tag(name = "Health Check", description = "View, configured health checkings data")
 public class HealthCheckController {
 
-	@Autowired
+	@Autowired(required = false)
 	private BuildProperties buildProperties;
 
 	@GetMapping({"/crm/health"})
 	public Version getVersion(HttpServletRequest httpServletRequest) {
 		log.debug("inside getVersion() method start");
 		Docs docs = new Docs();
-		docs.setStatus("Live - " + this.buildProperties.get("time"));
+		String buildTime = (buildProperties != null && buildProperties.get("time") != null)
+				? String.valueOf(buildProperties.get("time"))
+				: "N/A";
+		docs.setStatus("Live - " + buildTime);
 		docs.setUrl(httpServletRequest.getRequestURL().toString().replace("version", "swagger-ui.html"));
 		Version version = new Version();
 		version.setVersion(getClass().getPackage().getImplementationVersion());
