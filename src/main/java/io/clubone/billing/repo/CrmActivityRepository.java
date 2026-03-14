@@ -1,14 +1,17 @@
 package io.clubone.billing.repo;
 
+import java.sql.Timestamp;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
-import java.sql.Timestamp;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import com.nimbusds.jose.shaded.gson.Gson;
 
 /**
  * Repository for crm.activity and channel tables (call, email, event, task, sms, whatsapp).
@@ -312,13 +315,14 @@ public class CrmActivityRepository {
         if (rows.isEmpty()) {
             return Map.of("last_activity_at", (Object) null, "activity_count_90d", 0L);
         }
+        
         Map<String, Object> row = rows.get(0);
         Object countObj = row.get("activity_count_90d");
         long count90d = countObj instanceof Number n ? n.longValue() : 0L;
-        return Map.of(
-            "last_activity_at", row.get("last_activity_at"),
-            "activity_count_90d", count90d
-        );
+        Map<String, Object> result = new HashMap<>();
+        result.put("last_activity_at", row.get("last_activity_at"));
+        result.put("activity_count_90d", count90d);
+        return result;
     }
 
     public UUID insertActivity(UUID orgClientId, UUID entityTypeId, UUID entityId,
