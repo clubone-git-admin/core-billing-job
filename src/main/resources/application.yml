@@ -114,6 +114,15 @@ clubone:
       enabled: ${CLUBONE_BILLING_SCHEDULING_ENABLED:false}
       cron: ${CLUBONE_BILLING_SCHEDULING_CRON:0 0 2 * * ?}  # Daily at 2 AM
 
+  # CRM placeholder API (completion link for lead flows)
+  crm:
+    completion-link-base: ${CLUBONE_CRM_COMPLETION_LINK_BASE:}
+
+  # Notification service (CRM email activities → send job)
+  notification:
+    base-url: ${CLUBONE_NOTIFICATION_BASE_URL:https://develop-api.clubone.io}
+    actor-user-id: ${CLUBONE_NOTIFICATION_ACTOR_USER_ID:11111111-1111-1111-1111-111111111111}
+
 # ---------------------------------------------------------------------------
 # AWS S3 Configuration (for due-preview and other file uploads) - all hardcoded
 # ---------------------------------------------------------------------------
@@ -121,3 +130,5 @@ aws:
   s3:
     bucket-name: billing-preview-bucket
     region: us-east-1
+    access-key-id: AKIAZAI4HBDBQHBW5K4H
+    secret-access-key: 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
