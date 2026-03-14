@@ -135,7 +135,7 @@ public class CrmLeadRepository {
                 l.address, l.city, l.state_id, l.zip_code, l.country_id,
                 l.lead_type_id, l.gender_id, l.referred_by_contact_id,
                 l.account_id, l.date_of_birth,
-                l.consent_to_contact, l.consent_to_marketing, l.has_opt_out_sms, l.has_opt_out_email
+                l.consent_to_contact, l.consent_to_marketing, l.has_opt_out_sms
             FROM crm.leads l
             WHERE l.org_client_id = ? AND l.lead_id = ?
             """, orgClientId, leadId);
