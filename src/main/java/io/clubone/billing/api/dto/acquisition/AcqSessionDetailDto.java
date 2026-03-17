@@ -28,5 +28,9 @@ public record AcqSessionDetailDto(
         @JsonProperty("timezone") String timezone,
         @JsonProperty("step_payload_json") Object stepPayloadJson,
         @JsonProperty("quote_json") Object quoteJson,
-        @JsonProperty("utm_json") Object utmJson
+        @JsonProperty("utm_json") Object utmJson,
+        @JsonProperty("amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double amount,
+        @JsonProperty("has_recurring") @JsonInclude(JsonInclude.Include.ALWAYS) Boolean hasRecurring,
+        @JsonProperty("recurring_amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double recurringAmount,
+        @JsonProperty("recurring_annual_amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double recurringAnnualAmount
 ) {}

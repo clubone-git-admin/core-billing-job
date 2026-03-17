@@ -59,8 +59,29 @@ public class AcquisitionService {
                 asString(r.get("timezone")),
                 r.get("step_payload_json"),
                 r.get("quote_json"),
-                r.get("utm_json")
+                r.get("utm_json"),
+                asDouble(r.get("amount")),
+                asBoolean(r.get("has_recurring")),
+                asDouble(r.get("recurring_amount")),
+                asDouble(r.get("recurring_annual_amount"))
         );
+    }
+
+    private static Boolean asBoolean(Object v) {
+        if (v == null) return null;
+        if (v instanceof Boolean b) return b;
+        if (v instanceof Number n) return n.intValue() != 0;
+        return Boolean.parseBoolean(v.toString());
+    }
+
+    private static Double asDouble(Object v) {
+        if (v == null) return null;
+        if (v instanceof Number n) return n.doubleValue();
+        try {
+            return Double.parseDouble(v.toString());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private static String asString(Object v) {
