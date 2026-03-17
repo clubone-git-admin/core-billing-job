@@ -59,7 +59,7 @@ public class LeadConvertRepository {
 
     /** Client status: Active (lu_client_status). */
     public UUID resolveClientStatusIdActive() {
-        return resolveIdByColumnIgnoreCase("clients.lu_client_status", "lu_client_status_id", "client_status_type", "Active");
+        return resolveIdByColumnIgnoreCase("clients.lu_client_status", "lu_client_status_id", "client_status_type", "InActive");
     }
 
     /** Agreement status for client_role_status (e.g. first active from client_agreements or clients). */

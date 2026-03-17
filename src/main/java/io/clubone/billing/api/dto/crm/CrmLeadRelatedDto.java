@@ -32,10 +32,13 @@ public record CrmLeadRelatedDto(
             @JsonProperty("opportunity_name") String opportunityName,
             @JsonProperty("stage_code") String stageCode,
             @JsonProperty("stage_display_name") String stageDisplayName,
-            @JsonProperty("amount") Double amount,
+            @JsonProperty("amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double amount,
             @JsonProperty("expected_close_date") String expectedCloseDate,
             @JsonProperty("contact_name") String contactName,
-            @JsonProperty("owner_name") String ownerName
+            @JsonProperty("owner_name") String ownerName,
+            @JsonProperty("has_recurring") @JsonInclude(JsonInclude.Include.ALWAYS) Boolean hasRecurring,
+            @JsonProperty("recurring_amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double recurringAmount,
+            @JsonProperty("recurring_total_amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double recurringTotalAmount
     ) {
     }
 

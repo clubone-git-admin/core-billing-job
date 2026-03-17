@@ -214,4 +214,21 @@ public class CrmCampaignRepository {
                 Long.class, orgClientId, campaignId);
         return n != null ? n : 0L;
     }
+
+    /**
+     * Insert a campaign_client row linking a lead (or contact) to a campaign.
+     * Exactly one of leadId or contactId must be non-null (crm_campaign_member_entity_check).
+     */
+    public void insertCampaignClient(UUID orgClientId, UUID campaignId, UUID leadId, UUID contactId, UUID createdBy) {
+        if (leadId == null && contactId == null) {
+            throw new IllegalArgumentException("Either lead_id or contact_id must be non-null");
+        }
+        if (leadId != null && contactId != null) {
+            throw new IllegalArgumentException("Only one of lead_id or contact_id may be set");
+        }
+        jdbc.update("""
+            INSERT INTO crm.campaign_client (org_client_id, campaign_id, lead_id, contact_id, created_by)
+            VALUES (?, ?, ?, ?, ?)
+            """, orgClientId, campaignId, leadId, contactId, createdBy);
+    }
 }

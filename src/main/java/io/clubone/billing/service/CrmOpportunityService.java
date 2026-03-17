@@ -174,6 +174,32 @@ public class CrmOpportunityService {
         return mapToDetailDto(row);
     }
 
+    /**
+     * Update only the amount-related fields for an existing opportunity.
+     * Returns updated opportunity detail or null if not found.
+     */
+    public CrmOpportunityDetailDto updateAmountFields(UUID opportunityId, UpdateOpportunityAmountRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("Request body is required");
+        }
+        UUID orgId = context.getOrgClientId();
+        if (!repository.exists(orgId, opportunityId)) {
+            return null;
+        }
+        Map<String, Object> updates = new HashMap<>();
+        if (request.amount() != null) updates.put("amount", request.amount());
+        if (request.hasRecurring() != null) updates.put("has_recurring", request.hasRecurring());
+        if (request.recurringAmount() != null) updates.put("recurring_amount", request.recurringAmount());
+        if (request.recurringTotalAmount() != null) updates.put("recurring_total_amount", request.recurringTotalAmount());
+        if (updates.isEmpty()) {
+            var row = repository.findById(orgId, opportunityId);
+            return mapToDetailDto(row);
+        }
+        repository.update(orgId, opportunityId, updates);
+        var row = repository.findById(orgId, opportunityId);
+        return mapToDetailDto(row);
+    }
+
     public boolean delete(UUID opportunityId) {
         UUID orgId = context.getOrgClientId();
         if (!repository.exists(orgId, opportunityId)) {
@@ -628,7 +654,10 @@ public class CrmOpportunityService {
                 asString(r.get("owner_display_name")),
                 asDouble(r.get("amount")),
                 toIsoString(r.get("expected_close_date")),
-                asString(r.get("contact_name"))
+                asString(r.get("contact_name")),
+                asBoolean(r.get("has_recurring")),
+                asDouble(r.get("recurring_amount")),
+                asDouble(r.get("recurring_total_amount"))
         );
     }
 
@@ -660,7 +689,11 @@ public class CrmOpportunityService {
                 toIsoString(r.get("created_on")),
                 toIsoString(r.get("modified_on")),
                 asString(r.get("created_by")),
-                asString(r.get("modified_by"))
+                asString(r.get("modified_by")),
+                asDouble(r.get("amount")),
+                asBoolean(r.get("has_recurring")),
+                asDouble(r.get("recurring_amount")),
+                asDouble(r.get("recurring_total_amount"))
         );
     }
 
@@ -687,6 +720,13 @@ public class CrmOpportunityService {
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    private static Boolean asBoolean(Object v) {
+        if (v == null) return null;
+        if (v instanceof Boolean b) return b;
+        if (v instanceof Number n) return n.intValue() != 0;
+        return Boolean.parseBoolean(v.toString());
     }
 
     private static Double asDouble(Object v) {

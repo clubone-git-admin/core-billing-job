@@ -21,7 +21,10 @@ public record CrmOpportunitySummaryDto(
         @JsonProperty("created_on") String createdOn,
         @JsonProperty("owner_user_id") String ownerUserId,
         @JsonProperty("owner_display_name") String ownerDisplayName,
-        @JsonProperty("amount") Double amount,
+        @JsonProperty("amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double amount,
         @JsonProperty("expected_close_date") String expectedCloseDate,
-        @JsonProperty("contact_name") String contactName
+        @JsonProperty("contact_name") String contactName,
+        @JsonProperty("has_recurring") @JsonInclude(JsonInclude.Include.ALWAYS) Boolean hasRecurring,
+        @JsonProperty("recurring_amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double recurringAmount,
+        @JsonProperty("recurring_total_amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double recurringTotalAmount
 ) {}

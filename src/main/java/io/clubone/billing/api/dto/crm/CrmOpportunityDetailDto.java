@@ -31,5 +31,9 @@ public record CrmOpportunityDetailDto(
         @JsonProperty("created_on") String createdOn,
         @JsonProperty("modified_on") String modifiedOn,
         @JsonProperty("created_by") String createdBy,
-        @JsonProperty("modified_by") String modifiedBy
+        @JsonProperty("modified_by") String modifiedBy,
+        @JsonProperty("amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double amount,
+        @JsonProperty("has_recurring") @JsonInclude(JsonInclude.Include.ALWAYS) Boolean hasRecurring,
+        @JsonProperty("recurring_amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double recurringAmount,
+        @JsonProperty("recurring_total_amount") @JsonInclude(JsonInclude.Include.ALWAYS) Double recurringTotalAmount
 ) {}

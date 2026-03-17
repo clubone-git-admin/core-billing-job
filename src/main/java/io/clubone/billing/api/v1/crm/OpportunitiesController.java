@@ -1,5 +1,6 @@
 package io.clubone.billing.api.v1.crm;
 
+import io.clubone.billing.api.dto.crm.UpdateOpportunityAmountRequest;
 import io.clubone.billing.api.dto.crm.*;
 import io.clubone.billing.service.CrmActivityService;
 import io.clubone.billing.service.CrmOpportunityService;
@@ -68,6 +69,23 @@ public class OpportunitiesController {
             @RequestBody Map<String, Object> body
     ) {
         CrmOpportunityDetailDto dto = opportunityService.update(opportunityId, body);
+        if (dto == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(dto);
+    }
+
+    /**
+     * PATCH /api/crm/opportunities/{opportunityId}/amount-fields
+     * Update only amount, has_recurring, recurring_amount, recurring_total_amount for an existing opportunity.
+     * All request body fields are optional; only provided fields are updated.
+     */
+    @PatchMapping("/opportunities/{opportunityId}/amount-fields")
+    public ResponseEntity<CrmOpportunityDetailDto> updateOpportunityAmountFields(
+            @PathVariable("opportunityId") UUID opportunityId,
+            @RequestBody UpdateOpportunityAmountRequest request
+    ) {
+        CrmOpportunityDetailDto dto = opportunityService.updateAmountFields(opportunityId, request);
         if (dto == null) {
             return ResponseEntity.notFound().build();
         }

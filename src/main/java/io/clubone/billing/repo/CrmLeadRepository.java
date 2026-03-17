@@ -606,13 +606,14 @@ public class CrmLeadRepository {
         List<Map<String, Object>> rows = jdbc.queryForList("""
             SELECT 
                 o.opportunity_id,
-                null as opportunity_name,
+                o.full_name AS opportunity_name,
                 st.code AS stage_code,
                 st.display_name AS stage_display_name,
-                null as amount,
-                null as expected_close_date,
+                o.amount,
+                NULL::date AS expected_close_date,
                 c.full_name AS contact_name,
-                TRIM(REGEXP_REPLACE(COALESCE(owner_u.first_name,'') || ' ' || COALESCE(owner_u.middle_name,'') || ' ' || COALESCE(owner_u.last_name,''), ' +', ' ')) AS owner_name
+                TRIM(REGEXP_REPLACE(COALESCE(owner_u.first_name,'') || ' ' || COALESCE(owner_u.middle_name,'') || ' ' || COALESCE(owner_u.last_name,''), ' +', ' ')) AS owner_name,
+                o.has_recurring, o.recurring_amount, o.recurring_total_amount
             FROM crm.leads l
             JOIN crm.opportunity o
               ON o.opportunity_id = l.converted_opportunity_id

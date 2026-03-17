@@ -21,14 +21,14 @@ public class CrmHomeRepository {
     }
 
     /**
-     * Pipeline summary: opportunity counts by stage. crm.opportunity has opportunity_stage_id only (no amount column).
+     * Pipeline summary: opportunity counts by stage with total amount (amount + recurring_total_amount per opportunity).
      */
     public List<Map<String, Object>> getPipelineSummary(UUID orgClientId) {
         String sql = """
             SELECT COALESCE(os.code, 'UNKNOWN') AS stage_code,
                    COALESCE(os.display_name, 'Unknown') AS stage_name,
                    COUNT(*)::int AS count,
-                   0::double precision AS total_amount
+                   COALESCE(SUM(COALESCE(o.amount, 0) + COALESCE(o.recurring_total_amount, 0)), 0)::double precision AS total_amount
             FROM crm.opportunity o
             LEFT JOIN crm.lu_opportunity_stage os ON os.opportunity_stage_id = o.opportunity_stage_id AND os.org_client_id = o.org_client_id AND os.is_active = true
             WHERE o.org_client_id = ?
@@ -40,14 +40,14 @@ public class CrmHomeRepository {
 
     /**
      * Key deals: opportunities with filter my (owner_user_id = currentUser) / team / all. Limit 20.
-     * crm.opportunity has full_name, opportunity_stage_id, contact_id, owner_user_id; no amount or expected_close_date.
      */
     public List<Map<String, Object>> getKeyDeals(UUID orgClientId, UUID currentUserId, String filter, int limit) {
         String sql = """
             SELECT o.opportunity_id, COALESCE(o.full_name, '') AS opportunity_name,
                    os.code AS stage_code, os.display_name AS stage_display_name,
-                   0::double precision AS amount, NULL::date AS expected_close_date,
-                   c.full_name AS contact_name, TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')) AS owner_name
+                   o.amount, NULL::date AS expected_close_date,
+                   c.full_name AS contact_name, TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')) AS owner_name,
+                   o.has_recurring, o.recurring_amount, o.recurring_total_amount
             FROM crm.opportunity o
             LEFT JOIN crm.lu_opportunity_stage os ON os.opportunity_stage_id = o.opportunity_stage_id AND os.org_client_id = o.org_client_id
             LEFT JOIN crm.contact c ON c.contact_id = o.contact_id AND c.org_client_id = o.org_client_id

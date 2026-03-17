@@ -28,7 +28,8 @@ public class CrmOpportunityRepository {
                loc.name AS club, o.opportunity_stage_id, os.code AS stage_code, os.display_name AS stage_display_name,
                o.lead_type_id, lt.display_name AS type_display_name, o.created_on, o.owner_user_id,
                               TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')) AS owner_display_name,
-               0::double precision AS amount, NULL::date AS expected_close_date, c.full_name AS contact_name
+               o.amount, NULL::date AS expected_close_date, c.full_name AS contact_name,
+               o.has_recurring, o.recurring_amount, o.recurring_total_amount
         FROM crm.opportunity o
         LEFT JOIN crm.contact c ON c.contact_id = o.contact_id AND c.org_client_id = o.org_client_id
         LEFT JOIN crm.lu_opportunity_stage os ON os.opportunity_stage_id = o.opportunity_stage_id AND os.org_client_id = o.org_client_id
@@ -101,7 +102,8 @@ public class CrmOpportunityRepository {
                o.owner_user_id, TRIM(REGEXP_REPLACE(COALESCE(u.first_name,'') || ' ' || COALESCE(u.middle_name,'') || ' ' || COALESCE(u.last_name,''), ' +', ' ')) AS owner_display_name,
                o.salutation_id, o.first_name, o.last_name, o.email, o.phone,
                o.lead_type_id, lt.display_name AS lead_type_display_name, o.gender_id, o.referred_by_contact_id,
-               o.created_on, o.modified_on, o.created_by, o.modified_by
+               o.created_on, o.modified_on, o.created_by, o.modified_by,
+               o.amount, o.has_recurring, o.recurring_amount, o.recurring_total_amount
         FROM crm.opportunity o
         LEFT JOIN crm.contact c ON c.contact_id = o.contact_id AND c.org_client_id = o.org_client_id
         LEFT JOIN crm.lu_opportunity_stage os ON os.opportunity_stage_id = o.opportunity_stage_id AND os.org_client_id = o.org_client_id
@@ -184,6 +186,10 @@ public class CrmOpportunityRepository {
         if (updates.containsKey("home_location_id")) { setClauses.add("home_location_id = ?"); params.add(updates.get("home_location_id")); }
         if (updates.containsKey("lead_type_id")) { setClauses.add("lead_type_id = ?"); params.add(updates.get("lead_type_id")); }
         if (updates.containsKey("probability")) { setClauses.add("probability = ?"); params.add(updates.get("probability")); }
+        if (updates.containsKey("amount")) { setClauses.add("amount = ?"); params.add(updates.get("amount")); }
+        if (updates.containsKey("has_recurring")) { setClauses.add("has_recurring = ?"); params.add(updates.get("has_recurring")); }
+        if (updates.containsKey("recurring_amount")) { setClauses.add("recurring_amount = ?"); params.add(updates.get("recurring_amount")); }
+        if (updates.containsKey("recurring_total_amount")) { setClauses.add("recurring_total_amount = ?"); params.add(updates.get("recurring_total_amount")); }
         if (setClauses.isEmpty()) return 0;
         params.add(orgClientId);
         params.add(opportunityId);

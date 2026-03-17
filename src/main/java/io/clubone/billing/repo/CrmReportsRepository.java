@@ -11,7 +11,7 @@ import java.util.UUID;
 
 /**
  * Repository for CRM report queries. Reports are location(s)-specific via location_ids (list).
- * DDL-aligned: crm.leads has no is_deleted; crm.opportunity has no amount column.
+ * DDL-aligned: crm.leads has no is_deleted; crm.opportunity has amount, has_recurring, recurring_amount, recurring_total_amount.
  */
 @Repository
 public class CrmReportsRepository {
@@ -396,13 +396,13 @@ public class CrmReportsRepository {
         return jdbc.queryForList(full.toString(), params.toArray());
     }
 
-    /** 14. Sales Forecast – pipeline by stage. DDL: crm.opportunity has no amount column; total_amount and weighted_amount returned as 0. */
+    /** 14. Sales Forecast – pipeline by stage with amount and weighted amount from crm.opportunity. */
     public List<Map<String, Object>> getSalesForecastReport(UUID orgClientId, List<UUID> locationIds) {
         StringBuilder sql = new StringBuilder("""
             SELECT os.code AS stage_code, os.display_name AS stage_display_name, COALESCE(os.default_probability, 0) AS probability,
                    COUNT(o.opportunity_id) AS opportunity_count,
-                   0::numeric AS total_amount,
-                   0::numeric AS weighted_amount
+                   COALESCE(SUM(o.amount), 0)::numeric AS total_amount,
+                   COALESCE(SUM(o.amount * COALESCE(os.default_probability, 0) / 100.0), 0)::numeric AS weighted_amount
             FROM crm.lu_opportunity_stage os
             LEFT JOIN crm.opportunity o ON o.opportunity_stage_id = os.opportunity_stage_id AND o.org_client_id = os.org_client_id
             """);
@@ -444,11 +444,11 @@ public class CrmReportsRepository {
         return jdbc.queryForList(sql.toString(), params.toArray());
     }
 
-    /** 16. Opportunity pipeline by stage. DDL: crm.opportunity has no amount column; total_amount = 0. */
+    /** 16. Opportunity pipeline by stage with total amount from crm.opportunity. */
     public List<Map<String, Object>> getOpportunityPipelineByStageReport(UUID orgClientId, List<UUID> locationIds) {
         StringBuilder sql = new StringBuilder("""
             SELECT os.code AS stage_code, os.display_name AS stage_display_name, COUNT(o.opportunity_id) AS opportunity_count,
-                   0::numeric AS total_amount
+                   COALESCE(SUM(o.amount), 0)::numeric AS total_amount
             FROM crm.lu_opportunity_stage os
             LEFT JOIN crm.opportunity o ON o.opportunity_stage_id = os.opportunity_stage_id AND o.org_client_id = os.org_client_id
             """);

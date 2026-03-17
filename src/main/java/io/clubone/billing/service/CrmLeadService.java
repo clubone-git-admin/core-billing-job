@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.clubone.billing.api.context.CrmRequestContext;
 import io.clubone.billing.api.dto.crm.*;
+import io.clubone.billing.repo.CrmCampaignRepository;
+import io.clubone.billing.repo.CrmContactRepository;
 import io.clubone.billing.repo.CrmLeadRepository;
 import io.clubone.billing.repo.LeadConvertRepository;
 import org.slf4j.Logger;
@@ -28,15 +30,19 @@ public class CrmLeadService {
     private static final String CONVERTED_STATUS_CODE = "CONVERTED";
 
     private final CrmLeadRepository repository;
+    private final CrmCampaignRepository campaignRepository;
+    private final CrmContactRepository contactRepository;
     private final LeadConvertRepository leadConvertRepository;
     private final LeadWarmthService leadWarmthService;
     private final ObjectMapper objectMapper;
     private final String completionLinkBase;
     private final CrmRequestContext context;
 
-    public CrmLeadService(CrmLeadRepository repository, LeadConvertRepository leadConvertRepository, LeadWarmthService leadWarmthService, ObjectMapper objectMapper,
+    public CrmLeadService(CrmLeadRepository repository, CrmCampaignRepository campaignRepository, CrmContactRepository contactRepository, LeadConvertRepository leadConvertRepository, LeadWarmthService leadWarmthService, ObjectMapper objectMapper,
                            @Value("${clubone.crm.completion-link-base:}") String completionLinkBase, CrmRequestContext context) {
         this.repository = repository;
+        this.campaignRepository = campaignRepository;
+        this.contactRepository = contactRepository;
         this.leadConvertRepository = leadConvertRepository;
         this.leadWarmthService = leadWarmthService;
         this.objectMapper = objectMapper;
@@ -83,6 +89,13 @@ public class CrmLeadService {
         fields.put("created_by", context.getActorId());
 
         repository.insertLead(orgId, leadId, defaultStatusId, fields);
+
+        if (request.campaignId() != null) {
+            if (!campaignRepository.campaignExists(orgId, request.campaignId())) {
+                throw new IllegalArgumentException("Campaign not found or inactive: " + request.campaignId());
+            }
+            campaignRepository.insertCampaignClient(orgId, request.campaignId(), leadId, null, context.getActorId());
+        }
 
         if (request.notes() != null && !request.notes().isBlank()) {
             UUID entityTypeId = repository.resolveEntityTypeIdForLead(orgId);
@@ -173,6 +186,15 @@ public class CrmLeadService {
             throw new IllegalStateException("Lead must have home_location_id (home club) to convert.");
         }
 
+        // Ex-client: if a contact already exists with this email, link lead to existing contact and create only an opportunity
+        String leadEmail = asString(lead.get("email"));
+        if (leadEmail != null && !leadEmail.isBlank()) {
+            Map<String, Object> existingContact = contactRepository.findExistingContactByEmail(orgId, leadEmail);
+            if (existingContact != null) {
+                return convertLeadToExistingContact(orgId, leadId, convertedStatusId, lead, existingContact);
+            }
+        }
+
         UUID prospectTypeId = leadConvertRepository.resolveClientRoleTypeIdProspect();
         if (prospectTypeId == null) {
             throw new IllegalStateException("Client role type 'Prospect' not found in clients.client_role_type.");
@@ -250,6 +272,39 @@ public class CrmLeadService {
         repository.updateLeadStatus(orgId, leadId, convertedStatusId, context.getActorId());
         repository.updateLeadConvertedIds(orgId, leadId, contactId, opportunityId, context.getActorId());
 
+        var row = repository.findLeadSummaryById(orgId, leadId);
+        return row == null ? null : mapToSummaryDto(row);
+    }
+
+    /** Ex-client path: link lead to existing contact and create only a new opportunity. */
+    private CrmLeadSummaryDto convertLeadToExistingContact(UUID orgId, UUID leadId, UUID convertedStatusId,
+                                                            Map<String, Object> lead, Map<String, Object> existingContact) {
+        UUID existingContactId = (UUID) existingContact.get("contact_id");
+        UUID existingClientId = (UUID) existingContact.get("client_id");
+        if (existingContactId == null || existingClientId == null) {
+            throw new IllegalStateException("Existing contact missing contact_id or client_id.");
+        }
+        UUID opportunityStageId = leadConvertRepository.resolveOpportunityStageIdProspecting(orgId);
+        if (opportunityStageId == null) {
+            throw new IllegalStateException("Missing lookup: PROSPECTING opportunity stage for org.");
+        }
+        String firstName = asString(lead.get("first_name"));
+        String lastName = asString(lead.get("last_name"));
+        String fullName = asString(lead.get("full_name"));
+        if (fullName == null || fullName.isBlank()) {
+            fullName = ((firstName != null ? firstName : "") + " " + (lastName != null ? lastName : "")).trim();
+        }
+        UUID ownerUserId = (UUID) lead.get("owner_user_id");
+        if (ownerUserId == null) {
+            ownerUserId = context.getActorId();
+        }
+        UUID opportunityId = leadConvertRepository.insertOpportunity(
+                orgId, existingClientId, opportunityStageId, existingContactId, ownerUserId,
+                (UUID) lead.get("home_location_id"), (UUID) lead.get("salutation_id"),
+                firstName, lastName, fullName, asString(lead.get("email")), asString(lead.get("phone")),
+                (UUID) lead.get("lead_type_id"), (UUID) lead.get("gender_id"), (UUID) lead.get("referred_by_contact_id"), context.getActorId());
+        repository.updateLeadStatus(orgId, leadId, convertedStatusId, context.getActorId());
+        repository.updateLeadConvertedIds(orgId, leadId, existingContactId, opportunityId, context.getActorId());
         var row = repository.findLeadSummaryById(orgId, leadId);
         return row == null ? null : mapToSummaryDto(row);
     }
@@ -350,7 +405,10 @@ public class CrmLeadService {
                     asDouble(opportunityRow.get("amount")),
                     asString(opportunityRow.get("expected_close_date")),
                     asString(opportunityRow.get("contact_name")),
-                    asString(opportunityRow.get("owner_name"))
+                    asString(opportunityRow.get("owner_name")),
+                    asBoolean(opportunityRow.get("has_recurring")),
+                    asDouble(opportunityRow.get("recurring_amount")),
+                    asDouble(opportunityRow.get("recurring_total_amount"))
             );
         }
 

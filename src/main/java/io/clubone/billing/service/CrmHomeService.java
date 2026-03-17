@@ -101,7 +101,10 @@ public class CrmHomeService {
                 toDouble(r.get("amount")),
                 toDateString(r.get("expected_close_date")),
                 asString(r.get("contact_name")),
-                asString(r.get("owner_name"))
+                asString(r.get("owner_name")),
+                asBoolean(r.get("has_recurring")),
+                toDouble(r.get("recurring_amount")),
+                toDouble(r.get("recurring_total_amount"))
         );
     }
 
@@ -165,6 +168,13 @@ public class CrmHomeService {
         if (v == null) return 0d;
         if (v instanceof Number n) return n.doubleValue();
         try { return Double.parseDouble(v.toString()); } catch (Exception e) { return 0d; }
+    }
+
+    private static Boolean asBoolean(Object v) {
+        if (v == null) return null;
+        if (v instanceof Boolean b) return b;
+        if (v instanceof Number n) return n.intValue() != 0;
+        return Boolean.parseBoolean(v.toString());
     }
 
     private static int toInt(Object v) {

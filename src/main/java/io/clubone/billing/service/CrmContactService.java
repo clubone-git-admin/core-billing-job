@@ -170,7 +170,10 @@ public class CrmContactService {
                         asString(r.get("stage_display_name")),
                         asDouble(r.get("amount")),
                         asString(r.get("expected_close_date")),
-                        asString(r.get("owner_name"))
+                        asString(r.get("owner_name")),
+                        asBoolean(r.get("has_recurring")),
+                        asDouble(r.get("recurring_amount")),
+                        asDouble(r.get("recurring_total_amount"))
                 )).toList();
         List<Map<String, Object>> caseRows = contactRepository.findCasesByContact(orgId, contactId, null, null, 100, 0);
         List<CrmLeadRelatedDto.RelatedCase> relatedCases = caseRows.stream().map(r -> new CrmLeadRelatedDto.RelatedCase(

@@ -28,6 +28,23 @@ public class CrmContactRepository {
         return Boolean.TRUE.equals(exists);
     }
 
+    /**
+     * Find an existing contact by email (ex-client check for lead conversion).
+     * Match is case-insensitive on trimmed email. Returns contact_id and client_id (client_role_id) or null if not found.
+     */
+    public Map<String, Object> findExistingContactByEmail(UUID orgClientId, String email) {
+        if (email == null || email.isBlank()) return null;
+        String normalized = email.trim().toLowerCase();
+        if (normalized.isEmpty()) return null;
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+            SELECT contact_id, client_id
+            FROM crm.contact
+            WHERE org_client_id = ? AND LOWER(TRIM(email)) = ? AND COALESCE(is_deleted, false) = false
+            LIMIT 1
+            """, orgClientId, normalized);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
     /** Map view to lifecycle_code when applicable. lifecycle_code param overrides. */
     public List<Map<String, Object>> listContacts(UUID orgClientId, String view, String lifecycleCode,
                                                    String search, UUID ownerId, int limit, int offset) {
@@ -272,8 +289,9 @@ public class CrmContactRepository {
         return jdbc.queryForList("""
             SELECT o.opportunity_id, o.full_name AS opportunity_name,
                    st.code AS stage_code, st.display_name AS stage_display_name,
-                   NULL::float8 AS amount, NULL::date AS expected_close_date,
-                   TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')) AS owner_name
+                   o.amount, NULL::date AS expected_close_date,
+                   TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')) AS owner_name,
+                   o.has_recurring, o.recurring_amount, o.recurring_total_amount
             FROM crm.opportunity o
             LEFT JOIN crm.lu_opportunity_stage st ON st.opportunity_stage_id = o.opportunity_stage_id
             LEFT JOIN "access".access_user u ON u.user_id = o.owner_user_id
