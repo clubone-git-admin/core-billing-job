@@ -39,7 +39,7 @@ public class CrmContactRepository {
         List<Map<String, Object>> rows = jdbc.queryForList("""
             SELECT contact_id, client_id
             FROM crm.contact
-            WHERE org_client_id = ? AND LOWER(TRIM(email)) = ? AND COALESCE(is_deleted, false) = false
+            WHERE org_client_id = ? AND LOWER(TRIM(email)) = ?
             LIMIT 1
             """, orgClientId, normalized);
         return rows.isEmpty() ? null : rows.get(0);

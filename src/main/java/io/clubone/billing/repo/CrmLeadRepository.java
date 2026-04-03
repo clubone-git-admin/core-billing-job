@@ -466,6 +466,22 @@ public class CrmLeadRepository {
         return Boolean.TRUE.equals(converted);
     }
 
+    /** crm.opportunity.client_id for the given opportunity (same org). */
+    public UUID findOpportunityClientId(UUID orgClientId, UUID opportunityId) {
+        if (opportunityId == null) {
+            return null;
+        }
+        List<UUID> ids = jdbc.query("""
+                SELECT client_id FROM crm.opportunity
+                WHERE org_client_id = ? AND opportunity_id = ?
+                LIMIT 1
+                """,
+                (rs, i) -> (UUID) rs.getObject("client_id"),
+                orgClientId, opportunityId
+        );
+        return ids.isEmpty() ? null : ids.get(0);
+    }
+
     public Map<String, Object> findLeadSummaryById(UUID orgClientId, UUID leadId) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
             SELECT 

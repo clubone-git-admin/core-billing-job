@@ -175,6 +175,54 @@ public class CrmLeadService {
         return row == null ? null : mapToSummaryDto(row);
     }
 
+    /**
+     * Same conversion flow as {@link #updateLeadStatus(UUID, CrmUpdateLeadStatusRequest)} with CONVERTED status,
+     * without a request body: resolves CONVERTED status id for the org and runs the same convert path.
+     * Response includes {@code client_id} from {@code crm.opportunity} for the created/linked opportunity.
+     */
+    @Transactional
+    public CrmLeadSummaryDto convertLeadToConverted(UUID leadId) {
+        UUID orgId = context.getOrgClientId();
+        UUID convertedStatusId = repository.resolveLeadStatusIdByCode(orgId, CONVERTED_STATUS_CODE);
+        if (convertedStatusId == null) {
+            throw new IllegalArgumentException("CONVERTED lead status not found for organization (crm.lu_lead_status).");
+        }
+        CrmLeadSummaryDto dto = updateLeadStatus(leadId, new CrmUpdateLeadStatusRequest(convertedStatusId, null, null));
+        if (dto == null) {
+            return null;
+        }
+        String oppIdStr = dto.convertedOpportunityId();
+        String clientIdStr = null;
+        if (oppIdStr != null && !oppIdStr.isBlank()) {
+            try {
+                UUID oppId = UUID.fromString(oppIdStr);
+                UUID clientId = repository.findOpportunityClientId(orgId, oppId);
+                if (clientId != null) {
+                    clientIdStr = clientId.toString();
+                }
+            } catch (IllegalArgumentException ignored) {
+                // invalid UUID in summary — omit client_id
+            }
+        }
+        return new CrmLeadSummaryDto(
+                dto.leadId(),
+                dto.fullName(),
+                dto.email(),
+                dto.phone(),
+                dto.company(),
+                dto.statusCode(),
+                dto.statusDisplayName(),
+                dto.ownerName(),
+                dto.sourceDisplayName(),
+                dto.createdAt(),
+                dto.lastContactedOn(),
+                dto.warmthScore(),
+                dto.convertedContactId(),
+                dto.convertedOpportunityId(),
+                clientIdStr
+        );
+    }
+
     private CrmLeadSummaryDto convertLead(UUID orgId, UUID leadId, UUID convertedStatusId, CrmUpdateLeadStatusRequest request) {
         Map<String, Object> lead = repository.findLeadRowForConvert(orgId, leadId);
         if (lead == null) {
@@ -598,7 +646,8 @@ public class CrmLeadService {
                 CrmLeadRepository.toIsoString(row.get("last_contacted_on")),
                 asInteger(row.get("warmth_score")),
                 asString(row.get("converted_contact_id")),
-                asString(row.get("converted_opportunity_id"))
+                asString(row.get("converted_opportunity_id")),
+                null
         );
     }
 

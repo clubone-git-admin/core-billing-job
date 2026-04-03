@@ -143,6 +143,21 @@ public class LeadsController {
     }
 
     /**
+     * PATCH /api/crm/leads/{leadId}/status/converted
+     * Mark lead as CONVERTED using the same logic as PATCH /leads/{leadId}/status with CONVERTED (no body; only leadId).
+     * Response matches lead summary plus {@code client_id} from crm.opportunity for the conversion opportunity.
+     */
+    @PatchMapping("/leads/{leadId}/status/converted")
+    public ResponseEntity<CrmLeadSummaryDto> convertLeadToConverted(@PathVariable("leadId") UUID leadId) {
+        log.info("Converting lead to CONVERTED: leadId={}", leadId);
+        CrmLeadSummaryDto dto = leadService.convertLeadToConverted(leadId);
+        if (dto == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(dto);
+    }
+
+    /**
      * POST /api/crm/leads/bulk/activities
      * Bulk log same activity for multiple leads (e.g. Log Call from leads list).
      */

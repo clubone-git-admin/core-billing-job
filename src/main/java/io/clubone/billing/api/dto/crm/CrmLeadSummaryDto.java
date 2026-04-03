@@ -21,7 +21,9 @@ public record CrmLeadSummaryDto(
         @JsonProperty("last_contacted_on") String lastContactedOn,
         @JsonProperty("warmth_score") Integer warmthScore,
         @JsonProperty("converted_contact_id") String convertedContactId,
-        @JsonProperty("converted_opportunity_id") String convertedOpportunityId
+        @JsonProperty("converted_opportunity_id") String convertedOpportunityId,
+        /** crm.opportunity.client_id after conversion; present only when returned from convert-to-CONVERTED endpoint. */
+        @JsonProperty("client_id") String clientId
 ) {
 }
 
