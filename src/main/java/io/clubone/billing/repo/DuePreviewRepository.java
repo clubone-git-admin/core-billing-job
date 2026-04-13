@@ -24,7 +24,7 @@ public class DuePreviewRepository {
 
     /**
      * Get due subscription instances for preview based on next_billing_date.
-     * Calculates amounts from subscription_plan_* tables.
+     * Cycle pricing comes from the latest {@code subscription_purchase_snapshot} cycle band.
      *
      * @param dueDate    The due date to filter by (next_billing_date <= dueDate)
      * @param locationId Optional location ID filter
@@ -37,130 +37,110 @@ public class DuePreviewRepository {
         si.subscription_plan_id,
         si.next_billing_date AS payment_due_date,
         si.current_cycle_number AS cycle_number,
-        si.start_date,
+        si.billing_start_date AS start_date,
         si.last_billed_on,
         sp.client_payment_method_id,
         sp.client_agreement_id,
-        sp.contract_start_date,
-        sp.contract_end_date,
+        CAST(NULL AS date) AS contract_start_date,
+        CAST(NULL AS date) AS contract_end_date,
         sis.status_name AS subscription_instance_status_name,
-        -- Get cycle price for current cycle
         spcp.unit_price,
         spcp.effective_unit_price,
         spcp.cycle_start AS price_cycle_start,
         spcp.cycle_end AS price_cycle_end,
-        -- Get client role from subscription plan or agreement
         ca.client_role_id AS client_role_id,
         cr.role_id AS role_id,
-        -- Agreement info
         lcas.name AS client_agreement_status,
         a.agreement_name,
-        -- Location info
         loc.name AS location_name,
-        -- Payment method info
         pt.method_type_name AS payment_method_name,
         pt.method_type_name AS payment_type_name,
         cpm.card_last4,
-        -- Subscription ID (using subscription_instance_id)
         si.subscription_instance_id AS subscription_id,
-        -- Get client characteristics: First Name, Last Name, Primary Contact Email
-        MAX(CASE WHEN cct.name = 'First Name' AND cc.is_active = true
-            AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
-            THEN cc.characteristic END) AS client_first_name,
-        MAX(CASE WHEN cct.name = 'Last Name' AND cc.is_active = true
-            AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
-            THEN cc.characteristic END) AS client_last_name,
-        MAX(CASE WHEN cct.name = 'Primary Contact Email' AND cc.is_active = true
-            AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
-            THEN cc.characteristic END) AS client_email
+        ch.client_first_name,
+        ch.client_last_name,
+        ch.client_email
     FROM client_subscription_billing.subscription_instance si
     JOIN client_subscription_billing.subscription_plan sp ON sp.subscription_plan_id = si.subscription_plan_id
-    JOIN client_subscription_billing.lu_subscription_instance_status sis
+    JOIN billing_config.subscription_instance_status sis
         ON sis.subscription_instance_status_id = si.subscription_instance_status_id
-    -- Get cycle price for current cycle (or next cycle if current cycle doesn't have price)
     LEFT JOIN LATERAL (
-        SELECT spcp.unit_price, spcp.effective_unit_price, spcp.cycle_start, spcp.cycle_end
-        FROM client_subscription_billing.subscription_plan_cycle_price spcp
-        WHERE spcp.subscription_plan_id = si.subscription_plan_id
-        AND (spcp.cycle_start IS NULL OR spcp.cycle_start <= si.current_cycle_number)
-        AND (spcp.cycle_end IS NULL OR spcp.cycle_end >= si.current_cycle_number)
-        ORDER BY spcp.cycle_start DESC NULLS LAST
+        SELECT pscp.unit_price,
+               pscp.unit_price AS effective_unit_price,
+               pscp.cycle_start,
+               pscp.cycle_end
+        FROM client_subscription_billing.subscription_purchase_snapshot sps
+        JOIN client_subscription_billing.subscription_purchase_snapshot_cycle_price pscp
+            ON pscp.subscription_purchase_snapshot_id = sps.subscription_purchase_snapshot_id
+        WHERE sps.subscription_plan_id = si.subscription_plan_id
+          AND sps.subscription_purchase_snapshot_id = (
+              SELECT sps2.subscription_purchase_snapshot_id
+              FROM client_subscription_billing.subscription_purchase_snapshot sps2
+              WHERE sps2.subscription_plan_id = si.subscription_plan_id
+              ORDER BY sps2.captured_on DESC NULLS LAST
+              LIMIT 1
+          )
+          AND (pscp.cycle_start IS NULL OR pscp.cycle_start <= si.current_cycle_number)
+          AND (pscp.cycle_end IS NULL OR pscp.cycle_end >= si.current_cycle_number)
+        ORDER BY pscp.cycle_start DESC NULLS LAST
         LIMIT 1
     ) spcp ON true
-    -- Get client role from client_agreement or subscription_plan
     LEFT JOIN client_agreements.client_agreement ca ON ca.client_agreement_id = sp.client_agreement_id
-    left join client_agreements.lu_client_agreement_status lcas on ca.client_agreement_status_id = lcas.client_agreement_status_id 
-    left join agreements.agreement a on a.agreement_id = ca.agreement_id
+    LEFT JOIN client_agreements.lu_client_agreement_status lcas
+        ON lcas.client_agreement_status_id = ca.client_agreement_status_id
+    LEFT JOIN agreements.agreement a ON a.agreement_id = ca.agreement_id
     LEFT JOIN clients.client_role cr ON cr.client_role_id = ca.client_role_id
-    -- Get location
     LEFT JOIN locations.location loc ON loc.location_id = cr.location_id
-    -- Get payment method
     LEFT JOIN client_payments.client_payment_method cpm ON cpm.client_payment_method_id = sp.client_payment_method_id
-    left join payment_gateway.payment_gateway_supported_method pgsm on pgsm.payment_gateway_supported_method_id= cpm.payment_gateway_method_type_id
-    LEFT JOIN payment_gateway.lu_payment_gateway_method_type pt ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id
-    -- Get client characteristics (First Name, Last Name, Primary Contact Email)
-    LEFT JOIN clients.client_characteristic cc ON cc.client_role_id = ca.client_role_id
-    LEFT JOIN clients.client_characteristic_type cct ON cct.client_characteristic_type_id = cc.client_characteristic_type_id
-        AND cct.name IN ('First Name', 'Last Name', 'Primary Contact Email')
-        AND cct.is_active = true
-    WHERE
-     sis.status_name = 'ACTIVE'
+    LEFT JOIN payment_gateway.payment_gateway_supported_method pgsm
+        ON pgsm.payment_gateway_supported_method_id = cpm.payment_gateway_method_type_id
+    LEFT JOIN payment_gateway.lu_payment_gateway_method_type pt
+        ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id
+    LEFT JOIN LATERAL (
+        SELECT
+            MAX(CASE WHEN cct.name = 'First Name' AND cc.is_active = true
+                AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                THEN cc.characteristic END) AS client_first_name,
+            MAX(CASE WHEN cct.name = 'Last Name' AND cc.is_active = true
+                AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                THEN cc.characteristic END) AS client_last_name,
+            MAX(CASE WHEN cct.name = 'Primary Contact Email' AND cc.is_active = true
+                AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                THEN cc.characteristic END) AS client_email
+        FROM clients.client_characteristic cc
+        INNER JOIN clients.client_characteristic_type cct
+            ON cct.client_characteristic_type_id = cc.client_characteristic_type_id
+            AND cct.name IN ('First Name', 'Last Name', 'Primary Contact Email')
+            AND cct.is_active = true
+        WHERE cc.client_role_id = ca.client_role_id
+    ) ch ON true
+    WHERE sis.status_name = 'ACTIVE'
     AND si.next_billing_date IS NOT NULL
-    AND si.next_billing_date  <= ?::date
+    AND si.next_billing_date <= ?::date
     AND sp.is_active = true
         """);
 
         List<Object> params = new ArrayList<>();
         params.add(dueDate);
 
-        // Add location filter if provided
         if (locationId != null) {
             sql.append(" AND EXISTS (")
-                    .append("  SELECT 1 FROM locations.location loc")
-                    .append("  WHERE loc.location_id = ?::uuid")
+                    .append("  SELECT 1 FROM locations.location locf")
+                    .append("  WHERE locf.location_id = ?::uuid")
                     .append("    AND (")
-                    .append("      loc.location_id = cr.location_id")
+                    .append("      locf.location_id = cr.location_id")
                     .append("      OR EXISTS (")
                     .append("        SELECT 1 FROM client_agreements.client_agreement ca2")
                     .append("        JOIN clients.client_role cr2 ON cr2.client_role_id = ca2.client_role_id")
                     .append("        WHERE ca2.client_agreement_id = sp.client_agreement_id")
-                    .append("          AND cr2.location_id = loc.location_id")
+                    .append("          AND cr2.location_id = locf.location_id")
                     .append("      )")
                     .append("    )")
                     .append(")");
             params.add(locationId);
         }
 
-        sql.append("""
-           GROUP BY
-        si.subscription_instance_id,
-        si.subscription_plan_id,
-        si.next_billing_date,
-        si.current_cycle_number,
-        si.start_date,
-        si.last_billed_on,
-        sp.client_payment_method_id,
-        sp.client_agreement_id,
-        sp.contract_start_date,
-        sp.contract_end_date,
-        sis.status_name,
-        spcp.unit_price,
-        spcp.effective_unit_price,
-        spcp.cycle_start,
-        spcp.cycle_end,
-        ca.client_role_id,
-        cr.role_id,
-        lcas.name,
-        a.agreement_name,
-        loc.name,
-        pt.method_type_name,
-        pt.method_type_name,
-        cpm.card_last4
-        """);
-
         sql.append(" ORDER BY si.next_billing_date ASC, si.subscription_instance_id ASC");
-
-        System.out.println("sql.toString() === " +  sql.toString());
         
         return jdbc.query(sql.toString(), params.toArray(), (rs, rowNum) -> {
             Map<String, Object> row = new HashMap<>();
@@ -233,23 +213,17 @@ public class DuePreviewRepository {
             SELECT CASE WHEN COUNT(1) > 0 THEN true ELSE false END
             FROM client_subscription_billing.subscription_instance si
             JOIN client_subscription_billing.subscription_plan sp ON sp.subscription_plan_id = si.subscription_plan_id
-            JOIN client_subscription_billing.lu_subscription_instance_status ss 
+            JOIN billing_config.subscription_instance_status ss
                 ON ss.subscription_instance_status_id = si.subscription_instance_status_id
-            LEFT JOIN LATERAL (
-              SELECT t.remaining_cycles
-              FROM client_subscription_billing.subscription_plan_term t
-              WHERE t.subscription_plan_id = sp.subscription_plan_id AND t.is_active = true
-              ORDER BY t.created_on DESC NULLS LAST LIMIT 1
-            ) term ON true
             WHERE si.subscription_instance_id = ?::uuid
-              AND sp.is_active = true
+              AND COALESCE(sp.is_active, true) = true
               AND ss.status_name = 'ACTIVE'
-              AND ?::date BETWEEN sp.contract_start_date AND sp.contract_end_date
-              AND (term.remaining_cycles IS NULL OR term.remaining_cycles > 0)
+              AND (si.billing_start_date IS NULL OR si.billing_start_date <= ?::date)
+              AND (si.billing_end_date IS NULL OR si.billing_end_date >= ?::date)
         """;
 
-        Boolean result = jdbc.queryForObject(sql, Boolean.class,
-                subscriptionInstanceId.toString(), asOfDate);
+        String sid = subscriptionInstanceId.toString();
+        Boolean result = jdbc.queryForObject(sql, Boolean.class, sid, asOfDate, asOfDate);
         return Boolean.TRUE.equals(result);
     }
 
@@ -272,15 +246,18 @@ public class DuePreviewRepository {
                    bsr.stage_run_code AS run_code,
                    COALESCE(bsr.ended_on, bsr.started_on, bsr.created_on) AS generated_at,
                    srs.status_code AS status,
-                   bsr.summary_json->>'file_name' AS filename,
+                   COALESCE(
+                       NULLIF(TRIM(bsr.summary_json->>'file_name'), ''),
+                       NULLIF(substring(bsr.summary_json->>'s3_path' from '[^/]+$'), '')
+                   ) AS filename,
                    (bsr.summary_json->>'total_instances')::int AS invoices,
                    (bsr.summary_json->>'total_amount')::numeric AS total_amount,
                    (ap.status_code = 'APPROVED') AS is_mark_ready
             FROM client_subscription_billing.billing_stage_run bsr
-            JOIN client_subscription_billing.lu_billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
-            JOIN client_subscription_billing.lu_stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+            JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+            JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             LEFT JOIN client_subscription_billing.billing_run br ON br.billing_run_id = bsr.billing_run_id
-            LEFT JOIN client_subscription_billing.lu_approval_status ap ON ap.approval_status_id = br.approval_status_id
+            LEFT JOIN billing_config.approval_status ap ON ap.approval_status_id = br.approval_status_id
             WHERE bsc.stage_code = 'DUE_PREVIEW'
             ORDER BY %s %s
             LIMIT ? OFFSET ?
@@ -309,7 +286,7 @@ public class DuePreviewRepository {
         String sql = """
             SELECT COUNT(1)
             FROM client_subscription_billing.billing_stage_run bsr
-            JOIN client_subscription_billing.lu_billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+            JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
             WHERE bsc.stage_code = 'DUE_PREVIEW'
             """;
         Integer n = jdbc.queryForObject(sql, Integer.class);

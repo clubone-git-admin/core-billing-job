@@ -37,7 +37,7 @@ public class BillingRepository {
 
   public UUID resolveBillingStatusIdByCode(String code) {
     List<UUID> ids = jdbc.query(
-      "SELECT billing_status_id FROM client_subscription_billing.lu_billing_status WHERE status_code = ?",
+      "SELECT billing_status_id FROM billing_config.billing_status WHERE status_code = ?",
       (rs, i) -> (UUID) rs.getObject(1),
       code
     );
@@ -46,9 +46,9 @@ public class BillingRepository {
 
   public List<Map<String, Object>> countsByStatus(UUID runId) {
     return jdbc.queryForList(
-      "SELECT s.status_code, COUNT(1) AS cnt " +
+      "SELECT s.status_code AS status_code, COUNT(1) AS cnt " +
       "FROM client_subscription_billing.subscription_billing_history h " +
-      "JOIN client_subscription_billing.lu_billing_status s ON s.billing_status_id = h.billing_status_id " +
+      "JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id " +
       "WHERE h.billing_run_id = ?::uuid " +
       "GROUP BY s.status_code ORDER BY s.status_code",
       runId.toString()
@@ -61,9 +61,9 @@ public class BillingRepository {
       "       h.cycle_number, h.payment_due_date, h.billing_attempt_on, h.failure_reason, " +
       "       h.is_mock, " +
       "       h.invoice_sub_total, h.invoice_tax_amount, h.invoice_discount_amount, h.invoice_total_amount, " +
-      "       s.status_code " +
+      "       s.status_code AS status_code " +
       "FROM client_subscription_billing.subscription_billing_history h " +
-      "JOIN client_subscription_billing.lu_billing_status s ON s.billing_status_id = h.billing_status_id " +
+      "JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id " +
       "WHERE h.billing_run_id = ?::uuid " +
       "ORDER BY h.billing_attempt_on DESC " +
       "LIMIT ?",

@@ -32,7 +32,7 @@ public class MetricsRepository {
                 COUNT(DISTINCT CASE WHEN brs.status_code IN ('COMPLETED_SUCCESS', 'COMPLETED_WITH_FAILURES') THEN br.billing_run_id END) AS successful_runs,
                 COUNT(DISTINCT CASE WHEN brs.status_code IN ('FAILED_SYSTEM', 'CANCELLED') THEN br.billing_run_id END) AS failed_runs
             FROM client_subscription_billing.billing_run br
-            JOIN client_subscription_billing.lu_billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
+            JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
             WHERE DATE(br.created_on) >= ? AND DATE(br.created_on) <= ?
             """);
 
@@ -58,7 +58,7 @@ public class MetricsRepository {
     public List<Map<String, Object>> getStageMetrics(String stageCode, LocalDate fromDate, LocalDate toDate) {
         StringBuilder sql = new StringBuilder("""
             SELECT 
-                bsc.stage_code,
+                bsc.stage_code AS stage_code,
                 bsc.display_name AS stage_display_name,
                 COUNT(DISTINCT bsr.stage_run_id) AS total_runs,
                 COUNT(DISTINCT CASE WHEN srs.status_code = 'COMPLETED' THEN bsr.stage_run_id END) AS successful_runs,
@@ -67,8 +67,8 @@ public class MetricsRepository {
                 MIN(EXTRACT(EPOCH FROM (bsr.ended_on - bsr.started_on))) AS min_duration_seconds,
                 MAX(EXTRACT(EPOCH FROM (bsr.ended_on - bsr.started_on))) AS max_duration_seconds
             FROM client_subscription_billing.billing_stage_run bsr
-            JOIN client_subscription_billing.lu_billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
-            JOIN client_subscription_billing.lu_stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+            JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+            JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             JOIN client_subscription_billing.billing_run br ON br.billing_run_id = bsr.billing_run_id
             WHERE DATE(br.created_on) >= ? AND DATE(br.created_on) <= ?
             AND bsr.ended_on IS NOT NULL
@@ -94,11 +94,11 @@ public class MetricsRepository {
     public Map<String, Object> getChargeMetricsByFailureType(LocalDate fromDate, LocalDate toDate) {
         String sql = """
             SELECT 
-                ft.failure_type_code,
+                ft.failure_type_code AS failure_type_code,
                 COUNT(DISTINCT dlq.dlq_id) AS count,
                 COALESCE(SUM((dlq.work_item_json->>'amount')::numeric), 0) AS amount
             FROM client_subscription_billing.billing_dead_letter_queue dlq
-            JOIN client_subscription_billing.lu_failure_type ft ON ft.failure_type_id = dlq.failure_type_id
+            JOIN billing_config.failure_type ft ON ft.failure_type_id = dlq.failure_type_id
             JOIN client_subscription_billing.billing_run br ON br.billing_run_id = dlq.billing_run_id
             WHERE DATE(br.created_on) >= ? AND DATE(br.created_on) <= ?
             GROUP BY ft.failure_type_code
@@ -119,7 +119,7 @@ public class MetricsRepository {
                 COALESCE(SUM(CASE WHEN bs.is_success = true THEN sbh.invoice_total_amount END), 0) AS total_amount_charged,
                 COALESCE(SUM(CASE WHEN bs.is_failure = true THEN sbh.invoice_total_amount END), 0) AS total_amount_failed
             FROM client_subscription_billing.subscription_billing_history sbh
-            JOIN client_subscription_billing.lu_billing_status bs ON bs.billing_status_id = sbh.billing_status_id
+            JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
             JOIN client_subscription_billing.billing_run br ON br.billing_run_id = sbh.billing_run_id
             WHERE DATE(br.created_on) >= ? AND DATE(br.created_on) <= ?
             """;
@@ -163,7 +163,7 @@ public class MetricsRepository {
                 AVG(EXTRACT(EPOCH FROM (br.ended_on - br.started_on)) / 60.0) AS avg_run_minutes
             FROM client_subscription_billing.billing_run br
             LEFT JOIN client_subscription_billing.subscription_billing_history sbh ON sbh.billing_run_id = br.billing_run_id
-            LEFT JOIN client_subscription_billing.lu_billing_status bs ON bs.billing_status_id = sbh.billing_status_id
+            LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
             WHERE DATE(br.created_on) >= ? AND DATE(br.created_on) <= ?
             AND br.ended_on IS NOT NULL
             """);

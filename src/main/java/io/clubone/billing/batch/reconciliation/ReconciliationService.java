@@ -53,10 +53,10 @@ public class ReconciliationService {
 
             // Summary by status
             List<Map<String, Object>> byStatus = jdbc.queryForList("""
-                SELECT s.status_code, COUNT(1) AS count, 
+                SELECT s.status_code AS status_code, COUNT(1) AS count, 
                        COALESCE(SUM(h.invoice_total_amount), 0) AS total_amount
                 FROM client_subscription_billing.subscription_billing_history h
-                JOIN client_subscription_billing.lu_billing_status s ON s.billing_status_id = h.billing_status_id
+                JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id
                 WHERE DATE(h.billing_attempt_on) = ?::date
                 GROUP BY s.status_code
                 ORDER BY s.status_code
@@ -85,9 +85,9 @@ public class ReconciliationService {
             String failed2 = BillingStatus.LIVE_ERROR.getCode();
             String failed3 = BillingStatus.MOCK_ERROR.getCode();
             List<Map<String, Object>> failed = jdbc.queryForList("""
-                SELECT h.invoice_id, h.failure_reason, s.status_code, h.invoice_total_amount
+                SELECT h.invoice_id, h.failure_reason, s.status_code AS status_code, h.invoice_total_amount
                 FROM client_subscription_billing.subscription_billing_history h
-                JOIN client_subscription_billing.lu_billing_status s ON s.billing_status_id = h.billing_status_id
+                JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id
                 WHERE DATE(h.billing_attempt_on) = ?::date
                   AND s.status_code IN (?, ?, ?)
                 ORDER BY h.billing_attempt_on DESC
@@ -325,10 +325,10 @@ public class ReconciliationService {
 
             // Summary by status for this run
             List<Map<String, Object>> byStatus = jdbc.queryForList("""
-                SELECT s.status_code, COUNT(1) AS count, 
+                SELECT s.status_code AS status_code, COUNT(1) AS count, 
                        COALESCE(SUM(h.invoice_total_amount), 0) AS total_amount
                 FROM client_subscription_billing.subscription_billing_history h
-                JOIN client_subscription_billing.lu_billing_status s ON s.billing_status_id = h.billing_status_id
+                JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id
                 WHERE h.billing_run_id = ?::uuid
                 GROUP BY s.status_code
                 ORDER BY s.status_code
@@ -342,9 +342,9 @@ public class ReconciliationService {
             String failed2 = io.clubone.billing.batch.model.BillingStatus.LIVE_ERROR.getCode();
             String failed3 = io.clubone.billing.batch.model.BillingStatus.MOCK_ERROR.getCode();
             List<Map<String, Object>> failed = jdbc.queryForList("""
-                SELECT h.invoice_id, h.failure_reason, s.status_code, h.invoice_total_amount
+                SELECT h.invoice_id, h.failure_reason, s.status_code AS status_code, h.invoice_total_amount
                 FROM client_subscription_billing.subscription_billing_history h
-                JOIN client_subscription_billing.lu_billing_status s ON s.billing_status_id = h.billing_status_id
+                JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id
                 WHERE h.billing_run_id = ?::uuid
                   AND s.status_code IN (?, ?, ?)
                 ORDER BY h.billing_attempt_on DESC

@@ -31,7 +31,7 @@ public class LookupRepository {
                     description,
                     is_active,
                     sort_order
-                FROM client_subscription_billing.lu_billing_run_status
+                FROM billing_config.billing_run_status
                 WHERE is_active = true
                 ORDER BY sort_order, display_name
                 """);
@@ -44,7 +44,7 @@ public class LookupRepository {
                     description,
                     is_active,
                     sort_order
-                FROM client_subscription_billing.lu_stage_run_status
+                FROM billing_config.stage_run_status
                 WHERE is_active = true
                 ORDER BY sort_order, display_name
                 """);
@@ -57,7 +57,7 @@ public class LookupRepository {
                     description,
                     is_active,
                     0 AS sort_order
-                FROM client_subscription_billing.lu_approval_status
+                FROM billing_config.approval_status
                 WHERE is_active = true
                 ORDER BY display_name
                 """);
@@ -70,10 +70,11 @@ public class LookupRepository {
                     description,
                     is_active,
                     sort_order
-                FROM client_subscription_billing.lu_billing_status
+                FROM billing_config.billing_status
                 WHERE is_active = true
                 ORDER BY sort_order, display_name
                 """);
+
         }
 
         return Collections.emptyList();
@@ -92,7 +93,7 @@ public class LookupRepository {
                 stage_sequence,
                 is_optional,
                 is_active
-            FROM client_subscription_billing.lu_billing_stage_code
+            FROM billing_config.billing_stage_code
             WHERE is_active = true
             ORDER BY stage_sequence
             """);

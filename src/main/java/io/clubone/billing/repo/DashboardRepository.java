@@ -5,7 +5,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
-import java.time.OffsetDateTime;
 import java.util.*;
 
 /**
@@ -35,9 +34,9 @@ public class DashboardRepository {
                 COUNT(DISTINCT CASE WHEN bs.is_success = true THEN sbh.subscription_billing_history_id END) AS successful_invoices,
                 COUNT(DISTINCT sbh.subscription_billing_history_id) AS total_attempts
             FROM client_subscription_billing.billing_run br
-            LEFT JOIN client_subscription_billing.lu_billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
+            LEFT JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
             LEFT JOIN client_subscription_billing.subscription_billing_history sbh ON sbh.billing_run_id = br.billing_run_id
-            LEFT JOIN client_subscription_billing.lu_billing_status bs ON bs.billing_status_id = sbh.billing_status_id
+            LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
             WHERE br.created_on >= ?
             """);
 
@@ -59,13 +58,13 @@ public class DashboardRepository {
         String sql = """
             SELECT DISTINCT ON (bsc.stage_code)
                 br.billing_run_id, br.billing_run_code, br.due_date,
-                brs.status_code, bsc.stage_code AS current_stage_code,
+                brs.status_code AS status_code, bsc.stage_code AS current_stage_code,
                 br.started_on, br.ended_on,
                 COUNT(DISTINCT sbh.invoice_id) AS invoices_count,
                 COALESCE(SUM(sbh.invoice_total_amount), 0) AS total_amount
             FROM client_subscription_billing.billing_run br
-            JOIN client_subscription_billing.lu_billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
-            JOIN client_subscription_billing.lu_billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
+            JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
+            JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
             LEFT JOIN client_subscription_billing.subscription_billing_history sbh ON sbh.billing_run_id = br.billing_run_id
             WHERE br.created_on >= ?
             """;
@@ -93,16 +92,17 @@ public class DashboardRepository {
     public Map<String, Object> getForecastData(UUID locationId) {
         String sql = """
             SELECT 
-                COUNT(DISTINCT CASE WHEN sis.payment_due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN sis.subscription_invoice_schedule_id END) AS due_7_days_count,
-                COALESCE(SUM(CASE WHEN sis.payment_due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN i.total_amount END), 0) AS due_7_days_amount,
-                COUNT(DISTINCT CASE WHEN sis.payment_due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN sis.subscription_invoice_schedule_id END) AS due_30_days_count,
-                COALESCE(SUM(CASE WHEN sis.payment_due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN i.total_amount END), 0) AS due_30_days_amount,
-                COUNT(DISTINCT CASE WHEN sis.payment_due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' THEN sis.subscription_invoice_schedule_id END) AS due_90_days_count,
-                COALESCE(SUM(CASE WHEN sis.payment_due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' THEN i.total_amount END), 0) AS due_90_days_amount
-            FROM client_subscription_billing.subscription_invoice_schedule sis
-            JOIN transactions.invoice i ON i.invoice_id = sis.invoice_id
-            JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sis.subscription_instance_id
-            WHERE sis.is_active = true AND sis.schedule_status IN ('PENDING', 'DUE')
+                COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN sbs.billing_schedule_id END) AS due_7_days_count,
+                COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN COALESCE(i.total_amount, sbs.final_amount, 0) END), 0) AS due_7_days_amount,
+                COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN sbs.billing_schedule_id END) AS due_30_days_count,
+                COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN COALESCE(i.total_amount, sbs.final_amount, 0) END), 0) AS due_30_days_amount,
+                COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' THEN sbs.billing_schedule_id END) AS due_90_days_count,
+                COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' THEN COALESCE(i.total_amount, sbs.final_amount, 0) END), 0) AS due_90_days_amount
+            FROM client_subscription_billing.subscription_billing_schedule sbs
+            JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
+            LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
+            JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id
+            WHERE bss.status_code IN ('PENDING', 'DUE')
             """;
 
         List<Object> params = new ArrayList<>();
@@ -136,7 +136,7 @@ public class DashboardRepository {
                 COUNT(CASE WHEN dlq.resolved = false AND ft.failure_type_code = 'HARD' THEN 1 END) AS hard_count,
                 COUNT(CASE WHEN dlq.resolved = false AND ft.failure_type_code = 'TRANSIENT' THEN 1 END) AS transient_count
             FROM client_subscription_billing.billing_dead_letter_queue dlq
-            LEFT JOIN client_subscription_billing.lu_failure_type ft ON ft.failure_type_id = dlq.failure_type_id
+            LEFT JOIN billing_config.failure_type ft ON ft.failure_type_id = dlq.failure_type_id
             LEFT JOIN client_subscription_billing.billing_run br ON br.billing_run_id = dlq.billing_run_id
             WHERE 1=1
             """;

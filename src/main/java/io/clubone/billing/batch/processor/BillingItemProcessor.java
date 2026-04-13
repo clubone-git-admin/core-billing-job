@@ -305,7 +305,7 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
             String sql = "SELECT CASE WHEN COUNT(1) > 0 THEN true ELSE false END "
                     + "FROM client_subscription_billing.subscription_instance si "
                     + "JOIN client_subscription_billing.subscription_plan sp ON sp.subscription_plan_id = si.subscription_plan_id "
-                    + "JOIN client_subscription_billing.lu_subscription_instance_status ss ON ss.subscription_instance_status_id = si.subscription_instance_status_id "
+                    + "JOIN billing_config.subscription_instance_status ss ON ss.subscription_instance_status_id = si.subscription_instance_status_id "
                     + "LEFT JOIN LATERAL ( "
                     + "  SELECT t.remaining_cycles "
                     + "  FROM client_subscription_billing.subscription_plan_term t "

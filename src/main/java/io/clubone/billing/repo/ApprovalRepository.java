@@ -31,7 +31,7 @@ public class ApprovalRepository {
                    bra.approved_on, bra.notes, bra.created_on,
                    ap.display_name AS approval_status_display
             FROM client_subscription_billing.billing_run_approval bra
-            LEFT JOIN client_subscription_billing.lu_approval_status ap ON ap.status_code = bra.status_code
+            LEFT JOIN billing_config.approval_status ap ON ap.status_code = bra.status_code
             WHERE bra.billing_run_id = ?::uuid
             ORDER BY bra.approval_level ASC
             """;
@@ -68,13 +68,13 @@ public class ApprovalRepository {
 
         // 1️⃣ Resolve approval_status_id for PENDING
         UUID statusId = jdbc.queryForObject(
-            "SELECT approval_status_id FROM client_subscription_billing.lu_approval_status WHERE status_code = ?",
+            "SELECT approval_status_id FROM billing_config.approval_status WHERE status_code = ?",
             new Object[]{"PENDING"},
             UUID.class
         );
 
         if (statusId == null) {
-            throw new IllegalStateException("PENDING status not found in lu_approval_status");
+            throw new IllegalStateException("PENDING status not found in billing_config.approval_status");
         }
 
         // 2️⃣ Insert with BOTH status_code and approval_status_id
@@ -120,7 +120,7 @@ public class ApprovalRepository {
      * Update billing run approval status.
      */
     public void updateBillingRunApprovalStatus(UUID billingRunId, String statusCode, UUID approvedBy, String notes) {
-        String statusIdSql = "SELECT approval_status_id FROM client_subscription_billing.lu_approval_status WHERE status_code = ?";
+        String statusIdSql = "SELECT approval_status_id FROM billing_config.approval_status WHERE status_code = ?";
         System.out.println("statusCode id" + statusCode);
         UUID statusId = jdbc.queryForObject(statusIdSql, new Object[]{statusCode}, UUID.class);
         System.out.println("status id" + statusId);

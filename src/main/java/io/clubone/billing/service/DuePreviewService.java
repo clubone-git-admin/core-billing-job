@@ -76,6 +76,102 @@ public class DuePreviewService {
     }
 
     /**
+     * Reads S3 URI from stage summary_json ({@code s3_path} or legacy {@code s3Path}).
+     */
+    private static String s3PathFromSummary(Map<String, Object> summary) {
+        if (summary == null || summary.isEmpty()) {
+            return null;
+        }
+        Object v = summary.get("s3_path");
+        if (v == null) {
+            v = summary.get("s3Path");
+        }
+        if (v == null) {
+            return null;
+        }
+        String s = v.toString().trim();
+        return s.isEmpty() ? null : s;
+    }
+
+    /**
+     * Resolves the CSV file location: summary_json first, then snapshot matched by {@code stage_run_id},
+     * then latest DUE_PREVIEW snapshot for the billing run (legacy).
+     */
+    private String resolveDuePreviewS3Path(UUID billingRunId, UUID stageRunId, Map<String, Object> summary) {
+        String path = s3PathFromSummary(summary);
+        if (path != null && !path.isBlank()) {
+            return path;
+        }
+        if (stageRunId != null) {
+            try {
+                String byStage = snapshotRepository.findDuePreviewSnapshotS3PathByStageRunId(stageRunId);
+                if (byStage != null && !byStage.isBlank()) {
+                    return byStage.trim();
+                }
+            } catch (Exception e) {
+                log.warn("Could not load due-preview snapshot for stageRunId={}: {}", stageRunId, e.getMessage());
+            }
+        }
+        if (billingRunId == null) {
+            return null;
+        }
+        try {
+            List<Map<String, Object>> snaps = snapshotRepository.findByBillingRunId(billingRunId, "DUE_PREVIEW", "DUE_PREVIEW");
+            if (snaps.isEmpty()) {
+                return null;
+            }
+            Object sp = snaps.get(0).get("s3_path");
+            if (sp != null) {
+                String t = sp.toString().trim();
+                if (!t.isEmpty()) {
+                    return t;
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Could not load due-preview snapshot for billingRunId={}: {}", billingRunId, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Restores {@code s3_path} / {@code file_name} on DUE_PREVIEW stage rows when approve overwrote {@code summary_json}
+     * but a matching snapshot row exists (see {@link #resolveDuePreviewS3Path}).
+     */
+    public List<StageRunDto> enrichDuePreviewStageSummaries(UUID billingRunId, List<StageRunDto> stages) {
+        if (stages == null || billingRunId == null) {
+            return stages;
+        }
+        List<StageRunDto> out = new ArrayList<>(stages.size());
+        for (StageRunDto s : stages) {
+            if (!"DUE_PREVIEW".equals(s.stageCode())) {
+                out.add(s);
+                continue;
+            }
+            Map<String, Object> sj = s.summaryJson();
+            HashMap<String, Object> merged = sj != null ? new HashMap<>(sj) : new HashMap<>();
+            String path = resolveDuePreviewS3Path(billingRunId, s.stageRunId(), merged);
+            if (path != null && !path.isBlank()) {
+                if (merged.get("s3_path") == null) {
+                    merged.put("s3_path", path);
+                }
+                if (merged.get("file_name") == null) {
+                    int slash = path.lastIndexOf('/');
+                    if (slash >= 0 && slash < path.length() - 1) {
+                        merged.put("file_name", path.substring(slash + 1));
+                    }
+                }
+            }
+            out.add(new StageRunDto(
+                    s.stageRunId(), s.stageRunCode(), s.billingRunId(),
+                    s.stageCode(), s.stageDisplayName(), s.stageSequence(),
+                    s.statusCode(), s.statusDisplayName(), s.scheduledFor(),
+                    s.startedOn(), s.endedOn(), merged.isEmpty() ? null : merged,
+                    s.errorMessage(), s.errorDetails(), s.attemptNumber(), s.maxAttempts()));
+        }
+        return out;
+    }
+
+    /**
      * Get due preview run details by stage_run_id. Loads run metadata from DB and invoice rows from S3 CSV.
      *
      * @param stageRunId billing_stage_run.stage_run_id (DUE_PREVIEW stage)
@@ -91,9 +187,18 @@ public class DuePreviewService {
         }
 
         Map<String, Object> summaryJson = stageRun.summaryJson() != null ? new HashMap<>(stageRun.summaryJson()) : new HashMap<>();
-        String s3Path = (String) summaryJson.get("s3_path");
+        String s3Path = resolveDuePreviewS3Path(stageRun.billingRunId(), stageRun.stageRunId(), summaryJson);
         if (s3Path == null || s3Path.isBlank()) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Due preview file not found in S3 for run: " + stageRunId);
+        }
+        if (summaryJson.get("s3_path") == null) {
+            summaryJson.put("s3_path", s3Path);
+        }
+        if (summaryJson.get("file_name") == null) {
+            int slash = s3Path.lastIndexOf('/');
+            if (slash >= 0 && slash < s3Path.length() - 1) {
+                summaryJson.put("file_name", s3Path.substring(slash + 1));
+            }
         }
 
         String csvContent = s3Service.downloadFromS3(s3Path);
@@ -143,7 +248,7 @@ public class DuePreviewService {
         }
 
         Map<String, Object> summaryJson = stageRun.summaryJson() != null ? new HashMap<>(stageRun.summaryJson()) : new HashMap<>();
-        String s3Path = (String) summaryJson.get("s3_path");
+        String s3Path = resolveDuePreviewS3Path(stageRun.billingRunId(), stageRun.stageRunId(), summaryJson);
         if (s3Path == null || s3Path.isBlank()) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Due preview file not found in S3 for run: " + stageRunId);
         }
@@ -249,8 +354,11 @@ public class DuePreviewService {
 		 * approvalStatus, request.approverId(), request.notes() != null ?
 		 * request.notes() : request.rejectionReason());
 		 */
-        // Mark DUE_PREVIEW stage run as COMPLETED
+        // Mark DUE_PREVIEW stage run as COMPLETED (merge into existing summary so s3_path / file_name are kept)
         Map<String, Object> summaryJson = new HashMap<>();
+        if (duePreviewStage.summaryJson() != null) {
+            summaryJson.putAll(duePreviewStage.summaryJson());
+        }
         summaryJson.put("approved", approved);
         summaryJson.put("approver_id", request.approverId().toString());
         summaryJson.put("approver_role", approverRole);
@@ -454,6 +562,7 @@ public class DuePreviewService {
 
         // Build summary for stage run
         Map<String, Object> summaryJson = new HashMap<>();
+        summaryJson.put("stage_run_id", stageRunId.toString());
         summaryJson.put("s3_path", s3Path);
         summaryJson.put("file_name", fileName);
         summaryJson.put("total_instances", processedInstances.size());

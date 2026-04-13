@@ -31,7 +31,7 @@ public class CompareRepository {
                 COUNT(DISTINCT CASE WHEN bs.is_failure = true THEN sbh.invoice_id END) AS failure_count
             FROM client_subscription_billing.billing_run br
             LEFT JOIN client_subscription_billing.subscription_billing_history sbh ON sbh.billing_run_id = br.billing_run_id
-            LEFT JOIN client_subscription_billing.lu_billing_status bs ON bs.billing_status_id = sbh.billing_status_id
+            LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
             WHERE br.billing_run_id = ?::uuid
             GROUP BY br.billing_run_id, br.billing_run_code, br.due_date
             """;
@@ -68,8 +68,8 @@ public class CompareRepository {
                 FROM client_subscription_billing.subscription_billing_history sbh
                 WHERE sbh.billing_run_id = ?::uuid
             ) b ON a.subscription_instance_id = b.subscription_instance_id
-            LEFT JOIN client_subscription_billing.lu_billing_status a_status ON a_status.billing_status_id = a.billing_status_id
-            LEFT JOIN client_subscription_billing.lu_billing_status b_status ON b_status.billing_status_id = b.billing_status_id
+            LEFT JOIN billing_config.billing_status a_status ON a_status.billing_status_id = a.billing_status_id
+            LEFT JOIN billing_config.billing_status b_status ON b_status.billing_status_id = b.billing_status_id
             WHERE a.invoice_id IS DISTINCT FROM b.invoice_id
                OR ABS(COALESCE(a.invoice_total_amount, 0) - COALESCE(b.invoice_total_amount, 0)) > 0.01
                OR a_status.status_code IS DISTINCT FROM b_status.status_code
@@ -89,7 +89,7 @@ public class CompareRepository {
                 a.invoice_total_amount AS total_amount,
                 bs.status_code AS status
             FROM client_subscription_billing.subscription_billing_history a
-            LEFT JOIN client_subscription_billing.lu_billing_status bs ON bs.billing_status_id = a.billing_status_id
+            LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = a.billing_status_id
             WHERE a.billing_run_id = ?::uuid
             AND NOT EXISTS (
                 SELECT 1 FROM client_subscription_billing.subscription_billing_history b
@@ -112,7 +112,7 @@ public class CompareRepository {
                 b.invoice_total_amount AS total_amount,
                 bs.status_code AS status
             FROM client_subscription_billing.subscription_billing_history b
-            LEFT JOIN client_subscription_billing.lu_billing_status bs ON bs.billing_status_id = b.billing_status_id
+            LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = b.billing_status_id
             WHERE b.billing_run_id = ?::uuid
             AND NOT EXISTS (
                 SELECT 1 FROM client_subscription_billing.subscription_billing_history a

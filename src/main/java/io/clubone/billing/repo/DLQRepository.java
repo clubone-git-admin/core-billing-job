@@ -40,13 +40,13 @@ public class DLQRepository {
                    dlq.resolved_by, dlq.resolution_notes, dlq.retry_strategy,
                    br.billing_run_code, srs.stage_run_code,
                    i.invoice_number,
-                   ft.failure_type_code, ft.display_name AS failure_type_display,
+                   ft.failure_type_code AS failure_type_code, ft.display_name AS failure_type_display,
                    ft.is_retryable
             FROM client_subscription_billing.billing_dead_letter_queue dlq
             LEFT JOIN client_subscription_billing.billing_run br ON br.billing_run_id = dlq.billing_run_id
             LEFT JOIN client_subscription_billing.billing_stage_run srs ON srs.stage_run_id = dlq.stage_run_id
             LEFT JOIN transactions.invoice i ON i.invoice_id = dlq.invoice_id
-            LEFT JOIN client_subscription_billing.lu_failure_type ft ON ft.failure_type_id = dlq.failure_type_id
+            LEFT JOIN billing_config.failure_type ft ON ft.failure_type_id = dlq.failure_type_id
             WHERE 1=1
             """);
 
@@ -83,7 +83,7 @@ public class DLQRepository {
         StringBuilder sql = new StringBuilder("""
             SELECT COUNT(1)
             FROM client_subscription_billing.billing_dead_letter_queue dlq
-            LEFT JOIN client_subscription_billing.lu_failure_type ft ON ft.failure_type_id = dlq.failure_type_id
+            LEFT JOIN billing_config.failure_type ft ON ft.failure_type_id = dlq.failure_type_id
             WHERE 1=1
             """);
 
@@ -117,13 +117,13 @@ public class DLQRepository {
                    dlq.resolved_by, dlq.resolution_notes, dlq.retry_strategy,
                    br.billing_run_code, srs.stage_run_code,
                    i.invoice_number,
-                   ft.failure_type_code, ft.display_name AS failure_type_display,
+                   ft.failure_type_code AS failure_type_code, ft.display_name AS failure_type_display,
                    ft.is_retryable
             FROM client_subscription_billing.billing_dead_letter_queue dlq
             LEFT JOIN client_subscription_billing.billing_run br ON br.billing_run_id = dlq.billing_run_id
             LEFT JOIN client_subscription_billing.billing_stage_run srs ON srs.stage_run_id = dlq.stage_run_id
             LEFT JOIN transactions.invoice i ON i.invoice_id = dlq.invoice_id
-            LEFT JOIN client_subscription_billing.lu_failure_type ft ON ft.failure_type_id = dlq.failure_type_id
+            LEFT JOIN billing_config.failure_type ft ON ft.failure_type_id = dlq.failure_type_id
             WHERE dlq.dlq_id = ?::uuid
             """;
 

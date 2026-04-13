@@ -45,27 +45,31 @@ public class PlansService {
         // Add cycle prices
         List<Map<String, Object>> cyclePrices = plansRepository.getCyclePrices(subscriptionPlanId);
         formattedPlan.put("cycle_prices", cyclePrices.stream()
-                .map(cp -> Map.of(
-                        "subscription_plan_cycle_price_id", cp.get("subscription_plan_cycle_price_id"),
-                        "cycle_start", cp.get("cycle_start"),
-                        "cycle_end", cp.get("cycle_end"),
-                        "unit_price", cp.get("unit_price"),
-                        "effective_unit_price", cp.get("effective_unit_price")
-                ))
+                .map(cp -> {
+                    Map<String, Object> row = new HashMap<>();
+                    row.put("subscription_plan_cycle_price_id", cp.get("subscription_plan_cycle_price_id"));
+                    row.put("cycle_start", cp.get("cycle_start"));
+                    row.put("cycle_end", cp.get("cycle_end"));
+                    row.put("unit_price", cp.get("unit_price"));
+                    row.put("effective_unit_price", cp.get("effective_unit_price"));
+                    return row;
+                })
                 .collect(Collectors.toList()));
 
         // Add entitlements
         List<Map<String, Object>> entitlements = plansRepository.getEntitlements(subscriptionPlanId);
         formattedPlan.put("entitlements", entitlements.stream()
-                .map(e -> Map.of(
-                        "subscription_plan_entitlement_id", e.get("subscription_plan_entitlement_id"),
-                        "entitlement_mode", Map.of(
-                                "code", e.get("entitlement_mode_code"),
-                                "display_name", e.get("entitlement_mode_display_name")
-                        ),
-                        "quantity_per_cycle", e.get("quantity_per_cycle"),
-                        "is_unlimited", e.get("is_unlimited")
-                ))
+                .map(e -> {
+                    Map<String, Object> mode = new HashMap<>();
+                    mode.put("code", e.get("entitlement_mode_code"));
+                    mode.put("display_name", e.get("entitlement_mode_display_name"));
+                    Map<String, Object> row = new HashMap<>();
+                    row.put("subscription_plan_entitlement_id", e.get("subscription_plan_entitlement_id"));
+                    row.put("entitlement_mode", mode);
+                    row.put("quantity_per_cycle", e.get("quantity_per_cycle"));
+                    row.put("is_unlimited", e.get("is_unlimited"));
+                    return row;
+                })
                 .collect(Collectors.toList()));
 
         // Add active instances count
@@ -95,15 +99,18 @@ public class PlansService {
         Map<String, Object> result = new HashMap<>();
         result.put("subscription_plan_id", plan.get("subscription_plan_id"));
         result.put("client_payment_method_id", plan.get("client_payment_method_id"));
-        result.put("subscription_frequency", Map.of(
-                "frequency_name", plan.get("subscription_frequency_name"),
-                "display_name", plan.get("subscription_frequency_name")
-        ));
+        result.put("package_item_id", plan.get("package_item_id"));
+        result.put("package_plan_template_id", plan.get("package_plan_template_id"));
+        result.put("term_total_cycles", plan.get("term_total_cycles"));
+        Map<String, Object> freq = new HashMap<>();
+        freq.put("frequency_name", plan.get("subscription_frequency_name"));
+        freq.put("display_name", plan.get("subscription_frequency_name"));
+        result.put("subscription_frequency", freq);
         result.put("interval_count", plan.get("interval_count"));
-        result.put("subscription_billing_day_rule", Map.of(
-                "billing_day", plan.get("billing_day"),
-                "display_name", plan.get("billing_day_display_name")
-        ));
+        Map<String, Object> dayRule = new HashMap<>();
+        dayRule.put("billing_day", plan.get("billing_day"));
+        dayRule.put("display_name", plan.get("billing_day_display_name"));
+        result.put("subscription_billing_day_rule", dayRule);
         result.put("contract_start_date", plan.get("contract_start_date"));
         result.put("contract_end_date", plan.get("contract_end_date"));
         result.put("is_active", plan.get("is_active"));

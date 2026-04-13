@@ -42,16 +42,16 @@ public class BillingRunRepository {
                    br.source_run_id, br.approved_by, br.approved_on, br.approval_notes,
                    brs.status_code AS run_status_code, brs.display_name AS run_status_display,
                    brs.description AS run_status_description,
-                   bsc.stage_code, bsc.display_name AS stage_display_name,
+                   bsc.stage_code AS stage_code, bsc.display_name AS stage_display_name,
                    bsc.stage_sequence, bsc.description AS stage_description,
                    bsc.is_optional AS stage_is_optional,
                    ap.status_code AS approval_status_code, ap.display_name AS approval_status_display,
                    l.name AS location_name,
                    src.billing_run_code AS source_run_code
             FROM client_subscription_billing.billing_run br
-            LEFT JOIN client_subscription_billing.lu_billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
-            LEFT JOIN client_subscription_billing.lu_billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
-            LEFT JOIN client_subscription_billing.lu_approval_status ap ON ap.approval_status_id = br.approval_status_id
+            LEFT JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
+            LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
+            LEFT JOIN billing_config.approval_status ap ON ap.approval_status_id = br.approval_status_id
             LEFT JOIN locations.location l ON l.location_id = br.location_id
             LEFT JOIN client_subscription_billing.billing_run src ON src.billing_run_id = br.source_run_id
             WHERE 1=1
@@ -165,8 +165,8 @@ public class BillingRunRepository {
         StringBuilder sql = new StringBuilder("""
             SELECT COUNT(1)
             FROM client_subscription_billing.billing_run br
-            LEFT JOIN client_subscription_billing.lu_billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
-            LEFT JOIN client_subscription_billing.lu_billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
+            LEFT JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
+            LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
             WHERE 1=1
             """);
 
@@ -207,16 +207,16 @@ public class BillingRunRepository {
                    br.source_run_id, br.approved_by, br.approved_on, br.approval_notes,
                    brs.status_code AS run_status_code, brs.display_name AS run_status_display,
                    brs.description AS run_status_description,
-                   bsc.stage_code, bsc.display_name AS stage_display_name,
+                   bsc.stage_code AS stage_code, bsc.display_name AS stage_display_name,
                    bsc.stage_sequence, bsc.description AS stage_description,
                    bsc.is_optional AS stage_is_optional,
                    ap.status_code AS approval_status_code, ap.display_name AS approval_status_display,
                    l.name AS location_name,
                    src.billing_run_code AS source_run_code
             FROM client_subscription_billing.billing_run br
-            LEFT JOIN client_subscription_billing.lu_billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
-            LEFT JOIN client_subscription_billing.lu_billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
-            LEFT JOIN client_subscription_billing.lu_approval_status ap ON ap.approval_status_id = br.approval_status_id
+            LEFT JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
+            LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
+            LEFT JOIN billing_config.approval_status ap ON ap.approval_status_id = br.approval_status_id
             LEFT JOIN locations.location l ON l.location_id = br.location_id
             LEFT JOIN client_subscription_billing.billing_run src ON src.billing_run_id = br.source_run_id
             WHERE br.billing_run_id = ?::uuid
@@ -319,11 +319,11 @@ public class BillingRunRepository {
         UUID billingRunId = UUID.randomUUID();
 
         // Get default status (INITIATED)
-        String statusIdSql = "SELECT billing_run_status_id FROM client_subscription_billing.lu_billing_run_status WHERE status_code = 'INITIATED'";
+        String statusIdSql = "SELECT billing_run_status_id FROM billing_config.billing_run_status WHERE status_code = 'INITIATED'";
         UUID statusId = jdbc.queryForObject(statusIdSql, UUID.class);
 
         // Get default stage (DUE_PREVIEW)
-        String stageIdSql = "SELECT billing_stage_code_id FROM client_subscription_billing.lu_billing_stage_code WHERE stage_code = 'DUE_PREVIEW'";
+        String stageIdSql = "SELECT billing_stage_code_id FROM billing_config.billing_stage_code WHERE stage_code = 'DUE_PREVIEW'";
         UUID stageId = jdbc.queryForObject(stageIdSql, UUID.class);
 
         // Generate billing run code
@@ -355,10 +355,10 @@ public class BillingRunRepository {
     public UUID createDuePreviewRun(LocalDate dueDate, UUID locationId, UUID createdBy, UUID sourceRunId) {
         UUID billingRunId = UUID.randomUUID();
 
-        String statusIdSql = "SELECT billing_run_status_id FROM client_subscription_billing.lu_billing_run_status WHERE status_code = 'INITIATED'";
+        String statusIdSql = "SELECT billing_run_status_id FROM billing_config.billing_run_status WHERE status_code = 'INITIATED'";
         UUID statusId = jdbc.queryForObject(statusIdSql, UUID.class);
 
-        String stageIdSql = "SELECT billing_stage_code_id FROM client_subscription_billing.lu_billing_stage_code WHERE stage_code = 'DUE_PREVIEW'";
+        String stageIdSql = "SELECT billing_stage_code_id FROM billing_config.billing_stage_code WHERE stage_code = 'DUE_PREVIEW'";
         UUID stageId = jdbc.queryForObject(stageIdSql, UUID.class);
 
         String billingRunCode = "DP-" + LocalDate.now().getYear() + "-" + String.format("%06d", (int) (Math.random() * 1000000));
@@ -385,7 +385,7 @@ public class BillingRunRepository {
      * Complete a billing run with summary and set status to COMPLETED_SUCCESS.
      */
     public void completeRunWithSummary(UUID billingRunId, Map<String, Object> summaryJson) {
-        String statusIdSql = "SELECT billing_run_status_id FROM client_subscription_billing.lu_billing_run_status WHERE status_code = 'COMPLETED_SUCCESS'";
+        String statusIdSql = "SELECT billing_run_status_id FROM billing_config.billing_run_status WHERE status_code = 'COMPLETED_SUCCESS'";
         UUID statusId = jdbc.queryForObject(statusIdSql, UUID.class);
 
         String summaryJsonStr = null;
@@ -443,7 +443,7 @@ public class BillingRunRepository {
      * Update billing run current stage code.
      */
     public void updateCurrentStage(UUID billingRunId, String stageCode) {
-        String stageIdSql = "SELECT billing_stage_code_id FROM client_subscription_billing.lu_billing_stage_code WHERE stage_code = ?";
+        String stageIdSql = "SELECT billing_stage_code_id FROM billing_config.billing_stage_code WHERE stage_code = ?";
         UUID stageId = jdbc.queryForObject(stageIdSql, new Object[]{stageCode}, UUID.class);
 
         jdbc.update("""
@@ -458,7 +458,7 @@ public class BillingRunRepository {
      * Cancel billing run.
      */
     public void cancelBillingRun(UUID billingRunId) {
-        String statusIdSql = "SELECT billing_run_status_id FROM client_subscription_billing.lu_billing_run_status WHERE status_code = 'CANCELLED'";
+        String statusIdSql = "SELECT billing_run_status_id FROM billing_config.billing_run_status WHERE status_code = 'CANCELLED'";
         UUID statusId = jdbc.queryForObject(statusIdSql, UUID.class);
 
         jdbc.update("""

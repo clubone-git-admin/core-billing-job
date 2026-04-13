@@ -75,7 +75,7 @@ public class DueInvoiceReaderConfig {
       if (props.isPreventDuplicateAcrossRuns() && "LIVE".equalsIgnoreCase(runModeStr)) {
           whereClause.append("AND NOT EXISTS ( ");
           whereClause.append("  SELECT 1 FROM client_subscription_billing.subscription_billing_history h ");
-          whereClause.append("  JOIN client_subscription_billing.lu_billing_status s ON s.billing_status_id = h.billing_status_id ");
+          whereClause.append("  JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id ");
           whereClause.append("  WHERE h.invoice_id = sis.invoice_id ");
           whereClause.append("    AND s.status_code IN ('")
               .append(BillingStatus.LIVE_FINALIZED.getCode())

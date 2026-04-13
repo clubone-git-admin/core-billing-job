@@ -43,7 +43,7 @@ public class ReconciliationRepository {
             LEFT JOIN client_subscription_billing.subscription_billing_history sbh ON sbh.invoice_id = i.invoice_id
             LEFT JOIN client_subscription_billing.billing_run br ON br.billing_run_id = sbh.billing_run_id
             LEFT JOIN client_subscription_billing.billing_stage_run bsr ON bsr.stage_run_id = sbh.stage_run_id
-            LEFT JOIN client_subscription_billing.lu_billing_status bs ON bs.billing_status_id = sbh.billing_status_id
+            LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
             LEFT JOIN client_payments.client_payment_intent cpi ON cpi.invoice_id = i.invoice_id
             LEFT JOIN client_payments.lu_payment_intent_status cpis ON cpis.payment_intent_status_id = cpi.intent_status_id
             LEFT JOIN client_payments.client_payment_transaction cpt ON cpt.client_payment_intent_id = cpi.client_payment_intent_id
@@ -70,7 +70,7 @@ public class ReconciliationRepository {
                 COALESCE(SUM(CASE WHEN bs.is_success = true THEN sbh.invoice_total_amount END), 0) AS collected_amount,
                 COALESCE(SUM(CASE WHEN bs.is_success = false THEN sbh.invoice_total_amount END), 0) AS failed_amount
             FROM client_subscription_billing.subscription_billing_history sbh
-            JOIN client_subscription_billing.lu_billing_status bs ON bs.billing_status_id = sbh.billing_status_id
+            JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
             WHERE sbh.billing_run_id = ?::uuid
             """;
 

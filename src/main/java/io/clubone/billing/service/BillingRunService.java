@@ -23,14 +23,17 @@ public class BillingRunService {
     private final BillingRunRepository billingRunRepository;
     private final StageRunRepository stageRunRepository;
     private final ApprovalRepository approvalRepository;
+    private final DuePreviewService duePreviewService;
 
     public BillingRunService(
             BillingRunRepository billingRunRepository,
             StageRunRepository stageRunRepository,
-            ApprovalRepository approvalRepository) {
+            ApprovalRepository approvalRepository,
+            DuePreviewService duePreviewService) {
         this.billingRunRepository = billingRunRepository;
         this.stageRunRepository = stageRunRepository;
         this.approvalRepository = approvalRepository;
+        this.duePreviewService = duePreviewService;
     }
 
     public PageResponse<BillingRunDto> listBillingRuns(
@@ -54,8 +57,9 @@ public class BillingRunService {
             return null;
         }
 
-        // Load stages and approvals
-        List<StageRunDto> stages = stageRunRepository.findByBillingRunId(billingRunId);
+        // Load stages and approvals (rehydrate DUE_PREVIEW file refs from snapshot when approve overwrote summary_json)
+        List<StageRunDto> stages = duePreviewService.enrichDuePreviewStageSummaries(
+                billingRunId, stageRunRepository.findByBillingRunId(billingRunId));
         List<ApprovalDto> approvals = approvalRepository.findByBillingRunId(billingRunId);
 
         return new BillingRunDto(

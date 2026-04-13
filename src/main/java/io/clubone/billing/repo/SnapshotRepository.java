@@ -1,6 +1,5 @@
 package io.clubone.billing.repo;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -30,12 +29,12 @@ public class SnapshotRepository {
         UUID snapshotId = UUID.randomUUID();
 
         // Get snapshot type ID
-        String typeIdSql = "SELECT snapshot_type_id FROM client_subscription_billing.lu_snapshot_type WHERE snapshot_type_code = ?";
+        String typeIdSql = "SELECT snapshot_type_id FROM billing_config.snapshot_type WHERE snapshot_type_code = ?";
         UUID snapshotTypeId = jdbc.queryForObject(typeIdSql, new Object[]{snapshotTypeCode}, UUID.class);
 
         UUID stageCodeId = null;
         if (stageCode != null) {
-            String stageIdSql = "SELECT billing_stage_code_id FROM client_subscription_billing.lu_billing_stage_code WHERE stage_code = ?";
+            String stageIdSql = "SELECT billing_stage_code_id FROM billing_config.billing_stage_code WHERE stage_code = ?";
             stageCodeId = jdbc.queryForObject(stageIdSql, new Object[]{stageCode}, UUID.class);
         }
 
@@ -66,15 +65,15 @@ public class SnapshotRepository {
             SELECT 
                 brs.snapshot_id,
                 brs.billing_run_id,
-                bsc.stage_code,
-                st.snapshot_type_code,
+                bsc.stage_code AS stage_code,
+                st.snapshot_type_code AS snapshot_type_code,
                 st.display_name AS snapshot_type_display_name,
                 brs.snapshot_data,
                 brs.s3_path,
                 brs.created_on
             FROM client_subscription_billing.billing_run_snapshot brs
-            JOIN client_subscription_billing.lu_snapshot_type st ON st.snapshot_type_id = brs.snapshot_type_id
-            LEFT JOIN client_subscription_billing.lu_billing_stage_code bsc ON bsc.billing_stage_code_id = brs.stage_code_id
+            JOIN billing_config.snapshot_type st ON st.snapshot_type_id = brs.snapshot_type_id
+            LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = brs.stage_code_id
             WHERE brs.billing_run_id = ?::uuid
             """);
 
@@ -104,19 +103,41 @@ public class SnapshotRepository {
             SELECT 
                 brs.snapshot_id,
                 brs.billing_run_id,
-                bsc.stage_code,
-                st.snapshot_type_code,
+                bsc.stage_code AS stage_code,
+                st.snapshot_type_code AS snapshot_type_code,
                 st.display_name AS snapshot_type_display_name,
                 brs.snapshot_data,
                 brs.s3_path,
                 brs.created_on
             FROM client_subscription_billing.billing_run_snapshot brs
-            JOIN client_subscription_billing.lu_snapshot_type st ON st.snapshot_type_id = brs.snapshot_type_id
-            LEFT JOIN client_subscription_billing.lu_billing_stage_code bsc ON bsc.billing_stage_code_id = brs.stage_code_id
+            JOIN billing_config.snapshot_type st ON st.snapshot_type_id = brs.snapshot_type_id
+            LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = brs.stage_code_id
             WHERE brs.snapshot_id = ?::uuid
             """;
 
         List<Map<String, Object>> results = jdbc.queryForList(sql, snapshotId.toString());
         return results.isEmpty() ? null : results.get(0);
+    }
+
+    /**
+     * Find S3 path for a due-preview snapshot whose {@code snapshot_data} contains {@code stage_run_id}
+     * (written when the preview is generated).
+     */
+    public String findDuePreviewSnapshotS3PathByStageRunId(UUID stageRunId) {
+        if (stageRunId == null) {
+            return null;
+        }
+        String sql = """
+            SELECT brs.s3_path
+            FROM client_subscription_billing.billing_run_snapshot brs
+            INNER JOIN billing_config.snapshot_type st ON st.snapshot_type_id = brs.snapshot_type_id
+                AND st.snapshot_type_code = 'DUE_PREVIEW'
+            WHERE brs.snapshot_data IS NOT NULL
+              AND brs.snapshot_data::jsonb->>'stage_run_id' = ?
+            ORDER BY brs.created_on DESC
+            LIMIT 1
+            """;
+        List<String> rows = jdbc.query(sql, (rs, rowNum) -> rs.getString(1), stageRunId.toString());
+        return rows.isEmpty() ? null : rows.get(0);
     }
 }
