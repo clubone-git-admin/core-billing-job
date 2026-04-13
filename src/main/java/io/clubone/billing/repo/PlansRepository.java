@@ -9,7 +9,8 @@ import java.util.*;
 /**
  * Repository for subscription plans operations.
  * Plan list/detail read {@code subscription_plan} and enrich billing terms from the latest
- * {@code subscription_purchase_snapshot} → {@code subscription_billing_config_snapshot} when present.
+ * {@code subscription_purchase_snapshot} → {@code subscription_purchase_snapshot_line} →
+ * {@code subscription_billing_config_snapshot} when present.
  */
 @Repository
 public class PlansRepository {
@@ -20,10 +21,17 @@ public class PlansRepository {
     private static final String PLAN_SELECT_FROM = """
             FROM client_subscription_billing.subscription_plan sp
             LEFT JOIN LATERAL (
-                SELECT sps.subscription_billing_config_snapshot_id AS sbcs_id
-                FROM client_subscription_billing.subscription_purchase_snapshot sps
-                WHERE sps.subscription_plan_id = sp.subscription_plan_id
-                ORDER BY sps.captured_on DESC NULLS LAST
+                SELECT spsl.subscription_billing_config_snapshot_id AS sbcs_id
+                FROM client_subscription_billing.subscription_purchase_snapshot_line spsl
+                WHERE spsl.subscription_purchase_snapshot_id = (
+                    SELECT sps2.subscription_purchase_snapshot_id
+                    FROM client_subscription_billing.subscription_purchase_snapshot sps2
+                    WHERE sps2.subscription_plan_id = sp.subscription_plan_id
+                    ORDER BY sps2.captured_on DESC NULLS LAST
+                    LIMIT 1
+                )
+                  AND spsl.subscription_billing_config_snapshot_id IS NOT NULL
+                ORDER BY spsl.line_sequence ASC
                 LIMIT 1
             ) latest ON true
             LEFT JOIN client_subscription_billing.subscription_billing_config_snapshot sbcs
