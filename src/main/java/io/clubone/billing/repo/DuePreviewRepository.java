@@ -44,6 +44,7 @@ public class DuePreviewRepository {
         CAST(NULL AS date) AS contract_start_date,
         CAST(NULL AS date) AS contract_end_date,
         sis.status_name AS subscription_instance_status_name,
+        spcp.subscription_purchase_snapshot_id,
         spcp.unit_price,
         spcp.effective_unit_price,
         spcp.cycle_start AS price_cycle_start,
@@ -65,7 +66,8 @@ public class DuePreviewRepository {
     JOIN billing_config.subscription_instance_status sis
         ON sis.subscription_instance_status_id = si.subscription_instance_status_id
     LEFT JOIN LATERAL (
-        SELECT pscp.unit_price,
+        SELECT sps.subscription_purchase_snapshot_id,
+               pscp.unit_price,
                pscp.unit_price AS effective_unit_price,
                pscp.cycle_start,
                pscp.cycle_end
@@ -159,7 +161,8 @@ public class DuePreviewRepository {
             row.put("contract_start_date", rs.getObject("contract_start_date", LocalDate.class));
             row.put("contract_end_date", rs.getObject("contract_end_date", LocalDate.class));
             row.put("subscription_instance_status_name", rs.getString("subscription_instance_status_name"));
-            
+            row.put("subscription_purchase_snapshot_id", rs.getObject("subscription_purchase_snapshot_id", UUID.class));
+
             // Pricing info
             BigDecimal unitPrice = rs.getObject("unit_price", BigDecimal.class);
             BigDecimal effectiveUnitPrice = rs.getObject("effective_unit_price", BigDecimal.class);

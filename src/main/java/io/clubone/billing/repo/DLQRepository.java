@@ -29,7 +29,7 @@ public class DLQRepository {
      * Find DLQ items with filtering.
      */
     public List<DLQItemDto> findDLQItems(
-            UUID billingRunId, String failureTypeCode, Boolean resolved,
+            UUID billingRunId, UUID stageRunId, String failureTypeCode, Boolean resolved,
             Integer limit, Integer offset, String sortBy, String sortOrder) {
 
         StringBuilder sql = new StringBuilder("""
@@ -56,6 +56,10 @@ public class DLQRepository {
             sql.append(" AND dlq.billing_run_id = ?::uuid");
             params.add(billingRunId.toString());
         }
+        if (stageRunId != null) {
+            sql.append(" AND dlq.stage_run_id = ?::uuid");
+            params.add(stageRunId.toString());
+        }
         if (failureTypeCode != null) {
             sql.append(" AND ft.failure_type_code = ?");
             params.add(failureTypeCode);
@@ -79,7 +83,7 @@ public class DLQRepository {
     /**
      * Count total DLQ items matching filters.
      */
-    public Integer countDLQItems(UUID billingRunId, String failureTypeCode, Boolean resolved) {
+    public Integer countDLQItems(UUID billingRunId, UUID stageRunId, String failureTypeCode, Boolean resolved) {
         StringBuilder sql = new StringBuilder("""
             SELECT COUNT(1)
             FROM client_subscription_billing.billing_dead_letter_queue dlq
@@ -92,6 +96,10 @@ public class DLQRepository {
         if (billingRunId != null) {
             sql.append(" AND dlq.billing_run_id = ?::uuid");
             params.add(billingRunId.toString());
+        }
+        if (stageRunId != null) {
+            sql.append(" AND dlq.stage_run_id = ?::uuid");
+            params.add(stageRunId.toString());
         }
         if (failureTypeCode != null) {
             sql.append(" AND ft.failure_type_code = ?");

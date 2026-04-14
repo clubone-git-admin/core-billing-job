@@ -25,13 +25,13 @@ public class DLQService {
     }
 
     public PageResponse<DLQItemDto> listDLQItems(
-            UUID billingRunId, String failureTypeCode, Boolean resolved,
+            UUID billingRunId, UUID stageRunId, String failureTypeCode, Boolean resolved,
             Integer limit, Integer offset, String sortBy, String sortOrder) {
 
         List<DLQItemDto> items = dlqRepository.findDLQItems(
-                billingRunId, failureTypeCode, resolved, limit, offset, sortBy, sortOrder);
+                billingRunId, stageRunId, failureTypeCode, resolved, limit, offset, sortBy, sortOrder);
 
-        Integer total = dlqRepository.countDLQItems(billingRunId, failureTypeCode, resolved);
+        Integer total = dlqRepository.countDLQItems(billingRunId, stageRunId, failureTypeCode, resolved);
 
         return PageResponse.of(items, total, limit, offset);
     }

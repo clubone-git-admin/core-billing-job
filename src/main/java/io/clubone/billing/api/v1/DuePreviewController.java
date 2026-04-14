@@ -143,13 +143,13 @@ public class DuePreviewController {
     /**
      * POST /api/billing/due-preview/runs/{stageRunId}/approve
      * Approve a due preview stage run.
-     * Creates approval record, marks DUE_PREVIEW as COMPLETED, transitions to INVOICE_GENERATION stage.
+     * Creates approval record, marks DUE_PREVIEW as COMPLETED, transitions to INVOICE_GENERATION stage (IDLE).
      */
     @PostMapping(value = "/runs/{stageRunId}/approve", consumes = MediaType.APPLICATION_JSON_VALUE)
     @Operation(
             summary = "Approve due preview stage run",
             description = "Approves a due preview stage run. Creates approval record in billing_run_approval, " +
-                    "marks DUE_PREVIEW stage as COMPLETED, and transitions to INVOICE_GENERATION stage (RUNNING status)."
+                    "marks DUE_PREVIEW stage as COMPLETED, and transitions to INVOICE_GENERATION stage (IDLE until the user runs generation)."
     )
     @ApiResponses(value = {
             @ApiResponse(

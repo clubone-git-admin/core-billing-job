@@ -6,6 +6,7 @@ import org.springframework.boot.autoconfigure.batch.BatchAutoConfiguration;
 import org.springframework.boot.autoconfigure.security.oauth2.resource.servlet.OAuth2ResourceServerAutoConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.retry.annotation.EnableRetry;
+import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
@@ -19,6 +20,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 																												// needed
 })
 @EnableRetry
+@EnableAsync
 public class BillingBatchApplication {
 	public static void main(String[] args) {
 		SpringApplication.run(BillingBatchApplication.class, args);
@@ -33,7 +35,7 @@ public class BillingBatchApplication {
 						.allowedOriginPatterns("*")
 						.allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD")
 						.allowedHeaders("*")
-						.exposedHeaders("Content-Type", "Content-Length", "Location", "X-Application-Id", "X-Location-Id", "X-Actor-Id")
+						.exposedHeaders("Content-Type", "Content-Length", "Location", "X-Request-Id", "X-Application-Id", "X-Location-Id", "X-Actor-Id")
 						.allowCredentials(false)
 						.maxAge(3600);
 			}

@@ -166,7 +166,8 @@ public class DuePreviewService {
                     s.stageCode(), s.stageDisplayName(), s.stageSequence(),
                     s.statusCode(), s.statusDisplayName(), s.scheduledFor(),
                     s.startedOn(), s.endedOn(), merged.isEmpty() ? null : merged,
-                    s.errorMessage(), s.errorDetails(), s.attemptNumber(), s.maxAttempts()));
+                    s.errorMessage(), s.errorDetails(), s.attemptNumber(), s.maxAttempts(),
+                    s.isLocked()));
         }
         return out;
     }
@@ -287,7 +288,7 @@ public class DuePreviewService {
      * - Creates approval record in billing_run_approval
      * - Updates billing_run.approval_status_id
      * - Marks DUE_PREVIEW stage run as COMPLETED
-     * - If approved: creates INVOICE_GENERATION stage run (RUNNING) and updates billing_run.current_stage_code_id
+     * - If approved: creates INVOICE_GENERATION stage run (IDLE until user runs generation) and updates billing_run.current_stage_code_id
      * - If denied: only completes DUE_PREVIEW, no next stage transition
      *
      * @param stageRunId The DUE_PREVIEW stage run ID
@@ -369,25 +370,27 @@ public class DuePreviewService {
         }
         stageRunRepository.completeStageRun(stageRunId, summaryJson);
 
-        // If approved: transition to INVOICE_GENERATION stage
+        // If approved: transition to INVOICE_GENERATION stage (IDLE until POST invoice-generation/runs "Run")
         if (approved) {
-            // Create INVOICE_GENERATION stage run if it doesn't exist
             StageRunDto existingInvoiceGen = stageRunRepository.findByBillingRunIdAndStageCode(billingRunId, "INVOICE_GENERATION");
             UUID invoiceGenStageRunId;
             if (existingInvoiceGen == null) {
                 invoiceGenStageRunId = stageRunRepository.createStageRun(
-                        billingRunId, "INVOICE_GENERATION", OffsetDateTime.now(), null, request.approverId());
+                        billingRunId, "INVOICE_GENERATION", OffsetDateTime.now(), null, request.approverId(), false);
             } else {
                 invoiceGenStageRunId = existingInvoiceGen.stageRunId();
             }
 
-            // Start INVOICE_GENERATION stage run (sets status to RUNNING)
-            stageRunRepository.startStageRun(invoiceGenStageRunId);
-            
-            // Update billing_run.current_stage_code_id to INVOICE_GENERATION
+            boolean idleApplied = stageRunRepository.trySetStageRunStatusByCode(invoiceGenStageRunId, "IDLE");
+            if (!idleApplied) {
+                log.warn(
+                        "INVOICE_GENERATION stage could not be set to IDLE (add billing_config.stage_run_status IDLE). stageRunId={}",
+                        invoiceGenStageRunId);
+            }
+
             billingRunRepository.updateCurrentStage(billingRunId, "INVOICE_GENERATION");
-            
-            log.info("Transitioned to INVOICE_GENERATION stage: billingRunId={}, stageRunId={}", billingRunId, invoiceGenStageRunId);
+
+            log.info("Transitioned to INVOICE_GENERATION stage (IDLE): billingRunId={}, stageRunId={}", billingRunId, invoiceGenStageRunId);
         }
 
         // Audit log

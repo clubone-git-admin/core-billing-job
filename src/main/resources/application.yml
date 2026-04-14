@@ -1,6 +1,13 @@
 server:
   port: 9000
 
+# Invoice generation async (POST → after-commit job); set DEBUG for more detail.
+logging:
+  level:
+    io.clubone.billing.service.InvoiceGenerationService: INFO
+    io.clubone.billing.service.invoicegen: INFO
+    io.clubone.billing.repo.InvoiceGenerationRepository: INFO
+
 spring:
   application:
     name: clubone-billing-batch

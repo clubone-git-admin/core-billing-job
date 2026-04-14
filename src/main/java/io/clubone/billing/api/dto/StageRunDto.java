@@ -26,6 +26,8 @@ public record StageRunDto(
     String errorMessage,
     Map<String, Object> errorDetails,
     Integer attemptNumber,
-    Integer maxAttempts
+    Integer maxAttempts,
+    /** {@code billing_stage_run.is_locked} — e.g. after invoice lock for pipeline. */
+    Boolean isLocked
 ) {
 }

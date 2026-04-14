@@ -2,6 +2,8 @@ package io.clubone.billing.api.v1;
 
 import io.clubone.billing.api.dto.*;
 import io.clubone.billing.service.BillingRunService;
+import io.clubone.billing.service.DLQService;
+import io.clubone.billing.service.InvoiceGenerationService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -32,9 +34,16 @@ public class BillingRunsController {
     private static final Logger log = LoggerFactory.getLogger(BillingRunsController.class);
 
     private final BillingRunService billingRunService;
+    private final InvoiceGenerationService invoiceGenerationService;
+    private final DLQService dlqService;
 
-    public BillingRunsController(BillingRunService billingRunService) {
+    public BillingRunsController(
+            BillingRunService billingRunService,
+            InvoiceGenerationService invoiceGenerationService,
+            DLQService dlqService) {
         this.billingRunService = billingRunService;
+        this.invoiceGenerationService = invoiceGenerationService;
+        this.dlqService = dlqService;
     }
 
     /**
@@ -72,10 +81,6 @@ public class BillingRunsController {
         return ResponseEntity.ok(response);
     }
 
-    /**
-     * GET /api/v1/billing/runs/{billing_run_id}
-     * Get a specific billing run by ID.
-     */
     @Operation(
             summary = "Get billing run",
             description = "Retrieve a specific billing run by its ID, including all stages and approvals"
@@ -97,6 +102,51 @@ public class BillingRunsController {
         }
         
         return ResponseEntity.ok(billingRun);
+    }
+
+    @GetMapping("/{billingRunId}/invoices")
+    public ResponseEntity<PageResponse<SubscriptionBillingHistoryItemDto>> listInvoicesForBillingRun(
+            @PathVariable UUID billingRunId,
+            @RequestParam(required = false) UUID invoiceGenerationRunId,
+            @RequestParam(required = false) String status,
+            @RequestParam(defaultValue = "50") Integer limit,
+            @RequestParam(defaultValue = "0") Integer offset) {
+
+        PageResponse<SubscriptionBillingHistoryItemDto> page = invoiceGenerationService.listInvoicesForBillingRun(
+                billingRunId, invoiceGenerationRunId, status, limit, offset);
+        return ResponseEntity.ok(page);
+    }
+
+    /**
+     * POST /api/v1/billing/runs/{billingRunId}/invoice-generation/lock
+     * <p>Transitions invoices PENDING → DUE, records lock metadata on the {@code INVOICE_GENERATION} stage run,
+     * marks that stage completed, advances the billing run to the next pipeline stage, and returns the full
+     * billing run (same shape as GET /api/v1/billing/runs/{id}).</p>
+     */
+    @PostMapping("/{billingRunId}/invoice-generation/lock")
+    public ResponseEntity<BillingRunDto> lockGeneratedInvoices(
+            @PathVariable UUID billingRunId,
+            @Valid @RequestBody InvoiceGenerationLockRequest request) {
+
+        BillingRunDto body = invoiceGenerationService.lockInvoicesForBillingRun(billingRunId, request);
+        return ResponseEntity.ok(body);
+    }
+
+    @GetMapping("/{billingRunId}/dlq")
+    public ResponseEntity<PageResponse<DLQItemDto>> listDlqForBillingRun(
+            @PathVariable UUID billingRunId,
+            @RequestParam(required = false) UUID invoiceGenerationRunId,
+            @RequestParam(required = false) String failureTypeCode,
+            @RequestParam(required = false) Boolean resolved,
+            @RequestParam(defaultValue = "50") Integer limit,
+            @RequestParam(defaultValue = "0") Integer offset,
+            @RequestParam(defaultValue = "created_on") String sortBy,
+            @RequestParam(defaultValue = "desc") String sortOrder) {
+
+        PageResponse<DLQItemDto> response = dlqService.listDLQItems(
+                billingRunId, invoiceGenerationRunId, failureTypeCode, resolved,
+                limit, offset, sortBy, sortOrder);
+        return ResponseEntity.ok(response);
     }
 
     /**
@@ -135,7 +185,6 @@ public class BillingRunsController {
     }
 
     /**
-     * PUT /api/v1/billing/runs/{billing_run_id}
      * Update a billing run.
      */
     @Operation(
@@ -163,8 +212,7 @@ public class BillingRunsController {
     }
 
     /**
-     * DELETE /api/v1/billing/runs/{billing_run_id}
-     * Cancel/delete a billing run.
+     * Cancel a billing run.
      */
     @Operation(
             summary = "Cancel billing run",

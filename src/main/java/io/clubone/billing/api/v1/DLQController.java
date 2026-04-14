@@ -34,6 +34,7 @@ public class DLQController {
     @GetMapping
     public ResponseEntity<PageResponse<DLQItemDto>> listDLQItems(
             @RequestParam(required = false) UUID billingRunId,
+            @RequestParam(required = false) UUID invoiceGenerationRunId,
             @RequestParam(required = false) String failureTypeCode,
             @RequestParam(required = false) Boolean resolved,
             @RequestParam(defaultValue = "50") Integer limit,
@@ -41,11 +42,11 @@ public class DLQController {
             @RequestParam(defaultValue = "created_on") String sortBy,
             @RequestParam(defaultValue = "desc") String sortOrder) {
         
-        log.debug("Listing DLQ items: billingRunId={}, failureTypeCode={}, resolved={}", 
-                billingRunId, failureTypeCode, resolved);
+        log.debug("Listing DLQ items: billingRunId={}, invoiceGenerationRunId={}, failureTypeCode={}, resolved={}",
+                billingRunId, invoiceGenerationRunId, failureTypeCode, resolved);
         
         PageResponse<DLQItemDto> response = dlqService.listDLQItems(
-                billingRunId, failureTypeCode, resolved, limit, offset, sortBy, sortOrder);
+                billingRunId, invoiceGenerationRunId, failureTypeCode, resolved, limit, offset, sortBy, sortOrder);
         
         return ResponseEntity.ok(response);
     }
