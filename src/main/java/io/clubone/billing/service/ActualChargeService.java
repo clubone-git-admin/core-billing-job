@@ -466,11 +466,15 @@ public class ActualChargeService {
         if (sj != null) {
             copyIfPresent(out, sj, "total_selected");
             copyIfPresent(out, sj, "success_count");
+            copyIfPresent(out, sj, "pending_count");
             copyIfPresent(out, sj, "failed_count");
             copyIfPresent(out, sj, "skipped_count");
             copyIfPresent(out, sj, "total_amount_selected");
             copyIfPresent(out, sj, "charged_amount");
+            copyIfPresent(out, sj, "pending_amount");
             copyIfPresent(out, sj, "failed_amount");
+            copyIfPresent(out, sj, "pending_age_p95_seconds");
+            copyIfPresent(out, sj, "stuck_pending_count");
             copyIfPresent(out, sj, "actual_charge_completed_at");
         }
         return out;

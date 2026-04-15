@@ -2,6 +2,7 @@ package io.clubone.billing.api.v1;
 
 import io.clubone.billing.api.dto.*;
 import io.clubone.billing.service.ActualChargeService;
+import io.clubone.billing.service.actualcharge.ActualChargePendingReconciliationService;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
@@ -28,9 +29,13 @@ public class ActualChargeController {
     private static final Logger log = LoggerFactory.getLogger(ActualChargeController.class);
 
     private final ActualChargeService actualChargeService;
+    private final ActualChargePendingReconciliationService pendingReconciliationService;
 
-    public ActualChargeController(ActualChargeService actualChargeService) {
+    public ActualChargeController(
+            ActualChargeService actualChargeService,
+            ActualChargePendingReconciliationService pendingReconciliationService) {
         this.actualChargeService = actualChargeService;
+        this.pendingReconciliationService = pendingReconciliationService;
     }
 
     @PostMapping("/runs")
@@ -106,6 +111,20 @@ public class ActualChargeController {
     @GetMapping("/runs/{actualChargeRunId}/report")
     public ResponseEntity<Map<String, Object>> report(@PathVariable UUID actualChargeRunId) {
         return ResponseEntity.ok(actualChargeService.report(actualChargeRunId));
+    }
+
+    @PostMapping("/pending/reconcile")
+    public ResponseEntity<Map<String, Object>> reconcilePendingNow() {
+        return ResponseEntity.ok(pendingReconciliationService.reconcilePendingCharges());
+    }
+
+    /**
+     * Webhook callback from payment domain to finalize pending captures.
+     */
+    @PostMapping("/webhooks/payment-status")
+    public ResponseEntity<Map<String, Object>> applyPaymentStatusWebhook(
+            @Valid @RequestBody ActualChargePaymentStatusUpdateRequest request) {
+        return ResponseEntity.ok(pendingReconciliationService.applyWebhookStatus(request));
     }
 
     /**

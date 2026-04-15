@@ -4,6 +4,7 @@ import io.clubone.billing.api.dto.BillingRunDto;
 import io.clubone.billing.api.dto.StageRunDto;
 import io.clubone.billing.batch.RunMode;
 import io.clubone.billing.batch.model.BillingStatus;
+import io.clubone.billing.batch.model.GatewayStatus;
 import io.clubone.billing.batch.payment.PaymentResult;
 import io.clubone.billing.batch.payment.PaymentService;
 import io.clubone.billing.batch.payment.PaymentServiceFactory;
@@ -17,6 +18,7 @@ import io.clubone.billing.batch.util.LoggingUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -44,6 +46,8 @@ public class ActualChargeJobRunner {
     private final BillingRepository billingRepository;
     /** Resolved LIVE implementation (same selection as Spring Batch for {@link RunMode#LIVE}). */
     private final PaymentService livePaymentService;
+    private final int pendingRetryGraceMinutes;
+    private final int pendingStuckThresholdMinutes;
 
     public ActualChargeJobRunner(
             StageRunRepository stageRunRepository,
@@ -51,12 +55,16 @@ public class ActualChargeJobRunner {
             MockChargeRepository mockChargeRepository,
             ActualChargeRepository actualChargeRepository,
             BillingRepository billingRepository,
+            @Value("${clubone.billing.actual-charge.pending.retry-grace-minutes:30}") int pendingRetryGraceMinutes,
+            @Value("${clubone.billing.actual-charge.pending.stuck-threshold-minutes:30}") int pendingStuckThresholdMinutes,
             PaymentServiceFactory paymentServiceFactory) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
         this.mockChargeRepository = mockChargeRepository;
         this.actualChargeRepository = actualChargeRepository;
         this.billingRepository = billingRepository;
+        this.pendingRetryGraceMinutes = Math.max(1, pendingRetryGraceMinutes);
+        this.pendingStuckThresholdMinutes = Math.max(1, pendingStuckThresholdMinutes);
         this.livePaymentService = paymentServiceFactory.get(RunMode.LIVE);
     }
 
@@ -151,22 +159,26 @@ public class ActualChargeJobRunner {
         }
 
         int success = 0;
+        int pending = 0;
         int failed = 0;
         int skipped = 0;
         BigDecimal totalSelectedAmount = BigDecimal.ZERO;
         BigDecimal chargedAmount = BigDecimal.ZERO;
+        BigDecimal pendingAmount = BigDecimal.ZERO;
         BigDecimal failedAmount = BigDecimal.ZERO;
 
         UUID statusOk = billingRepository.resolveBillingStatusIdByCode(BillingStatus.LIVE_FINALIZED.getCode());
+        UUID statusPendingCapture = billingRepository.resolveBillingStatusIdByCode(BillingStatus.PENDING_CAPTURE.getCode());
         UUID statusPayFail = billingRepository.resolveBillingStatusIdByCode(BillingStatus.LIVE_PAYMENT_FAILED.getCode());
         UUID statusErr = billingRepository.resolveBillingStatusIdByCode(BillingStatus.LIVE_ERROR.getCode());
-        if (statusOk == null || statusPayFail == null || statusErr == null) {
+        if (statusOk == null || statusPendingCapture == null || statusPayFail == null || statusErr == null) {
             throw new IllegalStateException(
-                    "Missing billing_config.billing_status rows for LIVE_FINALIZED / LIVE_PAYMENT_FAILED / LIVE_ERROR");
+                    "Missing billing_config.billing_status rows for LIVE_FINALIZED / PENDING_CAPTURE / LIVE_PAYMENT_FAILED / LIVE_ERROR");
         }
         log.info(
-                "actual-charge job: billing_status_ids resolved LIVE_FINALIZED={} LIVE_PAYMENT_FAILED={} LIVE_ERROR={}",
+                "actual-charge job: billing_status_ids resolved LIVE_FINALIZED={} PENDING_CAPTURE={} LIVE_PAYMENT_FAILED={} LIVE_ERROR={}",
                 statusOk,
+                statusPendingCapture,
                 statusPayFail,
                 statusErr);
 
@@ -184,6 +196,20 @@ public class ActualChargeJobRunner {
                                 + "billing_run_id + invoice_id is LIVE_FINALIZED/LIVE_SUCCESS; no second capture. invoiceId={} billingRunId={} amount={}",
                         idx,
                         invoices.size(),
+                        row.invoiceId(),
+                        billingRunId,
+                        amt);
+                continue;
+            }
+            if (actualChargeRepository.hasFreshPendingLiveChargeForInvoiceAndBillingRun(
+                    billingRunId, row.invoiceId(), pendingRetryGraceMinutes)) {
+                skipped++;
+                log.info(
+                        "actual-charge invoice {}/{}: SKIP (pending-idempotency) — latest live status is PENDING_CAPTURE and within grace window={}m; "
+                                + "retry is blocked to avoid duplicate capture. invoiceId={} billingRunId={} amount={}",
+                        idx,
+                        invoices.size(),
+                        pendingRetryGraceMinutes,
                         row.invoiceId(),
                         billingRunId,
                         amt);
@@ -264,6 +290,30 @@ public class ActualChargeJobRunner {
                             pr.getClientPaymentTransactionId());
                     success++;
                     chargedAmount = chargedAmount.add(amt);
+                } else if (isPendingGatewayResult(pr)) {
+                    log.info(
+                            "actual-charge invoice {}/{}: payment PENDING invoiceId={} gatewayStatus={} intentId={} txnId={}",
+                            idx,
+                            invoices.size(),
+                            row.invoiceId(),
+                            pr.getFailureReason(),
+                            pr.getClientPaymentIntentId(),
+                            pr.getClientPaymentTransactionId());
+                    actualChargeRepository.insertLiveChargeHistoryRow(
+                            row.subscriptionInstanceId(),
+                            billingRunId,
+                            stageRunId,
+                            row.invoiceId(),
+                            statusPendingCapture,
+                            pr.getFailureReason() != null ? pr.getFailureReason() : GatewayStatus.PENDING_CAPTURE.getCode(),
+                            row.subTotal(),
+                            row.taxAmount(),
+                            row.discountAmount(),
+                            row.totalAmount(),
+                            pr.getClientPaymentIntentId(),
+                            pr.getClientPaymentTransactionId());
+                    pending++;
+                    pendingAmount = pendingAmount.add(amt);
                 } else {
                     log.warn(
                             "actual-charge invoice {}/{}: payment FAILED invoiceId={} reason={}",
@@ -309,6 +359,8 @@ public class ActualChargeJobRunner {
         merged.put("totalSelected", invoices.size());
         merged.put("success_count", success);
         merged.put("successCount", success);
+        merged.put("pending_count", pending);
+        merged.put("pendingCount", pending);
         merged.put("failed_count", failed);
         merged.put("failureCount", failed);
         merged.put("skipped_count", skipped);
@@ -317,6 +369,8 @@ public class ActualChargeJobRunner {
         merged.put("selectedAmount", totalSelectedAmount);
         merged.put("charged_amount", chargedAmount);
         merged.put("successAmount", chargedAmount);
+        merged.put("pending_amount", pendingAmount);
+        merged.put("pendingAmount", pendingAmount);
         merged.put("failed_amount", failedAmount);
         merged.put("failureAmount", failedAmount);
         merged.put("actual_charge_run_id", stageRunId.toString());
@@ -324,31 +378,65 @@ public class ActualChargeJobRunner {
         merged.put("batch_id", stageRunId.toString());
         merged.put("charge_execution_id", stageRunId.toString());
         merged.put("actual_charge_completed_at", java.time.OffsetDateTime.now().toString());
+        ActualChargeRepository.PendingKpi pendingKpi =
+                actualChargeRepository.pendingKpisForBillingRun(billingRunId, pendingStuckThresholdMinutes);
+        merged.put("pending_count", pendingKpi.pendingCount());
+        merged.put("pendingCount", pendingKpi.pendingCount());
+        merged.put("pending_age_p95_seconds", pendingKpi.pendingAgeP95Seconds());
+        merged.put("pendingAgeP95Seconds", pendingKpi.pendingAgeP95Seconds());
+        merged.put("stuck_pending_count", pendingKpi.stuckPendingCount());
+        merged.put("stuckPendingCount", pendingKpi.stuckPendingCount());
 
         log.info(
                 "actual-charge job: merging summary + completing stage_run stageRunId={} billingRunId={} KPIs "
-                        + "totalSelected={} successCount={} failedCount={} skippedCount={} totalAmountSelected={} chargedAmount={} failedAmount={}",
+                        + "totalSelected={} successCount={} pendingCount={} failedCount={} skippedCount={} totalAmountSelected={} chargedAmount={} pendingAmount={} failedAmount={} pendingAgeP95s={} stuckPendingCount={}",
                 stageRunId,
                 billingRunId,
                 invoices.size(),
                 success,
+                pending,
                 failed,
                 skipped,
                 totalSelectedAmount,
                 chargedAmount,
-                failedAmount);
+                pendingAmount,
+                failedAmount,
+                pendingKpi.pendingAgeP95Seconds(),
+                pendingKpi.stuckPendingCount());
+        if (pendingKpi.stuckPendingCount() > 0) {
+            log.warn(
+                    "actual-charge SLO ALERT: stuck pending transactions detected billingRunId={} stuckPendingCount={} thresholdMinutes={} pendingAgeP95Seconds={}",
+                    billingRunId,
+                    pendingKpi.stuckPendingCount(),
+                    pendingStuckThresholdMinutes,
+                    pendingKpi.pendingAgeP95Seconds());
+        }
         stageRunRepository.mergeStageRunSummaryJson(stageRunId, merged, false);
         stageRunRepository.completeStageRun(stageRunId, merged);
         advancePipelineAfterActualCharge(billingRunId);
 
         log.info(
-                "actual-charge job: terminal summary stageRunId={} billingRunId={} success={} failed={} skipped={} "
+                "actual-charge job: terminal summary stageRunId={} billingRunId={} success={} pending={} failed={} skipped={} "
                         + "(skipped includes idempotent skips and rows missing subscription/client_role)",
                 stageRunId,
                 billingRunId,
                 success,
+                pending,
                 failed,
                 skipped);
+    }
+
+    private static boolean isPendingGatewayResult(PaymentResult pr) {
+        if (pr == null) {
+            return false;
+        }
+        String reason = pr.getFailureReason();
+        if (reason == null) {
+            return false;
+        }
+        return GatewayStatus.PENDING_CAPTURE.getCode().equalsIgnoreCase(reason)
+                || GatewayStatus.AUTHORIZED.getCode().equalsIgnoreCase(reason)
+                || GatewayStatus.CREATED.getCode().equalsIgnoreCase(reason);
     }
 
     private void insertFailureRow(

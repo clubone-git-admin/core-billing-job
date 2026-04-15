@@ -36,7 +36,7 @@ public class ReconciliationRepository {
                 cpis.payment_intent_status AS intent_status, cpi.created_on AS intent_created_on,
                 cpt.client_payment_transaction_id, cpt.amount AS transaction_amount,
                 cpt.payment_gateway_order_id AS gateway_order_id,
-                pgts.payment_gateway_transaction_status AS transaction_status,
+                pgts.status_code AS transaction_status,
                 cpt.created_on AS transaction_created_on
             FROM transactions.invoice i
             LEFT JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
