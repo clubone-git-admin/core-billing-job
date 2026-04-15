@@ -22,24 +22,40 @@ public class ActualChargeRepository {
     }
 
     /**
-     * True when a <strong>live</strong> history row already exists ({@code is_mock = false}).
-     * Mock-charge rows ({@code is_mock = true}) do not block actual charge — only real capture attempts do.
+     * True when the <strong>latest</strong> live attempt ({@code is_mock = false}) for this billing run + invoice
+     * is a terminal <strong>success</strong> ({@code LIVE_FINALIZED} or {@code LIVE_SUCCESS}).
+     * <p>
+     * Failed live rows ({@code LIVE_PAYMENT_FAILED}, {@code LIVE_ERROR}, etc.) do not block — retries can run again.
+     * Mock rows never affect this check.
      */
-    public boolean hasLiveHistoryForInvoiceAndBillingRun(UUID billingRunId, UUID invoiceId) {
+    public boolean hasSuccessfulLiveChargeForInvoiceAndBillingRun(UUID billingRunId, UUID invoiceId) {
         if (billingRunId == null || invoiceId == null) {
             return false;
         }
         try {
-            Integer n = jdbc.queryForObject(
+            Boolean ok = jdbc.query(
                     """
-                    SELECT COUNT(1) FROM client_subscription_billing.subscription_billing_history
-                    WHERE billing_run_id = ?::uuid AND invoice_id = ?::uuid
-                      AND COALESCE(is_mock, false) = false
+                    SELECT EXISTS (
+                      SELECT 1
+                      FROM (
+                        SELECT bs.status_code
+                        FROM client_subscription_billing.subscription_billing_history sbh
+                        JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
+                        WHERE sbh.billing_run_id = ?::uuid
+                          AND sbh.invoice_id = ?::uuid
+                          AND COALESCE(sbh.is_mock, false) = false
+                        ORDER BY sbh.billing_attempt_on DESC NULLS LAST,
+                                 sbh.created_on DESC NULLS LAST,
+                                 sbh.subscription_billing_history_id DESC
+                        LIMIT 1
+                      ) latest
+                      WHERE latest.status_code IN ('LIVE_FINALIZED', 'LIVE_SUCCESS')
+                    )
                     """,
-                    Integer.class,
+                    rs -> rs.next() ? rs.getBoolean(1) : false,
                     billingRunId.toString(),
                     invoiceId.toString());
-            return n != null && n > 0;
+            return Boolean.TRUE.equals(ok);
         } catch (DataAccessException ex) {
             return false;
         }

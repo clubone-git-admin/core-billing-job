@@ -105,7 +105,7 @@ public class BillingJobProperties {
 			private String finalizePath = "/transaction/api/transactions/v3/finalize";
 
 			private String actorId = "00000000-0000-0000-0000-000000000001"; // system user
-			private String paymentTypeCode = "RECURRING";
+			private String paymentTypeCode = "POS_ONE_TIME";
 			
 			// Test mode configuration for simulating retry failures
 			private TestMode testMode = new TestMode();

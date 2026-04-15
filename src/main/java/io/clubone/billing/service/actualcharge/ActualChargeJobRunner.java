@@ -177,11 +177,11 @@ public class ActualChargeJobRunner {
             totalSelectedAmount = totalSelectedAmount.add(amt);
             LoggingUtils.setInvoiceId(row.invoiceId());
 
-            if (actualChargeRepository.hasLiveHistoryForInvoiceAndBillingRun(billingRunId, row.invoiceId())) {
+            if (actualChargeRepository.hasSuccessfulLiveChargeForInvoiceAndBillingRun(billingRunId, row.invoiceId())) {
                 skipped++;
                 log.info(
-                        "actual-charge invoice {}/{}: SKIP (idempotency) — subscription_billing_history already has a live row "
-                                + "(is_mock=false) for billing_run_id + invoice_id; no second capture for this run. invoiceId={} billingRunId={} amount={}",
+                        "actual-charge invoice {}/{}: SKIP (idempotency) — latest live subscription_billing_history for this "
+                                + "billing_run_id + invoice_id is LIVE_FINALIZED/LIVE_SUCCESS; no second capture. invoiceId={} billingRunId={} amount={}",
                         idx,
                         invoices.size(),
                         row.invoiceId(),
