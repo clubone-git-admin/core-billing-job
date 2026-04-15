@@ -114,6 +114,8 @@ public class BillingRunsController {
             @RequestParam(required = false) UUID invoiceGenerationRunId,
             @RequestParam(required = false) UUID mockChargeRunId,
             @RequestParam(name = "mock_charge_run_id", required = false) UUID mockChargeRunIdSnake,
+            @RequestParam(required = false) UUID actualChargeRunId,
+            @RequestParam(name = "actual_charge_run_id", required = false) UUID actualChargeRunIdSnake,
             @RequestParam(required = false) String status,
             @RequestParam(required = false) Boolean isMock,
             @RequestParam(required = false) String mockChargeStatus,
@@ -122,13 +124,18 @@ public class BillingRunsController {
             @RequestParam(defaultValue = "50") Integer limit,
             @RequestParam(defaultValue = "0") Integer offset) {
 
-        UUID stageRunFilter = firstNonNull(mockChargeRunId, mockChargeRunIdSnake, invoiceGenerationRunId);
+        UUID stageRunFilter = firstNonNull(
+                mockChargeRunId, mockChargeRunIdSnake, invoiceGenerationRunId, actualChargeRunId, actualChargeRunIdSnake);
+        Boolean isMockFilter = isMock;
+        if ((actualChargeRunId != null || actualChargeRunIdSnake != null) && isMock == null) {
+            isMockFilter = false;
+        }
         String failureCodeFilter = failureCode != null && !failureCode.isBlank() ? failureCode : mockChargeFailureCode;
         PageResponse<SubscriptionBillingHistoryItemDto> page = invoiceGenerationService.listInvoicesForBillingRun(
                 billingRunId,
                 stageRunFilter,
                 status,
-                isMock,
+                isMockFilter,
                 mockChargeStatus,
                 failureCodeFilter,
                 limit,
@@ -185,6 +192,8 @@ public class BillingRunsController {
     public ResponseEntity<PageResponse<DLQItemDto>> listDlqForBillingRun(
             @PathVariable UUID billingRunId,
             @RequestParam(required = false) UUID invoiceGenerationRunId,
+            @RequestParam(required = false) UUID actualChargeRunId,
+            @RequestParam(name = "actual_charge_run_id", required = false) UUID actualChargeRunIdSnake,
             @RequestParam(required = false) String failureTypeCode,
             @RequestParam(required = false) Boolean resolved,
             @RequestParam(defaultValue = "50") Integer limit,
@@ -192,8 +201,9 @@ public class BillingRunsController {
             @RequestParam(defaultValue = "created_on") String sortBy,
             @RequestParam(defaultValue = "desc") String sortOrder) {
 
+        UUID stageRunFilter = firstNonNull(invoiceGenerationRunId, actualChargeRunId, actualChargeRunIdSnake);
         PageResponse<DLQItemDto> response = dlqService.listDLQItems(
-                billingRunId, invoiceGenerationRunId, failureTypeCode, resolved,
+                billingRunId, stageRunFilter, failureTypeCode, resolved,
                 limit, offset, sortBy, sortOrder);
         return ResponseEntity.ok(response);
     }
@@ -310,13 +320,15 @@ public class BillingRunsController {
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
-    private static UUID firstNonNull(UUID a, UUID b, UUID c) {
-        if (a != null) {
-            return a;
+    private static UUID firstNonNull(UUID... uuids) {
+        if (uuids == null) {
+            return null;
         }
-        if (b != null) {
-            return b;
+        for (UUID u : uuids) {
+            if (u != null) {
+                return u;
+            }
         }
-        return c;
+        return null;
     }
 }

@@ -1,9 +1,11 @@
 package io.clubone.billing.api.v1;
 
+import io.clubone.billing.service.ActualChargeService;
 import io.clubone.billing.service.ExportService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -20,9 +22,11 @@ public class ExportController {
     private static final Logger log = LoggerFactory.getLogger(ExportController.class);
 
     private final ExportService exportService;
+    private final ActualChargeService actualChargeService;
 
-    public ExportController(ExportService exportService) {
+    public ExportController(ExportService exportService, ActualChargeService actualChargeService) {
         this.exportService = exportService;
+        this.actualChargeService = actualChargeService;
     }
 
     /**
@@ -86,19 +90,40 @@ public class ExportController {
     public ResponseEntity<byte[]> exportInvoices(
             @PathVariable UUID billingRunId,
             @RequestParam(required = false, defaultValue = "pdf") String format,
-            @RequestParam(required = false) String statusFilter) {
-        
-        log.debug("Exporting invoices: billingRunId={}, format={}, statusFilter={}", 
-                billingRunId, format, statusFilter);
-        
+            @RequestParam(required = false) String statusFilter,
+            @RequestParam(required = false) UUID actualChargeRunId,
+            @RequestParam(name = "actual_charge_run_id", required = false) UUID actualChargeRunIdSnake,
+            @RequestParam(required = false) Boolean isMock,
+            @RequestParam(required = false, defaultValue = "false") boolean failedOnly) {
+
+        UUID acRun = actualChargeRunId != null ? actualChargeRunId : actualChargeRunIdSnake;
+        log.debug(
+                "Exporting invoices: billingRunId={}, format={}, statusFilter={}, actualChargeRunId={}, isMock={}, failedOnly={}",
+                billingRunId,
+                format,
+                statusFilter,
+                acRun,
+                isMock,
+                failedOnly);
+
+        if (acRun != null && "csv".equalsIgnoreCase(format)) {
+            byte[] csv = actualChargeService.exportActualChargeRunCsv(acRun, failedOnly);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "text/csv")
+                    .header(
+                            HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"billing-invoices-" + billingRunId + "-actual-charge.csv\"")
+                    .body(csv);
+        }
+
         byte[] exportData = exportService.exportInvoices(billingRunId, format, statusFilter);
         if (exportData == null) {
             return ResponseEntity.notFound().build();
         }
-        
+
         String contentType = getContentType(format);
         String filename = "billing-invoices-" + billingRunId + "." + format;
-        
+
         return ResponseEntity.ok()
                 .header("Content-Type", contentType)
                 .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")

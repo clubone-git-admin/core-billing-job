@@ -35,20 +35,40 @@ public class DLQController {
     public ResponseEntity<PageResponse<DLQItemDto>> listDLQItems(
             @RequestParam(required = false) UUID billingRunId,
             @RequestParam(required = false) UUID invoiceGenerationRunId,
+            @RequestParam(required = false) UUID actualChargeRunId,
+            @RequestParam(name = "actual_charge_run_id", required = false) UUID actualChargeRunIdSnake,
             @RequestParam(required = false) String failureTypeCode,
             @RequestParam(required = false) Boolean resolved,
             @RequestParam(defaultValue = "50") Integer limit,
             @RequestParam(defaultValue = "0") Integer offset,
             @RequestParam(defaultValue = "created_on") String sortBy,
             @RequestParam(defaultValue = "desc") String sortOrder) {
-        
-        log.debug("Listing DLQ items: billingRunId={}, invoiceGenerationRunId={}, failureTypeCode={}, resolved={}",
-                billingRunId, invoiceGenerationRunId, failureTypeCode, resolved);
-        
+
+        UUID stageRunFilter = firstNonNull(invoiceGenerationRunId, actualChargeRunId, actualChargeRunIdSnake);
+
+        log.debug(
+                "Listing DLQ items: billingRunId={}, stageRunId={}, failureTypeCode={}, resolved={}",
+                billingRunId,
+                stageRunFilter,
+                failureTypeCode,
+                resolved);
+
         PageResponse<DLQItemDto> response = dlqService.listDLQItems(
-                billingRunId, invoiceGenerationRunId, failureTypeCode, resolved, limit, offset, sortBy, sortOrder);
-        
+                billingRunId, stageRunFilter, failureTypeCode, resolved, limit, offset, sortBy, sortOrder);
+
         return ResponseEntity.ok(response);
+    }
+
+    private static UUID firstNonNull(UUID... uuids) {
+        if (uuids == null) {
+            return null;
+        }
+        for (UUID u : uuids) {
+            if (u != null) {
+                return u;
+            }
+        }
+        return null;
     }
 
     /**
