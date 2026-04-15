@@ -41,7 +41,7 @@ public class StageRunRepository {
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
             JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             WHERE bsr.billing_run_id = ?::uuid
-            ORDER BY bsc.stage_sequence ASC
+            ORDER BY bsc.stage_sequence ASC, bsr.created_on ASC, bsr.stage_run_id ASC
             """;
 
         return jdbc.query(sql, new Object[]{billingRunId.toString()}, (rs, rowNum) -> mapStageRunRow(rs));
@@ -91,6 +91,30 @@ public class StageRunRepository {
         List<StageRunDto> results = jdbc.query(sql, new Object[]{billingRunId.toString(), stageCode}, (rs, rowNum) -> mapStageRunRow(rs));
 
         return results.isEmpty() ? null : results.get(0);
+    }
+
+    /**
+     * Stage runs for a billing run and stage code whose status is not terminal (multiple executions per stage,
+     * e.g. MOCK_CHARGE retries). Ordered by {@code created_on} ascending.
+     */
+    public List<StageRunDto> findNonTerminalByBillingRunIdAndStageCode(UUID billingRunId, String stageCode) {
+        String sql = """
+            SELECT bsr.stage_run_id, bsr.stage_run_code, bsr.billing_run_id,
+                   bsc.stage_code AS stage_code, bsc.display_name AS stage_display_name,
+                   bsc.stage_sequence, bsc.description AS stage_description,
+                   srs.status_code AS status_code, srs.display_name AS status_display_name,
+                   bsr.scheduled_for, bsr.started_on, bsr.ended_on,
+                   bsr.summary_json, bsr.error_message, bsr.error_details,
+                   bsr.attempt_number, bsr.max_attempts, bsr.is_locked
+            FROM client_subscription_billing.billing_stage_run bsr
+            JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+            JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+            WHERE bsr.billing_run_id = ?::uuid AND bsc.stage_code = ?
+              AND srs.status_code NOT IN ('COMPLETED', 'SKIPPED', 'FAILED', 'CANCELLED')
+            ORDER BY bsr.created_on ASC, bsr.stage_run_id ASC
+            """;
+
+        return jdbc.query(sql, new Object[]{billingRunId.toString(), stageCode}, (rs, rowNum) -> mapStageRunRow(rs));
     }
 
     /**
@@ -468,6 +492,39 @@ public class StageRunRepository {
                 """,
                         statusId.toString(), stageRunId.toString());
         }
+    }
+
+    /**
+     * Terminal finish with a specific {@code status_code} (e.g. {@code SKIPPED}, {@code COMPLETED}).
+     *
+     * @return {@code false} if {@code statusCode} is not present in {@code billing_config.stage_run_status}
+     */
+    public boolean tryFinishStageRun(UUID stageRunId, String statusCode, Map<String, Object> summaryJson) {
+        List<UUID> statusIds = jdbc.query(
+                "SELECT stage_run_status_id FROM billing_config.stage_run_status WHERE status_code = ? LIMIT 1",
+                (rs, rowNum) -> (UUID) rs.getObject(1),
+                statusCode);
+        if (statusIds.isEmpty()) {
+            return false;
+        }
+        UUID statusId = statusIds.get(0);
+        try {
+            String jsonStr = summaryJson != null ? objectMapper.writeValueAsString(summaryJson) : null;
+            jdbc.update("""
+                UPDATE client_subscription_billing.billing_stage_run
+                SET stage_run_status_id = ?::uuid, ended_on = now(), summary_json = ?::jsonb, modified_on = now()
+                WHERE stage_run_id = ?::uuid
+                """,
+                    statusId.toString(), jsonStr, stageRunId.toString());
+        } catch (Exception e) {
+            jdbc.update("""
+                UPDATE client_subscription_billing.billing_stage_run
+                SET stage_run_status_id = ?::uuid, ended_on = now(), modified_on = now()
+                WHERE stage_run_id = ?::uuid
+                """,
+                    statusId.toString(), stageRunId.toString());
+        }
+        return true;
     }
 
     /**

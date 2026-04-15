@@ -531,14 +531,103 @@ public class InvoiceGenerationService {
     }
 
     public PageResponse<SubscriptionBillingHistoryItemDto> listInvoicesForBillingRun(
-            UUID billingRunId, UUID invoiceGenerationRunId, String billingStatusCode, int limit, int offset) {
+            UUID billingRunId,
+            UUID invoiceGenerationRunId,
+            String billingStatusCode,
+            Boolean isMock,
+            String mockChargeStatus,
+            String mockChargeFailureCode,
+            int limit,
+            int offset) {
         if (billingRunId == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "billingRunId is required");
         }
+        // INVOICE_GENERATION runs do not insert subscription_billing_history rows tagged with this stage_run_id;
+        // draft invoices live on transactions.invoice and IDs are stored on the stage run as generated_invoice_ids.
+        if (invoiceGenerationRunId != null) {
+            StageRunDto sr = stageRunRepository.findById(invoiceGenerationRunId);
+            if (sr == null) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Stage run not found: " + invoiceGenerationRunId);
+            }
+            if (!billingRunId.equals(sr.billingRunId())) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Stage run does not belong to this billing run");
+            }
+            if (STAGE_CODE.equals(sr.stageCode())) {
+                ParsedGeneratedInvoiceIds parsed = parseGeneratedInvoiceIds(sr.summaryJson());
+                if (parsed.keyPresent()) {
+                    if (parsed.ids().isEmpty()) {
+                        return PageResponse.of(List.of(), 0, limit, offset);
+                    }
+                    List<SubscriptionBillingHistoryItemDto> igRows =
+                            subscriptionBillingHistoryRepository.findByBillingRunIdAndInvoiceIds(
+                                    billingRunId, parsed.ids(), limit, offset);
+                    int igTotal = subscriptionBillingHistoryRepository.countByBillingRunIdAndInvoiceIds(
+                            billingRunId, parsed.ids());
+                    return PageResponse.of(igRows, igTotal, limit, offset);
+                }
+                var legacyRows = subscriptionBillingHistoryRepository.findByBillingRunId(
+                        billingRunId,
+                        null,
+                        billingStatusCode,
+                        isMock,
+                        mockChargeStatus,
+                        mockChargeFailureCode,
+                        limit,
+                        offset);
+                int legacyTotal = subscriptionBillingHistoryRepository.countByBillingRunId(
+                        billingRunId,
+                        null,
+                        billingStatusCode,
+                        isMock,
+                        mockChargeStatus,
+                        mockChargeFailureCode);
+                return PageResponse.of(legacyRows, legacyTotal, limit, offset);
+            }
+        }
         var rows = subscriptionBillingHistoryRepository.findByBillingRunId(
-                billingRunId, invoiceGenerationRunId, billingStatusCode, limit, offset);
-        int total = subscriptionBillingHistoryRepository.countByBillingRunId(billingRunId, invoiceGenerationRunId, billingStatusCode);
+                billingRunId,
+                invoiceGenerationRunId,
+                billingStatusCode,
+                isMock,
+                mockChargeStatus,
+                mockChargeFailureCode,
+                limit,
+                offset);
+        int total = subscriptionBillingHistoryRepository.countByBillingRunId(
+                billingRunId,
+                invoiceGenerationRunId,
+                billingStatusCode,
+                isMock,
+                mockChargeStatus,
+                mockChargeFailureCode);
         return PageResponse.of(rows, total, limit, offset);
+    }
+
+    private record ParsedGeneratedInvoiceIds(boolean keyPresent, List<UUID> ids) {}
+
+    /**
+     * {@code InvoiceGenerationJobRunner} stores {@code generated_invoice_ids} on the stage summary when the job finishes.
+     */
+    private static ParsedGeneratedInvoiceIds parseGeneratedInvoiceIds(Map<String, Object> summaryJson) {
+        if (summaryJson == null || !summaryJson.containsKey("generated_invoice_ids")) {
+            return new ParsedGeneratedInvoiceIds(false, List.of());
+        }
+        Object raw = summaryJson.get("generated_invoice_ids");
+        List<UUID> out = new ArrayList<>();
+        if (raw instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof String s) {
+                    try {
+                        out.add(UUID.fromString(s.trim()));
+                    } catch (IllegalArgumentException ignored) {
+                        // skip malformed entry
+                    }
+                } else if (o instanceof UUID u) {
+                    out.add(u);
+                }
+            }
+        }
+        return new ParsedGeneratedInvoiceIds(true, out);
     }
 
     /**

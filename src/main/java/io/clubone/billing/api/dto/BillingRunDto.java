@@ -1,6 +1,7 @@
 package io.clubone.billing.api.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
@@ -32,7 +33,8 @@ public record BillingRunDto(
     UUID approvedBy,
     OffsetDateTime approvedOn,
     String approvalNotes,
-    List<StageRunDto> stages,
+    @JsonProperty("stage_history")
+    List<StageRunDto> stageHistory,
     List<ApprovalDto> approvals
 ) {
 }

@@ -5,7 +5,7 @@
     <!-- Console Appender -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - [mockChargeStageRunId=%X{mockChargeStageRunId}] %msg%n</pattern>
         </encoder>
     </appender>
 
@@ -15,6 +15,8 @@
 
     <!-- Application-specific loggers -->
     <logger name="io.clubone.billing" level="DEBUG"/>
+    <!-- Mock charge async path: DEBUG = per-invoice lines; INFO = milestones + HTTP -->
+    <logger name="io.clubone.billing.service.mockcharge" level="DEBUG"/>
     <logger name="org.springframework.batch" level="INFO"/>
     <logger name="org.springframework.web" level="INFO"/>
 </configuration>

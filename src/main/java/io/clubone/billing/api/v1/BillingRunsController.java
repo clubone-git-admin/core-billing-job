@@ -4,6 +4,7 @@ import io.clubone.billing.api.dto.*;
 import io.clubone.billing.service.BillingRunService;
 import io.clubone.billing.service.DLQService;
 import io.clubone.billing.service.InvoiceGenerationService;
+import io.clubone.billing.service.MockChargeService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -36,14 +37,17 @@ public class BillingRunsController {
     private final BillingRunService billingRunService;
     private final InvoiceGenerationService invoiceGenerationService;
     private final DLQService dlqService;
+    private final MockChargeService mockChargeService;
 
     public BillingRunsController(
             BillingRunService billingRunService,
             InvoiceGenerationService invoiceGenerationService,
-            DLQService dlqService) {
+            DLQService dlqService,
+            MockChargeService mockChargeService) {
         this.billingRunService = billingRunService;
         this.invoiceGenerationService = invoiceGenerationService;
         this.dlqService = dlqService;
+        this.mockChargeService = mockChargeService;
     }
 
     /**
@@ -108,12 +112,27 @@ public class BillingRunsController {
     public ResponseEntity<PageResponse<SubscriptionBillingHistoryItemDto>> listInvoicesForBillingRun(
             @PathVariable UUID billingRunId,
             @RequestParam(required = false) UUID invoiceGenerationRunId,
+            @RequestParam(required = false) UUID mockChargeRunId,
+            @RequestParam(name = "mock_charge_run_id", required = false) UUID mockChargeRunIdSnake,
             @RequestParam(required = false) String status,
+            @RequestParam(required = false) Boolean isMock,
+            @RequestParam(required = false) String mockChargeStatus,
+            @RequestParam(required = false) String mockChargeFailureCode,
+            @RequestParam(required = false) String failureCode,
             @RequestParam(defaultValue = "50") Integer limit,
             @RequestParam(defaultValue = "0") Integer offset) {
 
+        UUID stageRunFilter = firstNonNull(mockChargeRunId, mockChargeRunIdSnake, invoiceGenerationRunId);
+        String failureCodeFilter = failureCode != null && !failureCode.isBlank() ? failureCode : mockChargeFailureCode;
         PageResponse<SubscriptionBillingHistoryItemDto> page = invoiceGenerationService.listInvoicesForBillingRun(
-                billingRunId, invoiceGenerationRunId, status, limit, offset);
+                billingRunId,
+                stageRunFilter,
+                status,
+                isMock,
+                mockChargeStatus,
+                failureCodeFilter,
+                limit,
+                offset);
         return ResponseEntity.ok(page);
     }
 
@@ -130,6 +149,36 @@ public class BillingRunsController {
 
         BillingRunDto body = invoiceGenerationService.lockInvoicesForBillingRun(billingRunId, request);
         return ResponseEntity.ok(body);
+    }
+
+    /**
+     * POST /api/v1/billing/runs/{billingRunId}/mock-charge/skip
+     */
+    @PostMapping("/{billingRunId}/mock-charge/skip")
+    public ResponseEntity<BillingRunDto> skipMockCharge(
+            @PathVariable UUID billingRunId,
+            @Valid @RequestBody MockChargeSkipRequest request) {
+        return ResponseEntity.ok(mockChargeService.skipMockCharge(billingRunId, request));
+    }
+
+    /**
+     * POST /api/v1/billing/runs/{billingRunId}/mock-charge/proceed-to-actual-charge
+     */
+    @PostMapping("/{billingRunId}/mock-charge/proceed-to-actual-charge")
+    public ResponseEntity<BillingRunDto> proceedToActualCharge(
+            @PathVariable UUID billingRunId,
+            @Valid @RequestBody MockChargeProceedRequest request) {
+        return ResponseEntity.ok(mockChargeService.proceedToActualCharge(billingRunId, request));
+    }
+
+    /**
+     * GET /api/v1/billing/runs/{billingRunId}/mock-charge/trends
+     */
+    @GetMapping("/{billingRunId}/mock-charge/trends")
+    public ResponseEntity<MockChargeTrendsResponse> mockChargeTrends(
+            @PathVariable UUID billingRunId,
+            @RequestParam(defaultValue = "7") int runs) {
+        return ResponseEntity.ok(mockChargeService.trends(billingRunId, runs));
     }
 
     @GetMapping("/{billingRunId}/dlq")
@@ -259,5 +308,15 @@ public class BillingRunsController {
         
         BulkCreateBillingRunResponse response = billingRunService.bulkCreateBillingRuns(request);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
+
+    private static UUID firstNonNull(UUID a, UUID b, UUID c) {
+        if (a != null) {
+            return a;
+        }
+        if (b != null) {
+            return b;
+        }
+        return c;
     }
 }

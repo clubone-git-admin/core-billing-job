@@ -62,9 +62,31 @@ public class AuditLogService {
         }
     }
 
+    /**
+     * PostgreSQL JDBC returns {@code json}/{@code jsonb} as {@code org.postgresql.util.PGobject}, not {@link String}.
+     * Avoid importing driver types here; use reflection when needed.
+     */
+    private static String jdbcJsonToString(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        if (raw instanceof String s) {
+            return s;
+        }
+        if ("org.postgresql.util.PGobject".equals(raw.getClass().getName())) {
+            try {
+                Object v = raw.getClass().getMethod("getValue").invoke(raw);
+                return v != null ? v.toString() : null;
+            } catch (ReflectiveOperationException e) {
+                return raw.toString();
+            }
+        }
+        return raw.toString();
+    }
+
     private Map<String, Object> formatAuditLog(Map<String, Object> log) {
         Map<String, Object> details = new HashMap<>();
-        String detailsStr = (String) log.get("details");
+        String detailsStr = jdbcJsonToString(log.get("details"));
         if (detailsStr != null) {
             try {
                 com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();

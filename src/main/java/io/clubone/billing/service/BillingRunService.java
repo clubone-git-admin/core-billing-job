@@ -58,7 +58,7 @@ public class BillingRunService {
         }
 
         // Load stages and approvals (rehydrate DUE_PREVIEW file refs from snapshot when approve overwrote summary_json)
-        List<StageRunDto> stages = duePreviewService.enrichDuePreviewStageSummaries(
+        List<StageRunDto> stageHistory = duePreviewService.enrichDuePreviewStageSummaries(
                 billingRunId, stageRunRepository.findByBillingRunId(billingRunId));
         List<ApprovalDto> approvals = approvalRepository.findByBillingRunId(billingRunId);
 
@@ -69,7 +69,7 @@ public class BillingRunService {
                 billingRun.startedOn(), billingRun.endedOn(), billingRun.summaryJson(),
                 billingRun.createdBy(), billingRun.createdOn(), billingRun.modifiedOn(),
                 billingRun.sourceRunId(), billingRun.sourceRunCode(), billingRun.approvedBy(),
-                billingRun.approvedOn(), billingRun.approvalNotes(), stages, approvals
+                billingRun.approvedOn(), billingRun.approvalNotes(), stageHistory, approvals
         );
     }
 
