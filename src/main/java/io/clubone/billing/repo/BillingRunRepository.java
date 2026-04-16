@@ -138,6 +138,9 @@ public class BillingRunRepository {
 
             UUID createdBy = (UUID) rs.getObject("created_by");
             OffsetDateTime createdOn = rs.getObject("created_on", OffsetDateTime.class);
+            if (startedOn == null) {
+                startedOn = createdOn;
+            }
             OffsetDateTime modifiedOn = rs.getObject("modified_on", OffsetDateTime.class);
             UUID sourceRunId = (UUID) rs.getObject("source_run_id");
             String sourceRunCode = rs.getString("source_run_code");
@@ -270,6 +273,9 @@ public class BillingRunRepository {
 
             UUID createdBy = (UUID) rs.getObject("created_by");
             OffsetDateTime createdOn = rs.getObject("created_on", OffsetDateTime.class);
+            if (startedOn == null) {
+                startedOn = createdOn;
+            }
             OffsetDateTime modifiedOn = rs.getObject("modified_on", OffsetDateTime.class);
             UUID sourceRunId = (UUID) rs.getObject("source_run_id");
             String sourceRunCode = rs.getString("source_run_code");
