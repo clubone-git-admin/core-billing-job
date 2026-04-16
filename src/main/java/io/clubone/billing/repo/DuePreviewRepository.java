@@ -23,32 +23,49 @@ public class DuePreviewRepository {
     }
 
     /**
-     * Get due subscription instances for preview based on next_billing_date.
-     * Cycle pricing comes from the latest {@code subscription_purchase_snapshot} cycle band.
+     * Get due schedule rows for preview from {@code subscription_billing_schedule}.
+     * <p>
+     * Pickup rule: {@code billing_date <= dueDate}, with only unbilled rows ({@code invoice_id IS NULL}).
+     * Pricing is read directly from schedule columns; adjustments are applied from
+     * {@code subscription_billing_schedule_adjustment} (active rows only).
      *
-     * @param dueDate    The due date to filter by (next_billing_date <= dueDate)
+     * @param dueDate    The due date to filter by
      * @param locationId Optional location ID filter
-     * @return List of subscription instance data maps with calculated amounts
+     * @return List of schedule-backed preview rows with calculated amounts
      */
     public List<Map<String, Object>> getDueInvoicesForPreview(LocalDate dueDate, UUID locationId) {
             StringBuilder sql = new StringBuilder("""
             SELECT
+        sbs.billing_schedule_id,
         si.subscription_instance_id,
-        si.subscription_plan_id,
-        si.next_billing_date AS payment_due_date,
-        si.current_cycle_number AS cycle_number,
-        si.billing_start_date AS start_date,
+        sbs.subscription_plan_id,
+        sbs.billing_date AS payment_due_date,
+        sbs.cycle_number,
+        sbs.billing_period_start AS start_date,
         si.last_billed_on,
         sp.client_payment_method_id,
         sp.client_agreement_id,
         CAST(NULL AS date) AS contract_start_date,
         CAST(NULL AS date) AS contract_end_date,
         sis.status_name AS subscription_instance_status_name,
-        spcp.subscription_purchase_snapshot_id,
-        spcp.unit_price,
-        spcp.effective_unit_price,
-        spcp.cycle_start AS price_cycle_start,
-        spcp.cycle_end AS price_cycle_end,
+        CAST(NULL AS uuid) AS subscription_purchase_snapshot_id,
+        sbs.unit_price,
+        COALESCE(sbs.override_amount, sbs.base_amount) AS effective_unit_price,
+        sbs.billing_period_start AS price_cycle_start,
+        sbs.billing_period_end AS price_cycle_end,
+        COALESCE(sbs.base_amount, 0::numeric) AS base_amount,
+        COALESCE(sbs.override_amount, sbs.base_amount, 0::numeric) AS override_or_base_amount,
+        COALESCE(sbs.discount_amount, 0::numeric) AS schedule_discount_amount,
+        COALESCE(sbs.tax_amount, 0::numeric) AS schedule_tax_amount,
+        COALESCE(
+            sbs.subtotal_before_tax,
+            GREATEST(COALESCE(sbs.override_amount, sbs.base_amount, 0::numeric) - COALESCE(sbs.discount_amount, 0::numeric), 0::numeric)
+        ) AS schedule_subtotal_before_tax,
+        COALESCE(
+            sbs.final_amount,
+            GREATEST(COALESCE(sbs.override_amount, sbs.base_amount, 0::numeric) - COALESCE(sbs.discount_amount, 0::numeric) + COALESCE(sbs.tax_amount, 0::numeric), 0::numeric)
+        ) AS schedule_final_amount,
+        COALESCE(adj.adjustment_total, 0::numeric) AS adjustment_total_amount,
         ca.client_role_id AS client_role_id,
         cr.role_id AS role_id,
         lcas.name AS client_agreement_status,
@@ -61,32 +78,28 @@ public class DuePreviewRepository {
         ch.client_first_name,
         ch.client_last_name,
         ch.client_email
-    FROM client_subscription_billing.subscription_instance si
-    JOIN client_subscription_billing.subscription_plan sp ON sp.subscription_plan_id = si.subscription_plan_id
+    FROM client_subscription_billing.subscription_billing_schedule sbs
+    JOIN client_subscription_billing.subscription_instance si
+      ON si.subscription_instance_id = sbs.subscription_instance_id
+    JOIN client_subscription_billing.subscription_plan sp
+      ON sp.subscription_plan_id = sbs.subscription_plan_id
     JOIN billing_config.subscription_instance_status sis
         ON sis.subscription_instance_status_id = si.subscription_instance_status_id
     LEFT JOIN LATERAL (
-        SELECT sps.subscription_purchase_snapshot_id,
-               pscp.unit_price,
-               pscp.unit_price AS effective_unit_price,
-               pscp.cycle_start,
-               pscp.cycle_end
-        FROM client_subscription_billing.subscription_purchase_snapshot sps
-        JOIN client_subscription_billing.subscription_purchase_snapshot_cycle_price pscp
-            ON pscp.subscription_purchase_snapshot_id = sps.subscription_purchase_snapshot_id
-        WHERE sps.subscription_plan_id = si.subscription_plan_id
-          AND sps.subscription_purchase_snapshot_id = (
-              SELECT sps2.subscription_purchase_snapshot_id
-              FROM client_subscription_billing.subscription_purchase_snapshot sps2
-              WHERE sps2.subscription_plan_id = si.subscription_plan_id
-              ORDER BY sps2.captured_on DESC NULLS LAST
-              LIMIT 1
-          )
-          AND (pscp.cycle_start IS NULL OR pscp.cycle_start <= si.current_cycle_number)
-          AND (pscp.cycle_end IS NULL OR pscp.cycle_end >= si.current_cycle_number)
-        ORDER BY pscp.cycle_start DESC NULLS LAST
-        LIMIT 1
-    ) spcp ON true
+        SELECT
+            SUM(
+                CASE
+                    WHEN UPPER(COALESCE(bat.sign_behavior, 'BOTH')) = 'NEGATIVE' THEN -ABS(sbsa.amount)
+                    WHEN UPPER(COALESCE(bat.sign_behavior, 'BOTH')) = 'POSITIVE' THEN ABS(sbsa.amount)
+                    ELSE sbsa.amount
+                END
+            ) AS adjustment_total
+        FROM client_subscription_billing.subscription_billing_schedule_adjustment sbsa
+        LEFT JOIN billing_config.billing_adjustment_type bat
+          ON bat.billing_adjustment_type_id = sbsa.billing_adjustment_type_id
+        WHERE sbsa.billing_schedule_id = sbs.billing_schedule_id
+          AND COALESCE(sbsa.is_active, true) = true
+    ) adj ON true
     LEFT JOIN client_agreements.client_agreement ca ON ca.client_agreement_id = sp.client_agreement_id
     LEFT JOIN client_agreements.lu_client_agreement_status lcas
         ON lcas.client_agreement_status_id = ca.client_agreement_status_id
@@ -117,8 +130,9 @@ public class DuePreviewRepository {
         WHERE cc.client_role_id = ca.client_role_id
     ) ch ON true
     WHERE sis.status_name = 'ACTIVE'
-    AND si.next_billing_date IS NOT NULL
-    AND si.next_billing_date <= ?::date
+    AND sbs.billing_date IS NOT NULL
+    AND sbs.billing_date <= ?::date
+    AND sbs.invoice_id IS NULL
     AND sp.is_active = true
         """);
 
@@ -142,12 +156,13 @@ public class DuePreviewRepository {
             params.add(locationId);
         }
 
-        sql.append(" ORDER BY si.next_billing_date ASC, si.subscription_instance_id ASC");
+        sql.append(" ORDER BY sbs.billing_date ASC, sbs.subscription_instance_id ASC, sbs.cycle_number ASC");
         
         return jdbc.query(sql.toString(), params.toArray(), (rs, rowNum) -> {
             Map<String, Object> row = new HashMap<>();
             
             // Basic instance info
+            row.put("billing_schedule_id", rs.getObject("billing_schedule_id", UUID.class));
             row.put("subscription_instance_id", rs.getObject("subscription_instance_id", UUID.class));
             row.put("subscription_plan_id", rs.getObject("subscription_plan_id", UUID.class));
             row.put("payment_due_date", rs.getObject("payment_due_date", LocalDate.class));
@@ -166,23 +181,35 @@ public class DuePreviewRepository {
             // Pricing info
             BigDecimal unitPrice = rs.getObject("unit_price", BigDecimal.class);
             BigDecimal effectiveUnitPrice = rs.getObject("effective_unit_price", BigDecimal.class);
-            BigDecimal subTotal = effectiveUnitPrice != null ? effectiveUnitPrice : (unitPrice != null ? unitPrice : BigDecimal.ZERO);
-            
-            // Calculate amounts (sub_total, tax, discount, total)
-            // For now, assuming tax and discount are 0 unless there are tax/discount tables
-            // You may need to join with tax_rate or discount tables if they exist
-            BigDecimal taxAmount = BigDecimal.ZERO; // TODO: Calculate from tax_rate table if exists
-            BigDecimal discountAmount = BigDecimal.ZERO; // TODO: Calculate from discount table if exists
-            BigDecimal totalAmount = subTotal.add(taxAmount).subtract(discountAmount);
+            BigDecimal scheduleSubtotal = rs.getObject("schedule_subtotal_before_tax", BigDecimal.class);
+            BigDecimal scheduleTaxAmount = rs.getObject("schedule_tax_amount", BigDecimal.class);
+            BigDecimal scheduleDiscountAmount = rs.getObject("schedule_discount_amount", BigDecimal.class);
+            BigDecimal scheduleFinalAmount = rs.getObject("schedule_final_amount", BigDecimal.class);
+            BigDecimal adjustmentAmount = rs.getObject("adjustment_total_amount", BigDecimal.class);
+
+            BigDecimal subTotal = scheduleSubtotal != null
+                    ? scheduleSubtotal
+                    : (effectiveUnitPrice != null ? effectiveUnitPrice : (unitPrice != null ? unitPrice : BigDecimal.ZERO));
+            BigDecimal taxAmount = scheduleTaxAmount != null ? scheduleTaxAmount : BigDecimal.ZERO;
+            BigDecimal discountAmount = scheduleDiscountAmount != null ? scheduleDiscountAmount : BigDecimal.ZERO;
+            BigDecimal baseTotal = scheduleFinalAmount != null
+                    ? scheduleFinalAmount
+                    : subTotal.add(taxAmount).subtract(discountAmount);
+            BigDecimal totalAmount = baseTotal.add(adjustmentAmount != null ? adjustmentAmount : BigDecimal.ZERO);
+            if (totalAmount.signum() < 0) {
+                totalAmount = BigDecimal.ZERO;
+            }
             
             row.put("sub_total", subTotal);
             row.put("tax_amount", taxAmount);
             row.put("discount_amount", discountAmount);
             row.put("total_amount", totalAmount);
+            row.put("adjustment_amount", adjustmentAmount != null ? adjustmentAmount : BigDecimal.ZERO);
+            row.put("base_total_amount", baseTotal);
             row.put("unit_price", unitPrice);
             row.put("effective_unit_price", effectiveUnitPrice);
-            row.put("price_cycle_start", rs.getObject("price_cycle_start", Integer.class));
-            row.put("price_cycle_end", rs.getObject("price_cycle_end", Integer.class));
+            row.put("price_cycle_start", rs.getObject("price_cycle_start", LocalDate.class));
+            row.put("price_cycle_end", rs.getObject("price_cycle_end", LocalDate.class));
             
             // Client info
             row.put("client_role_id", rs.getObject("client_role_id", UUID.class));
@@ -294,5 +321,85 @@ public class DuePreviewRepository {
             """;
         Integer n = jdbc.queryForObject(sql, Integer.class);
         return n != null ? n : 0;
+    }
+
+    /**
+     * Human-readable due-preview line labels: prefer {@code subscription_purchase_snapshot_line} on the latest
+     * {@code subscription_purchase_snapshot} for the plan, else schedule {@code label}/{@code period_label}, else
+     * agreement name + cycle. Matches DBs where {@code subscription_billing_schedule} has no purchase/config snapshot FKs.
+     *
+     * @param billingScheduleIds schedule rows to resolve (typically from parsed due-preview CSV)
+     * @return map billing_schedule_id → description (never null values; may omit unknown ids)
+     */
+    public Map<UUID, String> findDuePreviewLineDescriptionsByBillingScheduleIds(Collection<UUID> billingScheduleIds) {
+        if (billingScheduleIds == null || billingScheduleIds.isEmpty()) {
+            return Map.of();
+        }
+        List<UUID> ids = billingScheduleIds.stream().filter(Objects::nonNull).distinct().toList();
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        String placeholders = ids.stream().map(id -> "?::uuid").collect(java.util.stream.Collectors.joining(","));
+        String sql = String.format("""
+                SELECT sbs.billing_schedule_id,
+                       COALESCE(
+                           NULLIF(TRIM(lbl.snapshot_label), ''),
+                           NULLIF(TRIM(sbs.label), ''),
+                           NULLIF(TRIM(sbs.period_label), ''),
+                           NULLIF(TRIM(CONCAT_WS(' \u2014 ',
+                               NULLIF(TRIM(a.agreement_name), ''),
+                               CASE
+                                   WHEN sbs.billing_period_start IS NOT NULL THEN to_char(sbs.billing_period_start, 'Mon DD') || ' cycle'
+                                   WHEN sbs.billing_date IS NOT NULL THEN to_char(sbs.billing_date, 'Mon DD') || ' cycle'
+                                   ELSE 'cycle ' || COALESCE(sbs.cycle_number::text, '')
+                               END
+                           )), '')
+                       ) AS line_description
+                FROM client_subscription_billing.subscription_billing_schedule sbs
+                JOIN client_subscription_billing.subscription_plan sp
+                  ON sp.subscription_plan_id = sbs.subscription_plan_id
+                LEFT JOIN client_agreements.client_agreement ca ON ca.client_agreement_id = sp.client_agreement_id
+                LEFT JOIN agreements.agreement a ON a.agreement_id = ca.agreement_id
+                LEFT JOIN LATERAL (
+                    SELECT COALESCE(
+                        NULLIF(TRIM(spsl.display_name), ''),
+                        NULLIF(TRIM(spsl.plan_name), ''),
+                        NULLIF(TRIM(snap.display_name), '')
+                    ) AS snapshot_label
+                    FROM (
+                        SELECT s.*
+                        FROM client_subscription_billing.subscription_purchase_snapshot s
+                        WHERE s.subscription_plan_id::text = sp.subscription_plan_id::text
+                        ORDER BY s.captured_on DESC NULLS LAST
+                        LIMIT 1
+                    ) snap
+                    JOIN client_subscription_billing.subscription_purchase_snapshot_line spsl
+                      ON spsl.subscription_purchase_snapshot_id = snap.subscription_purchase_snapshot_id
+                    ORDER BY
+                        CASE WHEN spsl.billing_date IS NOT DISTINCT FROM sbs.billing_date THEN 0 ELSE 1 END,
+                        CASE WHEN COALESCE(TRIM(spsl.period_label), '') <> ''
+                                  AND COALESCE(TRIM(sbs.period_label), '') <> ''
+                                  AND TRIM(spsl.period_label) = TRIM(sbs.period_label) THEN 0 ELSE 1 END,
+                        CASE WHEN spsl.subscription_plan_id::text IS NOT DISTINCT FROM sp.subscription_plan_id::text THEN 0 ELSE 1 END,
+                        spsl.line_sequence ASC NULLS LAST
+                    LIMIT 1
+                ) lbl ON true
+                WHERE sbs.billing_schedule_id IN (%s)
+                """, placeholders);
+
+        List<Object> params = new ArrayList<>();
+        for (UUID id : ids) {
+            params.add(id.toString());
+        }
+
+        Map<UUID, String> out = new HashMap<>();
+        jdbc.query(sql, rs -> {
+            UUID bid = rs.getObject("billing_schedule_id", UUID.class);
+            String desc = rs.getString("line_description");
+            if (bid != null && desc != null && !desc.isBlank()) {
+                out.put(bid, desc.trim());
+            }
+        }, params.toArray());
+        return out;
     }
 }

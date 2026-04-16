@@ -7,7 +7,6 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * Service for export operations.
@@ -62,7 +61,7 @@ public class ExportService {
 
     public byte[] exportDLQ(Boolean resolved, String failureTypeCode, String format) {
         List<io.clubone.billing.api.dto.DLQItemDto> items = dlqRepository.findDLQItems(
-                null, failureTypeCode, resolved, 10000, 0, "created_on", "desc");
+                null, null, failureTypeCode, resolved, 10000, 0, "created_on", "desc");
 
         if ("csv".equalsIgnoreCase(format)) {
             return exportDLQToCSV(items);

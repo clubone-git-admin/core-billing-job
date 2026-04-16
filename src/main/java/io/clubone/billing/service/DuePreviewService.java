@@ -24,6 +24,7 @@ import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * Service for due preview operations. Uses an existing billing_run (request.billRunId), creates only a billing_stage_run
@@ -33,6 +34,7 @@ import java.util.*;
 public class DuePreviewService {
 
     private static final Logger log = LoggerFactory.getLogger(DuePreviewService.class);
+    private static final DateTimeFormatter LINE_CYCLE_DATE_FORMAT = DateTimeFormatter.ofPattern("MMM d", Locale.US);
 
     private final DuePreviewRepository duePreviewRepository;
     private final BillingRunRepository billingRunRepository;
@@ -176,7 +178,8 @@ public class DuePreviewService {
      * Get due preview run details by stage_run_id. Loads run metadata from DB and invoice rows from S3 CSV.
      *
      * @param stageRunId billing_stage_run.stage_run_id (DUE_PREVIEW stage)
-     * @return Map with "run" (run_id, run_code, generated_at, status, filename, invoices, totalAmount, summary_json) and "invoices" (list of row maps from CSV)
+     * @return Map with "run" (run_id, run_code, generated_at, status, filename, invoices, totalAmount, totalTax,
+     *         totalDiscount, summary_json) and "invoices" (list of row maps from CSV, each with {@code line_items})
      */
     public Map<String, Object> getDuePreviewRunDetails(UUID stageRunId) {
         StageRunDto stageRun = stageRunRepository.findById(stageRunId);
@@ -206,6 +209,16 @@ public class DuePreviewService {
         List<Map<String, Object>> invoices = parseDuePreviewCsv(csvContent);
         ensureInvoiceAttributes(invoices);
 
+        Set<UUID> scheduleIds = invoices.stream()
+                .map(row -> parseUuid(row.get("billing_schedule_id")))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        Map<UUID, String> lineDescriptions = duePreviewRepository.findDuePreviewLineDescriptionsByBillingScheduleIds(scheduleIds);
+        attachDuePreviewLineItems(invoices, lineDescriptions);
+
+        BigDecimal totalTaxFromRows = sumNumericColumn(invoices, "tax_amount");
+        BigDecimal totalDiscountFromRows = sumNumericColumn(invoices, "discount_amount");
+
         // Build run object for response
         Object totalAmountObj = summaryJson.get("total_amount");
         BigDecimal totalAmount = totalAmountObj instanceof Number n ? BigDecimal.valueOf(n.doubleValue()) : null;
@@ -216,6 +229,8 @@ public class DuePreviewService {
         if (summaryJson.get("failure_count") == null) {
             summaryJson.put("failure_count", 0);
         }
+        summaryJson.put("total_tax", totalTaxFromRows);
+        summaryJson.put("total_discount", totalDiscountFromRows);
 
         Map<String, Object> run = new LinkedHashMap<>();
         run.put("run_id", stageRun.stageRunId());
@@ -225,6 +240,8 @@ public class DuePreviewService {
         run.put("filename", summaryJson.get("file_name"));
         run.put("invoices", invoicesCount);
         run.put("totalAmount", totalAmount != null ? totalAmount : BigDecimal.ZERO);
+        run.put("totalTax", totalTaxFromRows);
+        run.put("totalDiscount", totalDiscountFromRows);
         run.put("summary_json", summaryJson);
 
         Map<String, Object> response = new LinkedHashMap<>();
@@ -453,6 +470,142 @@ public class DuePreviewService {
         }
     }
 
+    private static BigDecimal sumNumericColumn(List<Map<String, Object>> rows, String columnKey) {
+        if (rows == null || rows.isEmpty()) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal sum = BigDecimal.ZERO;
+        for (Map<String, Object> row : rows) {
+            sum = sum.add(parseCellToBigDecimal(row != null ? row.get(columnKey) : null));
+        }
+        return sum;
+    }
+
+    private static BigDecimal parseCellToBigDecimal(Object value) {
+        if (value == null) {
+            return BigDecimal.ZERO;
+        }
+        if (value instanceof BigDecimal bd) {
+            return bd;
+        }
+        if (value instanceof Number n) {
+            return new BigDecimal(n.toString());
+        }
+        String s = value.toString().trim();
+        if (s.isEmpty()) {
+            return BigDecimal.ZERO;
+        }
+        try {
+            return new BigDecimal(s);
+        } catch (NumberFormatException e) {
+            return BigDecimal.ZERO;
+        }
+    }
+
+    private static UUID parseUuid(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof UUID u) {
+            return u;
+        }
+        try {
+            return UUID.fromString(value.toString().trim());
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private void attachDuePreviewLineItems(List<Map<String, Object>> invoices, Map<UUID, String> descriptionsByScheduleId) {
+        if (invoices == null || invoices.isEmpty()) {
+            return;
+        }
+        for (Map<String, Object> inv : invoices) {
+            UUID scheduleId = parseUuid(inv.get("billing_schedule_id"));
+            String description = scheduleId != null ? descriptionsByScheduleId.get(scheduleId) : null;
+            if (description == null || description.isBlank()) {
+                description = buildFallbackLineDescription(inv);
+            }
+            BigDecimal unitPrice = pickLineUnitPrice(inv);
+            BigDecimal tax = parseCellToBigDecimal(inv.get("tax_amount"));
+            BigDecimal discount = parseCellToBigDecimal(inv.get("discount_amount"));
+            BigDecimal lineTotal = resolveLineTotal(inv, unitPrice, tax, discount);
+
+            Map<String, Object> line = new LinkedHashMap<>();
+            line.put("description", description);
+            line.put("quantity", 1);
+            line.put("unit_price", unitPrice);
+            line.put("tax_amount", tax);
+            line.put("discount_amount", discount);
+            line.put("line_total", lineTotal);
+            inv.put("line_items", List.of(line));
+        }
+    }
+
+    private static String buildFallbackLineDescription(Map<String, Object> inv) {
+        String agreement = inv.get("agreement_name") != null ? inv.get("agreement_name").toString().trim() : "";
+        LocalDate cycle = parseLocalDateCell(inv.get("price_cycle_start"));
+        if (cycle == null) {
+            cycle = parseLocalDateCell(inv.get("payment_due_date"));
+        }
+        String cyclePart;
+        if (cycle != null) {
+            cyclePart = cycle.format(LINE_CYCLE_DATE_FORMAT) + " cycle";
+        } else if (inv.get("cycle_number") != null && !inv.get("cycle_number").toString().isBlank()) {
+            cyclePart = "cycle " + inv.get("cycle_number").toString().trim();
+        } else {
+            cyclePart = "billing cycle";
+        }
+        String emDash = "\u2014";
+        if (!agreement.isEmpty()) {
+            return agreement + " " + emDash + " " + cyclePart;
+        }
+        return "Subscription " + emDash + " " + cyclePart;
+    }
+
+    private static LocalDate parseLocalDateCell(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof LocalDate d) {
+            return d;
+        }
+        String s = value.toString().trim();
+        if (s.isEmpty()) {
+            return null;
+        }
+        try {
+            return LocalDate.parse(s);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static BigDecimal pickLineUnitPrice(Map<String, Object> inv) {
+        BigDecimal eff = parseCellToBigDecimal(inv.get("effective_unit_price"));
+        if (eff.signum() != 0) {
+            return eff;
+        }
+        BigDecimal up = parseCellToBigDecimal(inv.get("unit_price"));
+        if (up.signum() != 0) {
+            return up;
+        }
+        return parseCellToBigDecimal(inv.get("sub_total"));
+    }
+
+    private static BigDecimal resolveLineTotal(Map<String, Object> inv, BigDecimal unitPrice, BigDecimal tax, BigDecimal discount) {
+        BigDecimal baseTotal = parseCellToBigDecimal(inv.get("base_total_amount"));
+        if (baseTotal.signum() != 0) {
+            return baseTotal;
+        }
+        BigDecimal total = parseCellToBigDecimal(inv.get("total_amount"));
+        BigDecimal adjustment = parseCellToBigDecimal(inv.get("adjustment_amount"));
+        if (total.signum() != 0 || adjustment.signum() != 0) {
+            return total.subtract(adjustment);
+        }
+        return unitPrice.add(tax).subtract(discount);
+    }
+
     /**
      * Parse a single CSV line into values (handles quoted fields).
      */
@@ -627,7 +780,7 @@ public class DuePreviewService {
         StringBuilder csv = new StringBuilder();
 
         // CSV Header
-        csv.append("subscription_instance_id,subscription_plan_id,subscription_id,cycle_number,")
+        csv.append("billing_schedule_id,subscription_instance_id,subscription_plan_id,subscription_id,cycle_number,")
                 .append("payment_due_date,start_date,last_billed_on,")
                 .append("client_role_id,role_id,client_first_name,client_last_name,client_email,")
                 .append("client_agreement_id,client_agreement_status,agreement_name,")
@@ -635,11 +788,12 @@ public class DuePreviewService {
                 .append("client_payment_method_id,payment_method_name,payment_type_name,card_last4,")
                 .append("contract_start_date,contract_end_date,")
                 .append("unit_price,effective_unit_price,price_cycle_start,price_cycle_end,")
-                .append("sub_total,tax_amount,discount_amount,total_amount,")
+                .append("sub_total,tax_amount,discount_amount,base_total_amount,adjustment_amount,total_amount,")
                 .append("subscription_instance_status_name,eligible,eligibility_reason\n");
 
         // CSV Rows
         for (Map<String, Object> instance : instances) {
+            csv.append(formatCSVValue(instance.get("billing_schedule_id"))).append(",");
             csv.append(formatCSVValue(instance.get("subscription_instance_id"))).append(",");
             csv.append(formatCSVValue(instance.get("subscription_plan_id"))).append(",");
             csv.append(formatCSVValue(instance.get("subscription_id"))).append(",");
@@ -669,6 +823,8 @@ public class DuePreviewService {
             csv.append(formatCSVValue(instance.get("sub_total"))).append(",");
             csv.append(formatCSVValue(instance.get("tax_amount"))).append(",");
             csv.append(formatCSVValue(instance.get("discount_amount"))).append(",");
+            csv.append(formatCSVValue(instance.get("base_total_amount"))).append(",");
+            csv.append(formatCSVValue(instance.get("adjustment_amount"))).append(",");
             csv.append(formatCSVValue(instance.get("total_amount"))).append(",");
             csv.append(formatCSVValue(instance.get("subscription_instance_status_name"))).append(",");
             csv.append(formatCSVValue(instance.get("eligible"))).append(",");
