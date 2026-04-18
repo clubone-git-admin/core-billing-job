@@ -122,12 +122,16 @@ public class SubscriptionBillingHistoryRepository {
                    TRIM(CONCAT(COALESCE(ch.client_first_name, ''), ' ', COALESCE(ch.client_last_name, ''))) AS client_name,
                    CAST(NULL AS uuid) AS client_id,
                    COALESCE(ca.client_role_id, i.client_role_id) AS client_role_id,
+                   cr.role_id AS role_external_id,
                    COALESCE(a.agreement_name, CAST(sp.subscription_plan_id AS varchar)) AS agreement_or_plan_name,
-                   si.billing_start_date AS billing_period_start,
-                   si.next_billing_date AS billing_period_end,
+                   lcas.name AS agreement_status,
+                   a.agreement_name AS agreement_name,
+                   COALESCE(sbs.billing_period_start, si.billing_start_date) AS billing_period_start,
+                   COALESCE(sbs.billing_period_end, si.next_billing_date) AS billing_period_end,
                    loc.name AS location_name,
                    loc.location_id AS location_id,
                    pt.method_type_name AS payment_method_type,
+                   pgw.name AS gateway_name,
                    mg.client_gateway_mandate_id AS mandate_id,
                    mg.mandate_status AS mandate_status,
                    mg.mandate_start_date AS mandate_valid_from,
@@ -136,10 +140,18 @@ public class SubscriptionBillingHistoryRepository {
                         THEN (mg.mandate_max_amount_minor::numeric / 100.0) END AS mandate_max_amount,
                    CAST(NULL AS timestamptz) AS mandate_last_verified_at,
                    cpm.card_last4 AS payment_last4,
-                   CAST(NULL AS varchar) AS payment_expiry
+                   CAST(NULL AS varchar) AS payment_expiry,
+                   invs.status_name AS invoice_status
             FROM client_subscription_billing.subscription_billing_history h
             LEFT JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id
             LEFT JOIN transactions.invoice i ON i.invoice_id = h.invoice_id
+            LEFT JOIN LATERAL (
+                SELECT sbs0.billing_period_start, sbs0.billing_period_end
+                FROM client_subscription_billing.subscription_billing_schedule sbs0
+                WHERE sbs0.invoice_id = i.invoice_id
+                ORDER BY sbs0.billing_schedule_id ASC NULLS LAST
+                LIMIT 1
+            ) sbs ON true
             LEFT JOIN client_subscription_billing.subscription_instance si
                 ON si.subscription_instance_id = h.subscription_instance_id
             LEFT JOIN client_subscription_billing.subscription_plan sp
@@ -148,14 +160,19 @@ public class SubscriptionBillingHistoryRepository {
                 ON ca.client_agreement_id = COALESCE(sp.client_agreement_id, i.client_agreement_id)
                    AND COALESCE(ca.is_active, true) = true
             LEFT JOIN agreements.agreement a ON a.agreement_id = ca.agreement_id
+            LEFT JOIN client_agreements.lu_client_agreement_status lcas
+                ON lcas.client_agreement_status_id = ca.client_agreement_status_id
             LEFT JOIN clients.client_role cr ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
             LEFT JOIN locations.location loc ON loc.location_id = cr.location_id
             LEFT JOIN client_payments.client_payment_method cpm
                 ON cpm.client_payment_method_id = sp.client_payment_method_id AND COALESCE(cpm.is_active, true) = true
             LEFT JOIN payment_gateway.payment_gateway_supported_method pgsm
                 ON pgsm.payment_gateway_supported_method_id = cpm.payment_gateway_method_type_id
+            LEFT JOIN payment_gateway.payment_gateway pgw
+                ON pgw.payment_gateway_id = pgsm.payment_gateway_id
             LEFT JOIN payment_gateway.lu_payment_gateway_method_type pt
                 ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id
+            LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id
             LEFT JOIN LATERAL (
                 SELECT cgm.client_gateway_mandate_id,
                        lgs.code AS mandate_status,
@@ -230,24 +247,36 @@ public class SubscriptionBillingHistoryRepository {
                 h.simulated_on,
                 s.status_code AS billing_status_code,
                 i.invoice_number,
-                CAST(NULL AS varchar) AS client_name,
+                TRIM(CONCAT(COALESCE(ch.client_first_name, ''), ' ', COALESCE(ch.client_last_name, ''))) AS client_name,
                 CAST(NULL AS uuid) AS client_id,
-                i.client_role_id AS client_role_id,
-                CAST(NULL AS varchar) AS agreement_or_plan_name,
-                CAST(NULL AS date) AS billing_period_start,
-                CAST(NULL AS date) AS billing_period_end,
-                CAST(NULL AS varchar) AS location_name,
-                CAST(NULL AS uuid) AS location_id,
-                CAST(NULL AS varchar) AS payment_method_type,
+                COALESCE(ca.client_role_id, i.client_role_id) AS client_role_id,
+                cr.role_id AS role_external_id,
+                COALESCE(a.agreement_name, CAST(sp.subscription_plan_id AS varchar)) AS agreement_or_plan_name,
+                lcas.name AS agreement_status,
+                a.agreement_name AS agreement_name,
+                COALESCE(sbs.billing_period_start, si.billing_start_date) AS billing_period_start,
+                COALESCE(sbs.billing_period_end, si.next_billing_date) AS billing_period_end,
+                loc.name AS location_name,
+                loc.location_id AS location_id,
+                pt.method_type_name AS payment_method_type,
+                pgw.name AS gateway_name,
                 CAST(NULL AS uuid) AS mandate_id,
                 CAST(NULL AS varchar) AS mandate_status,
                 CAST(NULL AS timestamptz) AS mandate_valid_from,
                 CAST(NULL AS timestamptz) AS mandate_valid_to,
                 CAST(NULL AS numeric) AS mandate_max_amount,
                 CAST(NULL AS timestamptz) AS mandate_last_verified_at,
-                CAST(NULL AS varchar) AS payment_last4,
-                CAST(NULL AS varchar) AS payment_expiry
+                cpm.card_last4 AS payment_last4,
+                CAST(NULL AS varchar) AS payment_expiry,
+                invs.status_name AS invoice_status
             FROM transactions.invoice i
+            LEFT JOIN LATERAL (
+                SELECT sbs0.billing_period_start, sbs0.billing_period_end
+                FROM client_subscription_billing.subscription_billing_schedule sbs0
+                WHERE sbs0.invoice_id = i.invoice_id
+                ORDER BY sbs0.billing_schedule_id ASC NULLS LAST
+                LIMIT 1
+            ) sbs ON true
             LEFT JOIN LATERAL (
                 SELECT h2.*
                 FROM client_subscription_billing.subscription_billing_history h2
@@ -266,6 +295,42 @@ public class SubscriptionBillingHistoryRepository {
                 ORDER BY ie.created_on ASC NULLS LAST
                 LIMIT 1
             ) ie ON true
+            LEFT JOIN client_subscription_billing.subscription_instance si
+                ON si.subscription_instance_id = ie.subscription_instance_id
+            LEFT JOIN client_subscription_billing.subscription_plan sp
+                ON sp.subscription_plan_id = si.subscription_plan_id AND COALESCE(sp.is_active, true) = true
+            LEFT JOIN client_agreements.client_agreement ca
+                ON ca.client_agreement_id = COALESCE(sp.client_agreement_id, i.client_agreement_id)
+                   AND COALESCE(ca.is_active, true) = true
+            LEFT JOIN agreements.agreement a ON a.agreement_id = ca.agreement_id
+            LEFT JOIN client_agreements.lu_client_agreement_status lcas
+                ON lcas.client_agreement_status_id = ca.client_agreement_status_id
+            LEFT JOIN clients.client_role cr ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
+            LEFT JOIN locations.location loc ON loc.location_id = cr.location_id
+            LEFT JOIN client_payments.client_payment_method cpm
+                ON cpm.client_payment_method_id = sp.client_payment_method_id AND COALESCE(cpm.is_active, true) = true
+            LEFT JOIN payment_gateway.payment_gateway_supported_method pgsm
+                ON pgsm.payment_gateway_supported_method_id = cpm.payment_gateway_method_type_id
+            LEFT JOIN payment_gateway.payment_gateway pgw
+                ON pgw.payment_gateway_id = pgsm.payment_gateway_id
+            LEFT JOIN payment_gateway.lu_payment_gateway_method_type pt
+                ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id
+            LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id
+            LEFT JOIN LATERAL (
+                SELECT
+                    MAX(CASE WHEN cct.name = 'First Name' AND COALESCE(cc.is_active, true) = true
+                        AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                        THEN cc.characteristic END) AS client_first_name,
+                    MAX(CASE WHEN cct.name = 'Last Name' AND COALESCE(cc.is_active, true) = true
+                        AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                        THEN cc.characteristic END) AS client_last_name
+                FROM clients.client_characteristic cc
+                INNER JOIN clients.client_characteristic_type cct
+                    ON cct.client_characteristic_type_id = cc.client_characteristic_type_id
+                    AND cct.name IN ('First Name', 'Last Name')
+                    AND COALESCE(cct.is_active, true) = true
+                WHERE cc.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
+            ) ch ON true
             WHERE i.billing_run_id = ?::uuid
               AND COALESCE(i.is_active, true) = true
             ORDER BY i.created_on DESC NULLS LAST
@@ -319,24 +384,36 @@ public class SubscriptionBillingHistoryRepository {
                 h.simulated_on,
                 s.status_code AS billing_status_code,
                 i.invoice_number,
-                CAST(NULL AS varchar) AS client_name,
+                TRIM(CONCAT(COALESCE(ch.client_first_name, ''), ' ', COALESCE(ch.client_last_name, ''))) AS client_name,
                 CAST(NULL AS uuid) AS client_id,
-                i.client_role_id AS client_role_id,
-                CAST(NULL AS varchar) AS agreement_or_plan_name,
-                CAST(NULL AS date) AS billing_period_start,
-                CAST(NULL AS date) AS billing_period_end,
-                CAST(NULL AS varchar) AS location_name,
-                CAST(NULL AS uuid) AS location_id,
-                CAST(NULL AS varchar) AS payment_method_type,
+                COALESCE(ca.client_role_id, i.client_role_id) AS client_role_id,
+                cr.role_id AS role_external_id,
+                COALESCE(a.agreement_name, CAST(sp.subscription_plan_id AS varchar)) AS agreement_or_plan_name,
+                lcas.name AS agreement_status,
+                a.agreement_name AS agreement_name,
+                COALESCE(sbs.billing_period_start, si.billing_start_date) AS billing_period_start,
+                COALESCE(sbs.billing_period_end, si.next_billing_date) AS billing_period_end,
+                loc.name AS location_name,
+                loc.location_id AS location_id,
+                pt.method_type_name AS payment_method_type,
+                pgw.name AS gateway_name,
                 CAST(NULL AS uuid) AS mandate_id,
                 CAST(NULL AS varchar) AS mandate_status,
                 CAST(NULL AS timestamptz) AS mandate_valid_from,
                 CAST(NULL AS timestamptz) AS mandate_valid_to,
                 CAST(NULL AS numeric) AS mandate_max_amount,
                 CAST(NULL AS timestamptz) AS mandate_last_verified_at,
-                CAST(NULL AS varchar) AS payment_last4,
-                CAST(NULL AS varchar) AS payment_expiry
+                cpm.card_last4 AS payment_last4,
+                CAST(NULL AS varchar) AS payment_expiry,
+                invs.status_name AS invoice_status
             FROM transactions.invoice i
+            LEFT JOIN LATERAL (
+                SELECT sbs0.billing_period_start, sbs0.billing_period_end
+                FROM client_subscription_billing.subscription_billing_schedule sbs0
+                WHERE sbs0.invoice_id = i.invoice_id
+                ORDER BY sbs0.billing_schedule_id ASC NULLS LAST
+                LIMIT 1
+            ) sbs ON true
             LEFT JOIN LATERAL (
                 SELECT h2.*
                 FROM client_subscription_billing.subscription_billing_history h2
@@ -355,6 +432,42 @@ public class SubscriptionBillingHistoryRepository {
                 ORDER BY ie.created_on ASC NULLS LAST
                 LIMIT 1
             ) ie ON true
+            LEFT JOIN client_subscription_billing.subscription_instance si
+                ON si.subscription_instance_id = ie.subscription_instance_id
+            LEFT JOIN client_subscription_billing.subscription_plan sp
+                ON sp.subscription_plan_id = si.subscription_plan_id AND COALESCE(sp.is_active, true) = true
+            LEFT JOIN client_agreements.client_agreement ca
+                ON ca.client_agreement_id = COALESCE(sp.client_agreement_id, i.client_agreement_id)
+                   AND COALESCE(ca.is_active, true) = true
+            LEFT JOIN agreements.agreement a ON a.agreement_id = ca.agreement_id
+            LEFT JOIN client_agreements.lu_client_agreement_status lcas
+                ON lcas.client_agreement_status_id = ca.client_agreement_status_id
+            LEFT JOIN clients.client_role cr ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
+            LEFT JOIN locations.location loc ON loc.location_id = cr.location_id
+            LEFT JOIN client_payments.client_payment_method cpm
+                ON cpm.client_payment_method_id = sp.client_payment_method_id AND COALESCE(cpm.is_active, true) = true
+            LEFT JOIN payment_gateway.payment_gateway_supported_method pgsm
+                ON pgsm.payment_gateway_supported_method_id = cpm.payment_gateway_method_type_id
+            LEFT JOIN payment_gateway.payment_gateway pgw
+                ON pgw.payment_gateway_id = pgsm.payment_gateway_id
+            LEFT JOIN payment_gateway.lu_payment_gateway_method_type pt
+                ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id
+            LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id
+            LEFT JOIN LATERAL (
+                SELECT
+                    MAX(CASE WHEN cct.name = 'First Name' AND COALESCE(cc.is_active, true) = true
+                        AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                        THEN cc.characteristic END) AS client_first_name,
+                    MAX(CASE WHEN cct.name = 'Last Name' AND COALESCE(cc.is_active, true) = true
+                        AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                        THEN cc.characteristic END) AS client_last_name
+                FROM clients.client_characteristic cc
+                INNER JOIN clients.client_characteristic_type cct
+                    ON cct.client_characteristic_type_id = cc.client_characteristic_type_id
+                    AND cct.name IN ('First Name', 'Last Name')
+                    AND COALESCE(cct.is_active, true) = true
+                WHERE cc.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
+            ) ch ON true
             WHERE i.billing_run_id = ?::uuid
               AND COALESCE(i.is_active, true) = true
               AND i.invoice_id IN ("""
@@ -478,7 +591,20 @@ public class SubscriptionBillingHistoryRepository {
                 toOffsetUtc(rs.getTimestamp("mandate_last_verified_at")),
                 rs.getString("payment_last4"),
                 rs.getString("payment_expiry"),
-                simulatedOn);
+                simulatedOn,
+                objectToTrimmedString(rs.getObject("role_external_id")),
+                blankToNull(rs.getString("agreement_status")),
+                blankToNull(rs.getString("agreement_name")),
+                blankToNull(rs.getString("gateway_name")),
+                blankToNull(rs.getString("invoice_status")));
+    }
+
+    private static String objectToTrimmedString(Object value) {
+        if (value == null) {
+            return null;
+        }
+        String s = value.toString().trim();
+        return s.isEmpty() ? null : s;
     }
 
     private static String blankToNull(String s) {

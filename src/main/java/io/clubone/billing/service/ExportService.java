@@ -119,11 +119,12 @@ public class ExportService {
 
     private byte[] exportDLQToCSV(List<io.clubone.billing.api.dto.DLQItemDto> items) {
         StringBuilder csv = new StringBuilder();
-        csv.append("dlq_id,billing_run_code,invoice_number,error_type,error_message,resolved,created_on\n");
+        csv.append("dlq_id,dlq_code,billing_run_code,invoice_number,error_type,error_message,resolved,created_on\n");
 
         for (io.clubone.billing.api.dto.DLQItemDto item : items) {
-            csv.append(String.format("%s,%s,%s,%s,%s,%s,%s\n",
+            csv.append(String.format("%s,%s,%s,%s,%s,%s,%s,%s\n",
                     item.dlqId(),
+                    item.dlqCode() != null ? item.dlqCode() : "",
                     item.billingRunCode() != null ? item.billingRunCode() : "",
                     item.invoiceNumber() != null ? item.invoiceNumber() : "",
                     item.errorType(),

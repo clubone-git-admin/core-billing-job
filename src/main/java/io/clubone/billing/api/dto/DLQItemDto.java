@@ -1,6 +1,7 @@
 package io.clubone.billing.api.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.time.OffsetDateTime;
 import java.util.Map;
@@ -12,6 +13,8 @@ import java.util.UUID;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record DLQItemDto(
     UUID dlqId,
+    @JsonProperty("dlq_code")
+    String dlqCode,
     UUID billingRunId,
     String billingRunCode,
     UUID stageRunId,

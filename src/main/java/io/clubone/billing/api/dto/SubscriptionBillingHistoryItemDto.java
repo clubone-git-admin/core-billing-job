@@ -53,6 +53,15 @@ public record SubscriptionBillingHistoryItemDto(
         OffsetDateTime mandateLastVerifiedAt,
         String paymentLast4,
         String paymentExpiry,
-        OffsetDateTime simulatedOn
+        OffsetDateTime simulatedOn,
+        /** {@code clients.client_role.role_id} (business role identifier), distinct from {@code client_role_id}. */
+        String roleId,
+        String agreementStatus,
+        /** Agreement product name from {@code agreements.agreement}; may duplicate {@link #agreementOrPlanName} when agreement-backed. */
+        String agreementName,
+        /** Payment processor / gateway display (e.g. Stripe), when linked from {@code payment_gateway_supported_method}. */
+        String gatewayName,
+        /** {@code transactions.lu_invoice_status.status_name} (e.g. PENDING, DUE). */
+        String invoiceStatus
 ) {
 }

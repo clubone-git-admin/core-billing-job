@@ -3,6 +3,7 @@ package io.clubone.billing.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.clubone.billing.api.dto.*;
+import io.clubone.billing.repo.AuditLogRepository;
 import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.InvoiceRepository;
 import io.clubone.billing.repo.StageRunRepository;
@@ -36,6 +37,7 @@ public class InvoiceGenerationService {
     private final InvoiceRepository invoiceRepository;
     private final ObjectMapper objectMapper;
     private final ApplicationEventPublisher applicationEventPublisher;
+    private final AuditLogRepository auditLogRepository;
 
     public InvoiceGenerationService(
             StageRunRepository stageRunRepository,
@@ -44,7 +46,8 @@ public class InvoiceGenerationService {
             SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository,
             InvoiceRepository invoiceRepository,
             ObjectMapper objectMapper,
-            ApplicationEventPublisher applicationEventPublisher) {
+            ApplicationEventPublisher applicationEventPublisher,
+            AuditLogRepository auditLogRepository) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
         this.billingRunService = billingRunService;
@@ -52,6 +55,17 @@ public class InvoiceGenerationService {
         this.invoiceRepository = invoiceRepository;
         this.objectMapper = objectMapper;
         this.applicationEventPublisher = applicationEventPublisher;
+        this.auditLogRepository = auditLogRepository;
+    }
+
+    private void auditInvoiceGenerationStage(String action, UUID stageRunId, String userId, Map<String, Object> details) {
+        String actor = (userId != null && !userId.isBlank()) ? userId : "system";
+        Map<String, Object> payload = details != null ? new LinkedHashMap<>(details) : new LinkedHashMap<>();
+        auditLogRepository.insertAuditLog("INVOICE_GENERATION", "STAGE_RUN", stageRunId, action, actor, payload);
+    }
+
+    private static String actorFromTriggeredBy(UUID triggeredBy) {
+        return triggeredBy != null ? triggeredBy.toString() : "system";
     }
 
     /**
@@ -123,6 +137,11 @@ public class InvoiceGenerationService {
             log.info("invoice-generation: stage already RUNNING — publishing async job so generation can complete: stageRunId={}",
                     target.stageRunId());
             applicationEventPublisher.publishEvent(new InvoiceGenerationQueuedEvent(target.stageRunId()));
+            auditInvoiceGenerationStage(
+                    "JOB_REPUBLISHED",
+                    target.stageRunId(),
+                    actorFromTriggeredBy(request.triggeredBy()),
+                    Map.of("billing_run_id", billingRunId.toString(), "prior_status", "RUNNING"));
             return new InvoiceGenerationCommandResult(
                     toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
                     InvoiceGenerationStartHttpStatus.OK_200);
@@ -136,6 +155,11 @@ public class InvoiceGenerationService {
             log.info("invoice-generation: stage {} — republishing job in case prior worker did not run: stageRunId={}",
                     status, target.stageRunId());
             applicationEventPublisher.publishEvent(new InvoiceGenerationQueuedEvent(target.stageRunId()));
+            auditInvoiceGenerationStage(
+                    "JOB_REPUBLISHED",
+                    target.stageRunId(),
+                    actorFromTriggeredBy(request.triggeredBy()),
+                    Map.of("billing_run_id", billingRunId.toString(), "prior_status", status));
             return new InvoiceGenerationCommandResult(
                     toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
                     InvoiceGenerationStartHttpStatus.OK_200);
@@ -211,6 +235,18 @@ public class InvoiceGenerationService {
         log.info("invoice-generation enqueued: stageRunId={} billingRunId={} queuedStatusInDb={} (false means use PENDING until worker)",
                 stageRunId, billingRun.billingRunId(), queuedStatusApplied);
         applicationEventPublisher.publishEvent(new InvoiceGenerationQueuedEvent(stageRunId));
+        String actor = "system";
+        if (fresh != null && fresh.summaryJson() != null && fresh.summaryJson().get("triggered_by") != null) {
+            actor = String.valueOf(fresh.summaryJson().get("triggered_by")).trim();
+            if (actor.isEmpty()) {
+                actor = "system";
+            }
+        }
+        Map<String, Object> auditDetails = new LinkedHashMap<>();
+        auditDetails.put("billing_run_id", billingRun.billingRunId().toString());
+        auditDetails.put("queued_at", m.get("queued_at"));
+        auditDetails.put("queued_status_applied", queuedStatusApplied);
+        auditInvoiceGenerationStage("ENQUEUED", stageRunId, actor, auditDetails);
         return new InvoiceGenerationCommandResult(
                 toRunResponse(stageRunRepository.findById(stageRunId), billingRun),
                 InvoiceGenerationStartHttpStatus.ACCEPTED_202);
@@ -499,6 +535,14 @@ public class InvoiceGenerationService {
             reason = reason + " (by " + request.requestedBy() + ")";
         }
         stageRunRepository.cancelStageRun(invoiceGenerationRunId, reason);
+        String cancelActor = request != null && request.requestedBy() != null
+                ? request.requestedBy().toString()
+                : "system";
+        auditInvoiceGenerationStage(
+                "CANCELLED",
+                invoiceGenerationRunId,
+                cancelActor,
+                Map.of("billing_run_id", stage.billingRunId().toString(), "reason", reason));
         BillingRunDto br = billingRunRepository.findById(stage.billingRunId());
         return toRunResponse(stageRunRepository.findById(invoiceGenerationRunId), br);
     }
@@ -726,6 +770,18 @@ public class InvoiceGenerationService {
                 invoiceGenStage.stageRunId(),
                 transitioned,
                 request.lockedBy());
+        Map<String, Object> lockAudit = new LinkedHashMap<>();
+        lockAudit.put("billing_run_id", billingRunId.toString());
+        lockAudit.put("invoices_pending_to_due_count", transitioned);
+        lockAudit.put("invoices_locked_at", lockedAt.toString());
+        if (request.notes() != null && !request.notes().isBlank()) {
+            lockAudit.put("notes", request.notes());
+        }
+        auditInvoiceGenerationStage(
+                "INVOICES_LOCKED",
+                invoiceGenStage.stageRunId(),
+                request.lockedBy().toString(),
+                lockAudit);
         return billingRunService.getBillingRun(billingRunId);
     }
 

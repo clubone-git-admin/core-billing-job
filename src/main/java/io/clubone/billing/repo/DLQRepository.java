@@ -33,7 +33,7 @@ public class DLQRepository {
             Integer limit, Integer offset, String sortBy, String sortOrder) {
 
         StringBuilder sql = new StringBuilder("""
-            SELECT dlq.dlq_id, dlq.billing_run_id, dlq.stage_run_id, dlq.invoice_id,
+            SELECT dlq.dlq_id, dlq.dlq_code, dlq.billing_run_id, dlq.stage_run_id, dlq.invoice_id,
                    dlq.subscription_instance_id, dlq.error_type, dlq.error_message,
                    dlq.error_stack_trace, dlq.work_item_json, dlq.created_on,
                    dlq.retry_count, dlq.last_retry_on, dlq.resolved, dlq.resolved_on,
@@ -118,7 +118,7 @@ public class DLQRepository {
      */
     public DLQItemDto findById(UUID dlqId) {
         String sql = """
-            SELECT dlq.dlq_id, dlq.billing_run_id, dlq.stage_run_id, dlq.invoice_id,
+            SELECT dlq.dlq_id, dlq.dlq_code, dlq.billing_run_id, dlq.stage_run_id, dlq.invoice_id,
                    dlq.subscription_instance_id, dlq.error_type, dlq.error_message,
                    dlq.error_stack_trace, dlq.work_item_json, dlq.created_on,
                    dlq.retry_count, dlq.last_retry_on, dlq.resolved, dlq.resolved_on,
@@ -175,6 +175,7 @@ public class DLQRepository {
 
     private DLQItemDto mapDLQItem(java.sql.ResultSet rs) throws java.sql.SQLException {
         UUID dlqId = (UUID) rs.getObject("dlq_id");
+        String dlqCode = rs.getString("dlq_code");
         UUID billingRunId = (UUID) rs.getObject("billing_run_id");
         String billingRunCode = rs.getString("billing_run_code");
         UUID stageRunId = (UUID) rs.getObject("stage_run_id");
@@ -224,7 +225,7 @@ public class DLQRepository {
         }
 
         return new DLQItemDto(
-                dlqId, billingRunId, billingRunCode, stageRunId, stageRunCode,
+                dlqId, dlqCode, billingRunId, billingRunCode, stageRunId, stageRunCode,
                 invoiceId, invoiceNumber, subscriptionInstanceId, errorType,
                 errorMessage, errorStackTrace, failureType, workItemJson,
                 createdOn, retryCount, lastRetryOn, resolved, resolvedOn,

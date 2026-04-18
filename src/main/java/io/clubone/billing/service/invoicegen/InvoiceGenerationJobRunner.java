@@ -2,6 +2,7 @@ package io.clubone.billing.service.invoicegen;
 
 import io.clubone.billing.api.dto.BillingRunDto;
 import io.clubone.billing.api.dto.StageRunDto;
+import io.clubone.billing.repo.AuditLogRepository;
 import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.DuePreviewRepository;
 import io.clubone.billing.repo.InvoiceGenerationRepository;
@@ -15,6 +16,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -40,16 +42,19 @@ public class InvoiceGenerationJobRunner {
     private final BillingRunRepository billingRunRepository;
     private final DuePreviewRepository duePreviewRepository;
     private final InvoiceGenerationRepository invoiceGenerationRepository;
+    private final AuditLogRepository auditLogRepository;
 
     public InvoiceGenerationJobRunner(
             StageRunRepository stageRunRepository,
             BillingRunRepository billingRunRepository,
             DuePreviewRepository duePreviewRepository,
-            InvoiceGenerationRepository invoiceGenerationRepository) {
+            InvoiceGenerationRepository invoiceGenerationRepository,
+            AuditLogRepository auditLogRepository) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
         this.duePreviewRepository = duePreviewRepository;
         this.invoiceGenerationRepository = invoiceGenerationRepository;
+        this.auditLogRepository = auditLogRepository;
     }
 
     @Transactional
@@ -248,10 +253,31 @@ public class InvoiceGenerationJobRunner {
             }
             log.info("Invoice generation job finished (stage WAITING until lock): stageRunId={} billingRunId={} invoicesCreated={} failed={} skippedIneligible={} skippedNoClientRole={} schedulesLinked={} invoiceEntityLines={} totalAmount={}",
                     stageRunId, billingRunId, created, failed, skippedIneligible, skippedNoClientRole, schedulesLinked, invoiceEntityLines, totalAmount);
+            String actor = "system";
+            if (merged.get("triggered_by") != null) {
+                actor = String.valueOf(merged.get("triggered_by")).trim();
+                if (actor.isEmpty()) {
+                    actor = "system";
+                }
+            }
+            Map<String, Object> okAudit = new LinkedHashMap<>();
+            okAudit.put("billing_run_id", billingRunId.toString());
+            okAudit.put("invoices_created", created);
+            okAudit.put("failure_count", failed);
+            okAudit.put("candidate_rows", candidates.size());
+            okAudit.put("total_amount", totalAmount != null ? totalAmount.toPlainString() : null);
+            auditLogRepository.insertAuditLog(
+                    "INVOICE_GENERATION", "STAGE_RUN", stageRunId, "DRAFTS_GENERATED", actor, okAudit);
         } catch (Exception e) {
             log.error("Invoice generation failed: stageRunId={} billingRunId={}",
                     stageRunId, billingRunId, e);
             stageRunRepository.failStageRun(stageRunId, e.getMessage(), Map.of("exception", e.getClass().getName()));
+            Map<String, Object> failAudit = new LinkedHashMap<>();
+            failAudit.put("billing_run_id", billingRunId != null ? billingRunId.toString() : null);
+            failAudit.put("error_message", e.getMessage());
+            failAudit.put("exception", e.getClass().getName());
+            auditLogRepository.insertAuditLog(
+                    "INVOICE_GENERATION", "STAGE_RUN", stageRunId, "GENERATION_FAILED", "system", failAudit);
         }
     }
 }
