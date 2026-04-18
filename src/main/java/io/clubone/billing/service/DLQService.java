@@ -3,6 +3,7 @@ package io.clubone.billing.service;
 import io.clubone.billing.api.dto.DLQItemDto;
 import io.clubone.billing.api.dto.PageResponse;
 import io.clubone.billing.repo.DLQRepository;
+import io.clubone.billing.service.invoicegen.InvoiceGenerationStageDlqSummaryService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -19,19 +20,23 @@ public class DLQService {
     private static final Logger log = LoggerFactory.getLogger(DLQService.class);
 
     private final DLQRepository dlqRepository;
+    private final InvoiceGenerationStageDlqSummaryService invoiceGenerationStageDlqSummaryService;
 
-    public DLQService(DLQRepository dlqRepository) {
+    public DLQService(
+            DLQRepository dlqRepository,
+            InvoiceGenerationStageDlqSummaryService invoiceGenerationStageDlqSummaryService) {
         this.dlqRepository = dlqRepository;
+        this.invoiceGenerationStageDlqSummaryService = invoiceGenerationStageDlqSummaryService;
     }
 
     public PageResponse<DLQItemDto> listDLQItems(
-            UUID billingRunId, UUID stageRunId, String failureTypeCode, Boolean resolved,
+            UUID billingRunId, UUID stageRunId, String failureTypeCode, String errorType, Boolean resolved,
             Integer limit, Integer offset, String sortBy, String sortOrder) {
 
         List<DLQItemDto> items = dlqRepository.findDLQItems(
-                billingRunId, stageRunId, failureTypeCode, resolved, limit, offset, sortBy, sortOrder);
+                billingRunId, stageRunId, failureTypeCode, errorType, resolved, limit, offset, sortBy, sortOrder);
 
-        Integer total = dlqRepository.countDLQItems(billingRunId, stageRunId, failureTypeCode, resolved);
+        Integer total = dlqRepository.countDLQItems(billingRunId, stageRunId, failureTypeCode, errorType, resolved);
 
         return PageResponse.of(items, total, limit, offset);
     }
@@ -63,6 +68,10 @@ public class DLQService {
         String resolutionNotes = (String) request.getOrDefault("resolution_notes", "");
 
         dlqRepository.resolve(dlqId, resolvedBy, resolutionNotes);
+
+        if (item.stageRunId() != null) {
+            invoiceGenerationStageDlqSummaryService.refreshDlqSnapshotOnStageRun(item.stageRunId());
+        }
 
         return dlqRepository.findById(dlqId);
     }

@@ -329,7 +329,11 @@ public class InvoiceGenerationService {
     private InvoiceGenerationListItemDto toListItem(StageRunDto s) {
         Map<String, Object> sj = s.summaryJson();
         Integer invoicesCreated = intVal(sj, "invoicesCreated", "successCount");
-        Integer failureCount = intVal(sj, "failureCount", "invoicesFailed");
+        // Prefer live open-DLQ count (updated on resolve/retry); else historical job failureCount
+        Integer failureCount = intVal(sj, "invoice_generation_unresolved_dlq_count");
+        if (failureCount == null) {
+            failureCount = intVal(sj, "failureCount", "invoicesFailed");
+        }
         BigDecimal totalAmount = decimalVal(sj, "totalAmount", "grandTotal");
         return new InvoiceGenerationListItemDto(
                 s.stageRunId(),
@@ -507,7 +511,10 @@ public class InvoiceGenerationService {
         Integer total = intVal(sj, "totalWorkItems", "totalCount");
         Integer processed = intVal(sj, "processedWorkItems", "processedCount");
         Integer created = intVal(sj, "invoicesCreated", "successCount");
-        Integer failed = intVal(sj, "invoicesFailed", "failureCount");
+        Integer failed = intVal(sj, "invoice_generation_unresolved_dlq_count");
+        if (failed == null) {
+            failed = intVal(sj, "invoicesFailed", "failureCount");
+        }
         Double pct = null;
         if (total != null && total > 0 && processed != null) {
             pct = 100.0 * processed / total;

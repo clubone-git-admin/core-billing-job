@@ -5,7 +5,6 @@ import io.clubone.billing.api.dto.StageRunDto;
 import io.clubone.billing.repo.AuditLogRepository;
 import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.DuePreviewRepository;
-import io.clubone.billing.repo.InvoiceGenerationRepository;
 import io.clubone.billing.repo.StageRunRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,7 +19,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -41,20 +39,26 @@ public class InvoiceGenerationJobRunner {
     private final StageRunRepository stageRunRepository;
     private final BillingRunRepository billingRunRepository;
     private final DuePreviewRepository duePreviewRepository;
-    private final InvoiceGenerationRepository invoiceGenerationRepository;
     private final AuditLogRepository auditLogRepository;
+    private final InvoiceGenerationDraftLineProcessor draftLineProcessor;
+    private final InvoiceGenerationDraftDlqRecorder draftDlqRecorder;
+    private final InvoiceGenerationStageDlqSummaryService invoiceGenerationStageDlqSummaryService;
 
     public InvoiceGenerationJobRunner(
             StageRunRepository stageRunRepository,
             BillingRunRepository billingRunRepository,
             DuePreviewRepository duePreviewRepository,
-            InvoiceGenerationRepository invoiceGenerationRepository,
-            AuditLogRepository auditLogRepository) {
+            AuditLogRepository auditLogRepository,
+            InvoiceGenerationDraftLineProcessor draftLineProcessor,
+            InvoiceGenerationDraftDlqRecorder draftDlqRecorder,
+            InvoiceGenerationStageDlqSummaryService invoiceGenerationStageDlqSummaryService) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
         this.duePreviewRepository = duePreviewRepository;
-        this.invoiceGenerationRepository = invoiceGenerationRepository;
         this.auditLogRepository = auditLogRepository;
+        this.draftLineProcessor = draftLineProcessor;
+        this.draftDlqRecorder = draftDlqRecorder;
+        this.invoiceGenerationStageDlqSummaryService = invoiceGenerationStageDlqSummaryService;
     }
 
     @Transactional
@@ -90,194 +94,164 @@ public class InvoiceGenerationJobRunner {
         }
 
         UUID billingRunId = s.billingRunId();
+        Map<String, Object> merged = new HashMap<>();
+        if (s.summaryJson() != null) {
+            merged.putAll(s.summaryJson());
+        }
+
+        int created = 0;
+        int failed = 0;
+        int skippedIneligible = 0;
+        int skippedNoClientRole = 0;
+        int schedulesLinked = 0;
+        int invoiceEntityLines = 0;
+        int scheduleLinkMiss = 0;
+        int entityLineMiss = 0;
+        BigDecimal totalAmount = BigDecimal.ZERO;
+        List<String> invoiceIds = new ArrayList<>();
+        Set<String> purchaseSnapshotIdsUsed = new LinkedHashSet<>();
+        List<Map<String, Object>> candidates = List.of();
+        boolean jobLevelIssue = false;
+
         try {
             BillingRunDto billingRun = billingRunRepository.findById(billingRunId);
             if (billingRun == null) {
-                throw new IllegalStateException("Billing run not found: " + billingRunId);
-            }
-            LocalDate dueDate = billingRun.dueDate();
-            if (dueDate == null) {
-                throw new IllegalStateException("Billing run has no due_date; cannot resolve due subscriptions");
-            }
-            UUID locationId = billingRun.locationId();
-
-            List<Map<String, Object>> candidates = duePreviewRepository.getDueInvoicesForPreview(dueDate, locationId);
-            log.info("Invoice generation: due subscription rows for billingRunId={} dueDate={} locationId={} count={}",
-                    billingRunId, dueDate, locationId, candidates.size());
-
-            int created = 0;
-            int failed = 0;
-            int skippedIneligible = 0;
-            int skippedNoClientRole = 0;
-            int schedulesLinked = 0;
-            int invoiceEntityLines = 0;
-            int scheduleLinkMiss = 0;
-            int entityLineMiss = 0;
-            BigDecimal totalAmount = BigDecimal.ZERO;
-            List<String> invoiceIds = new ArrayList<>();
-            Set<String> purchaseSnapshotIdsUsed = new LinkedHashSet<>();
-
-            for (Map<String, Object> row : candidates) {
-                UUID subscriptionInstanceId = (UUID) row.get("subscription_instance_id");
-                if (subscriptionInstanceId == null) {
-                    failed++;
-                    continue;
-                }
-                if (!duePreviewRepository.isEligible(subscriptionInstanceId, dueDate)) {
-                    skippedIneligible++;
-                    continue;
-                }
-                UUID clientRoleId = (UUID) row.get("client_role_id");
-                if (clientRoleId == null) {
-                    skippedNoClientRole++;
-                    log.warn("Invoice generation: skip row (no client_role_id) subscriptionInstanceId={}", subscriptionInstanceId);
-                    continue;
-                }
-                UUID clientAgreementId = (UUID) row.get("client_agreement_id");
-                UUID subscriptionPlanId = (UUID) row.get("subscription_plan_id");
-                UUID purchaseSnapshotId = (UUID) row.get("subscription_purchase_snapshot_id");
-                Integer cycleNumber = (Integer) row.get("cycle_number");
-                LocalDate paymentDueDate = (LocalDate) row.get("payment_due_date");
-                BigDecimal subTotal = (BigDecimal) row.getOrDefault("sub_total", BigDecimal.ZERO);
-                BigDecimal taxAmount = (BigDecimal) row.getOrDefault("tax_amount", BigDecimal.ZERO);
-                BigDecimal discountAmount = (BigDecimal) row.getOrDefault("discount_amount", BigDecimal.ZERO);
-                BigDecimal total = (BigDecimal) row.getOrDefault("total_amount", subTotal);
-
-                try {
-                    UUID invoiceId = invoiceGenerationRepository.insertDraftInvoice(
-                            clientRoleId,
-                            clientAgreementId,
-                            billingRunId,
-                            subTotal,
-                            taxAmount,
-                            discountAmount,
-                            total);
-                    if (invoiceId != null) {
-                        created++;
-                        totalAmount = totalAmount.add(total != null ? total : BigDecimal.ZERO);
-                        invoiceIds.add(invoiceId.toString());
-                        if (purchaseSnapshotId != null) {
-                            purchaseSnapshotIdsUsed.add(purchaseSnapshotId.toString());
-                        }
-
+                IllegalStateException ex = new IllegalStateException("Billing run not found: " + billingRunId);
+                draftDlqRecorder.recordJobLevelFailure(billingRunId, stageRunId, "BILLING_RUN_MISSING", ex);
+                merged.put("billing_run_missing", true);
+                merged.put("job_level_error", ex.getMessage());
+                jobLevelIssue = true;
+            } else {
+                LocalDate dueDate = billingRun.dueDate();
+                if (dueDate == null) {
+                    IllegalStateException ex = new IllegalStateException("Billing run has no due_date; cannot resolve due subscriptions");
+                    draftDlqRecorder.recordJobLevelFailure(billingRunId, stageRunId, "DUE_DATE_MISSING", ex);
+                    merged.put("due_date_missing", true);
+                    merged.put("job_level_error", ex.getMessage());
+                    jobLevelIssue = true;
+                } else {
+                    UUID locationId = billingRun.locationId();
+                    try {
+                        candidates = duePreviewRepository.getDueInvoicesForPreview(dueDate, locationId);
                         log.info(
-                                "Invoice generation: draft invoice created invoice_id={} billing_run_id={} subscription_instance_id={} subscription_plan_id={} client_agreement_id={} cycle_number={} payment_due_date={} due_preview_sub_total={} purchase_snapshot_id={}",
-                                invoiceId,
+                                "Invoice generation: due subscription rows for billingRunId={} dueDate={} locationId={} count={}",
                                 billingRunId,
-                                subscriptionInstanceId,
-                                subscriptionPlanId,
-                                clientAgreementId,
-                                cycleNumber,
-                                paymentDueDate,
-                                subTotal,
-                                purchaseSnapshotId);
-
-                        Optional<UUID> scheduleId =
-                                invoiceGenerationRepository.assignInvoiceToSubscriptionBillingSchedule(
-                                        invoiceId, billingRunId, subscriptionInstanceId, cycleNumber, paymentDueDate);
-                        if (scheduleId.isPresent()) {
-                            schedulesLinked++;
-                        } else {
-                            scheduleLinkMiss++;
-                            if (cycleNumber == null && paymentDueDate == null) {
-                                log.warn(
-                                        "Invoice generation: cannot link subscription_billing_schedule (cycle_number and payment_due_date both null). invoice_id={} subscription_instance_id={}",
-                                        invoiceId,
-                                        subscriptionInstanceId);
-                            }
-                        }
-
-                        boolean entityOk = invoiceGenerationRepository.ensureSubscriptionInvoiceEntityLine(
-                                invoiceId,
-                                scheduleId.orElse(null),
-                                subscriptionInstanceId,
-                                cycleNumber,
-                                subscriptionPlanId,
-                                clientAgreementId,
-                                subTotal,
-                                taxAmount,
-                                discountAmount,
-                                total);
-                        if (entityOk) {
-                            invoiceEntityLines++;
-                            log.info(
-                                    "Invoice generation: invoice_entity line ok invoice_id={} subscription_instance_id={} billing_schedule_id_present={}",
-                                    invoiceId,
-                                    subscriptionInstanceId,
-                                    scheduleId.isPresent());
-                        } else {
-                            entityLineMiss++;
-                            log.warn(
-                                    "Invoice generation: invoice_entity line not inserted subscriptionInstanceId={} invoiceId={} billing_schedule_id={}",
-                                    subscriptionInstanceId,
-                                    invoiceId,
-                                    scheduleId.orElse(null));
-                        }
-                    } else {
-                        failed++;
+                                dueDate,
+                                locationId,
+                                candidates.size());
+                    } catch (Exception ex) {
+                        log.error("Invoice generation: due-preview query failed billingRunId={}", billingRunId, ex);
+                        draftDlqRecorder.recordJobLevelFailure(billingRunId, stageRunId, "DUE_PREVIEW_QUERY", ex);
+                        merged.put("due_preview_query_failed", true);
+                        merged.put("due_preview_error", ex.getMessage());
+                        merged.put("job_level_error", ex.getMessage());
+                        jobLevelIssue = true;
+                        candidates = List.of();
                     }
-                } catch (Exception ex) {
-                    failed++;
-                    log.warn("Invoice generation: insert failed subscriptionInstanceId={} billingRunId={} err={}",
-                            subscriptionInstanceId, billingRunId, ex.getMessage());
+
+                    for (Map<String, Object> row : candidates) {
+                        InvoiceGenerationDraftLineProcessor.LineOutcome outcome =
+                                draftLineProcessor.processLine(row, billingRunId, dueDate);
+                        if (outcome instanceof InvoiceGenerationDraftLineProcessor.LineOutcome.Success success) {
+                            created++;
+                            totalAmount = totalAmount.add(success.total() != null ? success.total() : BigDecimal.ZERO);
+                            invoiceIds.add(success.invoiceId().toString());
+                            if (success.purchaseSnapshotIdOrNull() != null) {
+                                purchaseSnapshotIdsUsed.add(success.purchaseSnapshotIdOrNull().toString());
+                            }
+                            if (success.scheduleLinked()) {
+                                schedulesLinked++;
+                            } else {
+                                scheduleLinkMiss++;
+                            }
+                            if (success.entityLineOk()) {
+                                invoiceEntityLines++;
+                            } else {
+                                entityLineMiss++;
+                            }
+                            log.info(
+                                    "Invoice generation: draft invoice created invoice_id={} billing_run_id={} subscription_instance_id={}",
+                                    success.invoiceId(),
+                                    billingRunId,
+                                    success.subscriptionInstanceId());
+                        } else if (outcome instanceof InvoiceGenerationDraftLineProcessor.LineOutcome.Skipped skipped) {
+                            switch (skipped.reason()) {
+                                case NO_SUBSCRIPTION_ID -> failed++;
+                                case INELIGIBLE -> skippedIneligible++;
+                                case NO_CLIENT_ROLE -> skippedNoClientRole++;
+                            }
+                        } else if (outcome instanceof InvoiceGenerationDraftLineProcessor.LineOutcome.DraftFailed failedOutcome) {
+                            failed++;
+                            draftDlqRecorder.recordDraftFailure(billingRunId, stageRunId, row, failedOutcome);
+                        }
+                    }
                 }
             }
-
-            Map<String, Object> merged = new HashMap<>();
-            if (s.summaryJson() != null) {
-                merged.putAll(s.summaryJson());
-            }
-            merged.put("invoicesCreated", created);
-            merged.put("successCount", created);
-            merged.put("failureCount", failed);
-            merged.put("skippedIneligible", skippedIneligible);
-            merged.put("skippedNoClientRole", skippedNoClientRole);
-            merged.put("candidateRows", candidates.size());
-            merged.put("totalAmount", totalAmount);
-            merged.put("generated_invoice_ids", invoiceIds);
-            merged.put("purchase_snapshot_ids_used", new ArrayList<>(purchaseSnapshotIdsUsed));
-            merged.put("schedulesLinked", schedulesLinked);
-            merged.put("subscription_schedule_link_miss", scheduleLinkMiss);
-            merged.put("invoice_entity_lines", invoiceEntityLines);
-            merged.put("invoice_entity_line_miss", entityLineMiss);
-            merged.put("invoice_generation_completed_at", java.time.OffsetDateTime.now().toString());
-            merged.put("awaiting_invoice_lock", true);
-            merged.put("note", "Pricing from latest subscription_purchase_snapshot cycle band (same as due-preview). Draft invoices (PENDING); subscription_billing_schedule links open rows (PENDING/DUE/PLANNED, invoice_id null) by cycle then by billing_date vs payment_due_date; invoice_entity when entity lookups succeed. Stage set to WAITING until POST .../invoice-generation/lock completes the stage.");
-
-            stageRunRepository.mergeStageRunSummaryJson(stageRunId, merged, false);
-            boolean waitingApplied = stageRunRepository.trySetStageRunStatusByCode(stageRunId, STATUS_WAITING);
-            if (!waitingApplied) {
-                log.warn(
-                        "Invoice generation: status WAITING not found in billing_config.stage_run_status — stage left RUNNING. Apply docs/ddl/stage_run_status_waiting_seed.sql. stageRunId={}",
-                        stageRunId);
-            }
-            log.info("Invoice generation job finished (stage WAITING until lock): stageRunId={} billingRunId={} invoicesCreated={} failed={} skippedIneligible={} skippedNoClientRole={} schedulesLinked={} invoiceEntityLines={} totalAmount={}",
-                    stageRunId, billingRunId, created, failed, skippedIneligible, skippedNoClientRole, schedulesLinked, invoiceEntityLines, totalAmount);
-            String actor = "system";
-            if (merged.get("triggered_by") != null) {
-                actor = String.valueOf(merged.get("triggered_by")).trim();
-                if (actor.isEmpty()) {
-                    actor = "system";
-                }
-            }
-            Map<String, Object> okAudit = new LinkedHashMap<>();
-            okAudit.put("billing_run_id", billingRunId.toString());
-            okAudit.put("invoices_created", created);
-            okAudit.put("failure_count", failed);
-            okAudit.put("candidate_rows", candidates.size());
-            okAudit.put("total_amount", totalAmount != null ? totalAmount.toPlainString() : null);
-            auditLogRepository.insertAuditLog(
-                    "INVOICE_GENERATION", "STAGE_RUN", stageRunId, "DRAFTS_GENERATED", actor, okAudit);
         } catch (Exception e) {
-            log.error("Invoice generation failed: stageRunId={} billingRunId={}",
+            log.error("Invoice generation: unexpected error (job still completes WAITING): stageRunId={} billingRunId={}",
                     stageRunId, billingRunId, e);
-            stageRunRepository.failStageRun(stageRunId, e.getMessage(), Map.of("exception", e.getClass().getName()));
-            Map<String, Object> failAudit = new LinkedHashMap<>();
-            failAudit.put("billing_run_id", billingRunId != null ? billingRunId.toString() : null);
-            failAudit.put("error_message", e.getMessage());
-            failAudit.put("exception", e.getClass().getName());
-            auditLogRepository.insertAuditLog(
-                    "INVOICE_GENERATION", "STAGE_RUN", stageRunId, "GENERATION_FAILED", "system", failAudit);
+            draftDlqRecorder.recordJobLevelFailure(billingRunId, stageRunId, "UNEXPECTED", e);
+            merged.put("unexpected_job_error", e.getMessage());
+            merged.put("unexpected_job_exception", e.getClass().getName());
+            jobLevelIssue = true;
         }
+
+        merged.put("invoicesCreated", created);
+        merged.put("successCount", created);
+        merged.put("failureCount", failed);
+        merged.put("skippedIneligible", skippedIneligible);
+        merged.put("skippedNoClientRole", skippedNoClientRole);
+        merged.put("candidateRows", candidates.size());
+        merged.put("totalAmount", totalAmount);
+        merged.put("generated_invoice_ids", invoiceIds);
+        merged.put("purchase_snapshot_ids_used", new ArrayList<>(purchaseSnapshotIdsUsed));
+        merged.put("schedulesLinked", schedulesLinked);
+        merged.put("subscription_schedule_link_miss", scheduleLinkMiss);
+        merged.put("invoice_entity_lines", invoiceEntityLines);
+        merged.put("invoice_entity_line_miss", entityLineMiss);
+        merged.put("invoice_generation_completed_at", java.time.OffsetDateTime.now().toString());
+        merged.put("awaiting_invoice_lock", true);
+        merged.put("invoice_generation_job_completed_ok", true);
+        merged.put("has_failures", failed > 0 || jobLevelIssue);
+        merged.put("note", "Job always ends WAITING for lock when possible. Row/due-preview failures are in DLQ; see has_failures and job_level_error fields.");
+
+        stageRunRepository.mergeStageRunSummaryJson(stageRunId, merged, false);
+        invoiceGenerationStageDlqSummaryService.refreshDlqSnapshotOnStageRun(stageRunId);
+        boolean waitingApplied = stageRunRepository.trySetStageRunStatusByCode(stageRunId, STATUS_WAITING);
+        if (!waitingApplied) {
+            log.warn(
+                    "Invoice generation: status WAITING not found in billing_config.stage_run_status — stage left RUNNING. Apply docs/ddl/stage_run_status_waiting_seed.sql. stageRunId={}",
+                    stageRunId);
+        }
+        log.info(
+                "Invoice generation job finished (stage WAITING until lock): stageRunId={} billingRunId={} invoicesCreated={} failed={} skippedIneligible={} skippedNoClientRole={} schedulesLinked={} invoiceEntityLines={} totalAmount={} jobLevelIssue={}",
+                stageRunId,
+                billingRunId,
+                created,
+                failed,
+                skippedIneligible,
+                skippedNoClientRole,
+                schedulesLinked,
+                invoiceEntityLines,
+                totalAmount,
+                jobLevelIssue);
+
+        String actor = "system";
+        if (merged.get("triggered_by") != null) {
+            actor = String.valueOf(merged.get("triggered_by")).trim();
+            if (actor.isEmpty()) {
+                actor = "system";
+            }
+        }
+        Map<String, Object> auditPayload = new LinkedHashMap<>();
+        auditPayload.put("billing_run_id", billingRunId.toString());
+        auditPayload.put("invoices_created", created);
+        auditPayload.put("failure_count", failed);
+        auditPayload.put("candidate_rows", candidates.size());
+        auditPayload.put("total_amount", totalAmount != null ? totalAmount.toPlainString() : null);
+        auditPayload.put("has_failures", failed > 0 || jobLevelIssue);
+        auditPayload.put("job_level_issue", jobLevelIssue);
+        auditLogRepository.insertAuditLog(
+                "INVOICE_GENERATION", "STAGE_RUN", stageRunId, "DRAFTS_GENERATED", actor, auditPayload);
     }
 }

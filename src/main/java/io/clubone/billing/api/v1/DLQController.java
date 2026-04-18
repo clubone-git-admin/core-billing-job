@@ -38,6 +38,7 @@ public class DLQController {
             @RequestParam(required = false) UUID actualChargeRunId,
             @RequestParam(name = "actual_charge_run_id", required = false) UUID actualChargeRunIdSnake,
             @RequestParam(required = false) String failureTypeCode,
+            @RequestParam(required = false) String errorType,
             @RequestParam(required = false) Boolean resolved,
             @RequestParam(defaultValue = "50") Integer limit,
             @RequestParam(defaultValue = "0") Integer offset,
@@ -54,7 +55,7 @@ public class DLQController {
                 resolved);
 
         PageResponse<DLQItemDto> response = dlqService.listDLQItems(
-                billingRunId, stageRunFilter, failureTypeCode, resolved, limit, offset, sortBy, sortOrder);
+                billingRunId, stageRunFilter, failureTypeCode, errorType, resolved, limit, offset, sortBy, sortOrder);
 
         return ResponseEntity.ok(response);
     }

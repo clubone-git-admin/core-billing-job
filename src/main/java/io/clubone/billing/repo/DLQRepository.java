@@ -27,9 +27,11 @@ public class DLQRepository {
 
     /**
      * Find DLQ items with filtering.
+     *
+     * @param errorType optional exact match on {@code dlq.error_type} (e.g. {@code INVOICE_GENERATION_DRAFT})
      */
     public List<DLQItemDto> findDLQItems(
-            UUID billingRunId, UUID stageRunId, String failureTypeCode, Boolean resolved,
+            UUID billingRunId, UUID stageRunId, String failureTypeCode, String errorType, Boolean resolved,
             Integer limit, Integer offset, String sortBy, String sortOrder) {
 
         StringBuilder sql = new StringBuilder("""
@@ -64,6 +66,10 @@ public class DLQRepository {
             sql.append(" AND ft.failure_type_code = ?");
             params.add(failureTypeCode);
         }
+        if (errorType != null && !errorType.isBlank()) {
+            sql.append(" AND dlq.error_type = ?");
+            params.add(errorType);
+        }
         if (resolved != null) {
             sql.append(" AND dlq.resolved = ?");
             params.add(resolved);
@@ -83,7 +89,7 @@ public class DLQRepository {
     /**
      * Count total DLQ items matching filters.
      */
-    public Integer countDLQItems(UUID billingRunId, UUID stageRunId, String failureTypeCode, Boolean resolved) {
+    public Integer countDLQItems(UUID billingRunId, UUID stageRunId, String failureTypeCode, String errorType, Boolean resolved) {
         StringBuilder sql = new StringBuilder("""
             SELECT COUNT(1)
             FROM client_subscription_billing.billing_dead_letter_queue dlq
@@ -105,12 +111,88 @@ public class DLQRepository {
             sql.append(" AND ft.failure_type_code = ?");
             params.add(failureTypeCode);
         }
+        if (errorType != null && !errorType.isBlank()) {
+            sql.append(" AND dlq.error_type = ?");
+            params.add(errorType);
+        }
         if (resolved != null) {
             sql.append(" AND dlq.resolved = ?");
             params.add(resolved);
         }
 
         return jdbc.queryForObject(sql.toString(), params.toArray(), Integer.class);
+    }
+
+    /**
+     * Insert a DLQ row for a failed invoice-generation draft create (async job or manual retry).
+     */
+    public UUID insertInvoiceGenerationDraftFailure(
+            UUID billingRunId,
+            UUID stageRunId,
+            UUID subscriptionInstanceId,
+            String errorType,
+            String errorMessage,
+            String errorStackTrace,
+            Map<String, Object> workItemRoot) {
+        UUID dlqId = UUID.randomUUID();
+        try {
+            String jsonStr = objectMapper.writeValueAsString(workItemRoot);
+            jdbc.update("""
+                INSERT INTO client_subscription_billing.billing_dead_letter_queue
+                (dlq_id, billing_run_id, stage_run_id, invoice_id, subscription_instance_id,
+                 error_type, error_message, error_stack_trace, work_item_json, created_on, resolved)
+                VALUES (?::uuid, ?::uuid, ?::uuid, NULL, ?::uuid, ?, ?, ?, ?::jsonb, now(), false)
+                """,
+                    dlqId.toString(),
+                    billingRunId.toString(),
+                    stageRunId != null ? stageRunId.toString() : null,
+                    subscriptionInstanceId != null ? subscriptionInstanceId.toString() : null,
+                    errorType,
+                    errorMessage,
+                    errorStackTrace,
+                    jsonStr);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to insert invoice generation draft DLQ row: " + e.getMessage(), e);
+        }
+        return dlqId;
+    }
+
+    /**
+     * Unresolved draft-failure DLQ ids for a stage, oldest first (for bulk retry).
+     */
+    public List<UUID> findUnresolvedIdsByBillingRunStageAndErrorType(
+            UUID billingRunId, UUID stageRunId, String errorType) {
+        return jdbc.query(
+                """
+                SELECT dlq_id
+                FROM client_subscription_billing.billing_dead_letter_queue
+                WHERE billing_run_id = ?::uuid
+                  AND stage_run_id = ?::uuid
+                  AND error_type = ?
+                  AND resolved = false
+                ORDER BY created_on ASC, dlq_id ASC
+                """,
+                (rs, rowNum) -> (UUID) rs.getObject("dlq_id"),
+                billingRunId.toString(),
+                stageRunId.toString(),
+                errorType);
+    }
+
+    /**
+     * Open invoice-generation DLQ rows for a stage run ({@code INVOICE_GENERATION_DRAFT} / {@code INVOICE_GENERATION_JOB}).
+     */
+    public int countUnresolvedInvoiceGenerationDlqByStageRun(UUID stageRunId) {
+        Integer n = jdbc.queryForObject(
+                """
+                SELECT COUNT(1)
+                FROM client_subscription_billing.billing_dead_letter_queue
+                WHERE stage_run_id = ?::uuid
+                  AND resolved = false
+                  AND error_type IN ('INVOICE_GENERATION_DRAFT', 'INVOICE_GENERATION_JOB')
+                """,
+                Integer.class,
+                stageRunId.toString());
+        return n != null ? n : 0;
     }
 
     /**
@@ -171,6 +253,26 @@ public class DLQRepository {
             WHERE dlq_id = ?::uuid
             """,
                 resolvedBy, resolutionNotes, dlqId.toString());
+    }
+
+    /**
+     * Shallow-merge into {@code retry_strategy} without incrementing {@code retry_count} (e.g. after a successful draft retry).
+     */
+    public void mergeRetryStrategy(UUID dlqId, Map<String, Object> patch) {
+        if (patch == null || patch.isEmpty()) {
+            return;
+        }
+        try {
+            String patchStr = objectMapper.writeValueAsString(patch);
+            jdbc.update("""
+                UPDATE client_subscription_billing.billing_dead_letter_queue
+                SET retry_strategy = COALESCE(retry_strategy, '{}'::jsonb) || ?::jsonb
+                WHERE dlq_id = ?::uuid
+                """,
+                    patchStr, dlqId.toString());
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to merge billing_dead_letter_queue.retry_strategy: " + e.getMessage(), e);
+        }
     }
 
     private DLQItemDto mapDLQItem(java.sql.ResultSet rs) throws java.sql.SQLException {

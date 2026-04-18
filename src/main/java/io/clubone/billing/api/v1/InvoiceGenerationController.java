@@ -2,6 +2,7 @@ package io.clubone.billing.api.v1;
 
 import io.clubone.billing.api.dto.*;
 import io.clubone.billing.service.InvoiceGenerationService;
+import io.clubone.billing.service.invoicegen.InvoiceGenerationDraftDlqRetryService;
 import org.springframework.http.HttpHeaders;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -9,6 +10,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -20,9 +22,13 @@ import java.util.UUID;
 public class InvoiceGenerationController {
 
     private final InvoiceGenerationService invoiceGenerationService;
+    private final InvoiceGenerationDraftDlqRetryService invoiceGenerationDraftDlqRetryService;
 
-    public InvoiceGenerationController(InvoiceGenerationService invoiceGenerationService) {
+    public InvoiceGenerationController(
+            InvoiceGenerationService invoiceGenerationService,
+            InvoiceGenerationDraftDlqRetryService invoiceGenerationDraftDlqRetryService) {
         this.invoiceGenerationService = invoiceGenerationService;
+        this.invoiceGenerationDraftDlqRetryService = invoiceGenerationDraftDlqRetryService;
     }
 
     /**
@@ -102,5 +108,37 @@ public class InvoiceGenerationController {
             b = b.header(HttpHeaders.LOCATION, body.pollUrl());
         }
         return b.body(body);
+    }
+
+    /**
+     * POST /api/billing/invoice-generation/runs/{invoiceGenerationRunId}/draft-failures/retry-all
+     * <p>Retries all unresolved draft-failure DLQ rows for this invoice generation run (oldest first).
+     * Rows use {@code error_type = INVOICE_GENERATION_DRAFT}.</p>
+     */
+    @PostMapping("/runs/{invoiceGenerationRunId}/draft-failures/retry-all")
+    public ResponseEntity<Map<String, Object>> retryAllDraftFailures(
+            @PathVariable UUID invoiceGenerationRunId,
+            @RequestBody(required = false) InvoiceGenerationDraftDlqRetryRequest request) {
+
+        UUID triggeredBy = request != null ? request.triggeredBy() : null;
+        String notes = request != null ? request.resolutionNotes() : null;
+        return ResponseEntity.ok(invoiceGenerationDraftDlqRetryService.retryAllUnresolved(
+                invoiceGenerationRunId, triggeredBy, notes));
+    }
+
+    /**
+     * POST /api/billing/invoice-generation/runs/{invoiceGenerationRunId}/draft-failures/{dlqId}/retry
+     * <p>Re-attempts draft invoice creation for one DLQ row. On success the DLQ row is resolved.</p>
+     */
+    @PostMapping("/runs/{invoiceGenerationRunId}/draft-failures/{dlqId}/retry")
+    public ResponseEntity<DLQItemDto> retryOneDraftFailure(
+            @PathVariable UUID invoiceGenerationRunId,
+            @PathVariable UUID dlqId,
+            @RequestBody(required = false) InvoiceGenerationDraftDlqRetryRequest request) {
+
+        UUID triggeredBy = request != null ? request.triggeredBy() : null;
+        String notes = request != null ? request.resolutionNotes() : null;
+        return ResponseEntity.ok(invoiceGenerationDraftDlqRetryService.retryOne(
+                invoiceGenerationRunId, dlqId, triggeredBy, notes));
     }
 }
