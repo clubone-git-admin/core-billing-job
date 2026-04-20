@@ -32,6 +32,8 @@ public class MockChargeService {
 
     private static final Logger log = LoggerFactory.getLogger(MockChargeService.class);
     private static final String STAGE_CODE = "MOCK_CHARGE";
+    /** After proceed, Actual Charge waits for an explicit start (IDLE), not auto-RUNNING. */
+    private static final String ACTUAL_CHARGE_STAGE_CODE = "ACTUAL_CHARGE";
 
     private final StageRunRepository stageRunRepository;
     private final BillingRunRepository billingRunRepository;
@@ -661,13 +663,39 @@ public class MockChargeService {
         }
         billingRunRepository.updateCurrentStage(billingRunId, nextCode);
         StageRunDto nextSr = stageRunRepository.findByBillingRunIdAndStageCode(billingRunId, nextCode);
+        boolean actualChargeNext = ACTUAL_CHARGE_STAGE_CODE.equals(nextCode);
+
         if (nextSr == null) {
-            UUID newId = stageRunRepository.createStageRun(
-                    billingRunId, nextCode, OffsetDateTime.now(), null, actorUserId, true);
-            stageRunRepository.startStageRun(newId);
-        } else {
-            String st = nextSr.statusCode();
-            if ("PENDING".equals(st) || "QUEUED".equals(st)) {
+            if (actualChargeNext) {
+                UUID newId = stageRunRepository.createStageRun(
+                        billingRunId, nextCode, OffsetDateTime.now(), null, actorUserId, false);
+                if (!stageRunRepository.trySetStageRunStatusByCode(newId, "IDLE")) {
+                    log.warn(
+                            "Could not set ACTUAL_CHARGE stage to IDLE (is IDLE in billing_config.stage_run_status?): stageRunId={}",
+                            newId);
+                }
+                log.info("Created ACTUAL_CHARGE stage as IDLE after proceed stageRunId={} billingRunId={}", newId, billingRunId);
+            } else {
+                UUID newId = stageRunRepository.createStageRun(
+                        billingRunId, nextCode, OffsetDateTime.now(), null, actorUserId, true);
+                stageRunRepository.startStageRun(newId);
+            }
+            return;
+        }
+        String st = nextSr.statusCode();
+        if ("PENDING".equals(st) || "QUEUED".equals(st)) {
+            if (actualChargeNext) {
+                if (!stageRunRepository.trySetStageRunStatusByCode(nextSr.stageRunId(), "IDLE")) {
+                    log.warn(
+                            "Could not set ACTUAL_CHARGE stage to IDLE (is IDLE in billing_config.stage_run_status?): stageRunId={}",
+                            nextSr.stageRunId());
+                }
+                log.info(
+                        "Set existing ACTUAL_CHARGE stage to IDLE after proceed (was {}) stageRunId={} billingRunId={}",
+                        st,
+                        nextSr.stageRunId(),
+                        billingRunId);
+            } else {
                 stageRunRepository.startStageRun(nextSr.stageRunId());
             }
         }
