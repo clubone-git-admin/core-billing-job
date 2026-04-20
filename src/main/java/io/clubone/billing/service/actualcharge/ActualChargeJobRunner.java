@@ -305,7 +305,7 @@ public class ActualChargeJobRunner {
                             stageRunId,
                             row.invoiceId(),
                             statusPendingCapture,
-                            pr.getFailureReason() != null ? pr.getFailureReason() : GatewayStatus.PENDING_CAPTURE.getCode(),
+                            null,
                             row.subTotal(),
                             row.taxAmount(),
                             row.discountAmount(),
