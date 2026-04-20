@@ -3,6 +3,7 @@ package io.clubone.billing.service.mockcharge;
 import io.clubone.billing.api.dto.BillingRunDto;
 import io.clubone.billing.api.dto.MockChargeOutcome;
 import io.clubone.billing.api.dto.StageRunDto;
+import io.clubone.billing.repo.AuditLogRepository;
 import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.MockChargeRepository;
 import io.clubone.billing.repo.MockChargeRepository.MandateProbe;
@@ -42,8 +43,14 @@ public class MockChargeJobRunner {
     private final StageRunRepository stageRunRepository;
     private final BillingRunRepository billingRunRepository;
     private final MockChargeRepository mockChargeRepository;
-    /** When true, skips mandate max vs invoice total (currency/minor-units alignment not modeled yet). */
+    private final AuditLogRepository auditLogRepository;
+    /** When true, skips invoice vs mandate currency comparison (see {@link #skipMandateMaxAmountCheck}). */
     private final boolean skipCurrencyCheck;
+    /**
+     * When true, skips comparing invoice total (minor units) to {@code mandate_max_amount_minor}.
+     * Default false so mock charge enforces mandate max when present; set true only if you intentionally relax it.
+     */
+    private final boolean skipMandateMaxAmountCheck;
 
     private record ValidationResult(
             MockChargeOutcome outcome,
@@ -56,11 +63,28 @@ public class MockChargeJobRunner {
             StageRunRepository stageRunRepository,
             BillingRunRepository billingRunRepository,
             MockChargeRepository mockChargeRepository,
-            @Value("${clubone.billing.mock-charge.skip-currency-check:true}") boolean skipCurrencyCheck) {
+            AuditLogRepository auditLogRepository,
+            @Value("${clubone.billing.mock-charge.skip-currency-check:true}") boolean skipCurrencyCheck,
+            @Value("${clubone.billing.mock-charge.skip-mandate-max-amount-check:false}") boolean skipMandateMaxAmountCheck) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
         this.mockChargeRepository = mockChargeRepository;
+        this.auditLogRepository = auditLogRepository;
         this.skipCurrencyCheck = skipCurrencyCheck;
+        this.skipMandateMaxAmountCheck = skipMandateMaxAmountCheck;
+    }
+
+    /** Worker completion/failure — {@code entity_type = STAGE_RUN} for audit tab parity with API-driven events. */
+    private void auditMockChargeJob(
+            String action, UUID stageRunId, UUID billingRunId, Map<String, Object> details) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        if (billingRunId != null) {
+            payload.put("billing_run_id", billingRunId.toString());
+        }
+        if (details != null && !details.isEmpty()) {
+            payload.putAll(details);
+        }
+        auditLogRepository.insertAuditLog("MOCK_CHARGE", "STAGE_RUN", stageRunId, action, "system", payload);
     }
 
     @Transactional
@@ -188,7 +212,11 @@ public class MockChargeJobRunner {
                     continue;
                 }
 
-                String failureReason = "[MC]" + vr.outcome().name() + "|" + vr.message();
+                boolean mockSuccess =
+                        vr.outcome() == MockChargeOutcome.READY_FOR_CHARGE || vr.outcome() == MockChargeOutcome.ELIGIBLE;
+                // Do not reuse failure_* columns for mandate success — outcome stays in mock_charge_status + details.
+                String failureReason = mockSuccess ? null : "[MC]" + vr.outcome().name() + "|" + vr.message();
+                String mockOutcomeCodeForRow = mockSuccess ? null : vr.outcome().name();
                 String uiStatus = MockChargeUiMapper.toUiStatus(vr.outcome());
                 Map<String, Object> details = new HashMap<>();
                 details.put("message", vr.message());
@@ -198,6 +226,7 @@ public class MockChargeJobRunner {
                 details.put("invoice_currency", skipCurrencyCheck ? vr.mandateCurrency() : vr.invoiceCurrency());
                 details.put("mandate_currency", vr.mandateCurrency());
                 details.put("skip_currency_check", skipCurrencyCheck);
+                details.put("skip_mandate_max_amount_check", skipMandateMaxAmountCheck);
                 log.debug(
                         "mock-charge job: candidate {}/{} invoiceId={} subscriptionInstanceId={} clientRoleId={} agreementId={} totalAmount={} outcome={} uiStatus={} message={}",
                         idx,
@@ -228,7 +257,7 @@ public class MockChargeJobRunner {
                             statusId.get(),
                             failureReason,
                             uiStatus,
-                            vr.outcome().name(),
+                            mockOutcomeCodeForRow,
                             details,
                             row.subTotal(),
                             row.taxAmount(),
@@ -292,6 +321,12 @@ public class MockChargeJobRunner {
                     eligible,
                     blocked,
                     thread);
+            Map<String, Object> okDetails = new LinkedHashMap<>();
+            okDetails.put("eligible_count", eligible);
+            okDetails.put("blocked_count", blocked);
+            okDetails.put("total_candidates", total);
+            okDetails.put("awaiting_proceed", true);
+            auditMockChargeJob("ASYNC_JOB_COMPLETED", stageRunId, billingRunId, okDetails);
         } catch (Exception e) {
             log.error(
                     "mock-charge job: process() failed stageRunId={} billingRunId={}",
@@ -299,6 +334,10 @@ public class MockChargeJobRunner {
                     billingRunId,
                     e);
             stageRunRepository.failStageRun(stageRunId, e.getMessage(), Map.of("exception", e.getClass().getName()));
+            Map<String, Object> failDetails = new LinkedHashMap<>();
+            failDetails.put("exception", e.getClass().getName());
+            failDetails.put("message", e.getMessage() != null ? e.getMessage() : "");
+            auditMockChargeJob("ASYNC_JOB_FAILED", stageRunId, billingRunId, failDetails);
         }
     }
 
@@ -361,7 +400,7 @@ public class MockChargeJobRunner {
         }
 
         boolean amountOk = true;
-        if (!skipCurrencyCheck && mp.mandateMaxAmountMinor() != null) {
+        if (!skipMandateMaxAmountCheck && mp.mandateMaxAmountMinor() != null) {
             long amountMinor = total.multiply(BigDecimal.valueOf(100)).longValue();
             amountOk = amountMinor <= mp.mandateMaxAmountMinor();
         }

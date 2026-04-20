@@ -93,10 +93,13 @@ clubone:
     update-invoice: false
     update-schedule: true
 
-    # Mock charge (MOCK_CHARGE stage): when true, skips mandate max-amount vs invoice total comparison.
-    # That check assumes invoice and mandate share the same currency/minor units; disable until FX/currency is wired.
+    # Mock charge (MOCK_CHARGE stage):
+    #  - skip-currency-check: when true, do not compare invoice_currency to mandate_currency (default true for partial data).
+    #  - skip-mandate-max-amount-check: when true, do not compare invoice total (×100 minor) to mandate_max_amount_minor.
+    #    Default false — invoice 542.64 INR vs mandate max 470.82 INR fails as LIMIT_EXCEEDED when enforced.
     mock-charge:
       skip-currency-check: ${CLUBONE_BILLING_MOCK_CHARGE_SKIP_CURRENCY_CHECK:true}
+      skip-mandate-max-amount-check: ${CLUBONE_BILLING_MOCK_CHARGE_SKIP_MANDATE_MAX_AMOUNT_CHECK:false}
 
     # Payment execution strategy for LIVE:
     #  - NOOP: does not create payment intents/transactions; marks success by policy (useful to wire the flow end-to-end)

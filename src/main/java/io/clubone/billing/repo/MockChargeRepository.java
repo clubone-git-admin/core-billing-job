@@ -37,20 +37,24 @@ public class MockChargeRepository {
         if (statusCode == null || statusCode.isBlank()) {
             return Optional.empty();
         }
+        String normalized = statusCode.trim();
         try {
+            // Match even if billing_config.billing_status.status_code was inserted with accidental spaces.
             UUID id = jdbc.query(
                     """
-                    SELECT billing_status_id FROM billing_config.billing_status WHERE status_code = ? LIMIT 1
+                    SELECT billing_status_id FROM billing_config.billing_status
+                    WHERE TRIM(status_code) = ? LIMIT 1
                     """,
                     rs -> rs.next() ? (UUID) rs.getObject("billing_status_id") : null,
-                    statusCode);
+                    normalized);
             return Optional.ofNullable(id);
         } catch (DataAccessException ex) {
             return Optional.empty();
         }
     }
 
-    // Preferred billing_status code, then MOCK_*, PENDING_CAPTURE, then any active row.
+    // Preferred billing_status code, then neutral fallbacks — never prefer MOCK_ERROR before PENDING_CAPTURE when
+    // MOCK_EVALUATED is missing (otherwise success rows could show billing_status_code = MOCK_ERROR).
     public Optional<UUID> resolveBillingStatusIdForMockCharge(String preferredCode) {
         if (preferredCode != null && !preferredCode.isBlank()) {
             Optional<UUID> direct = findBillingStatusIdByCode(preferredCode);
@@ -60,9 +64,9 @@ public class MockChargeRepository {
         }
         String[] fallbacks = {
                 "MOCK_EVALUATED",
+                "PENDING_CAPTURE",
                 "MOCK_SKIPPED_NOT_ELIGIBLE",
-                "MOCK_ERROR",
-                "PENDING_CAPTURE"
+                "MOCK_ERROR"
         };
         for (String code : fallbacks) {
             if (preferredCode != null && code.equals(preferredCode)) {
@@ -217,6 +221,12 @@ public class MockChargeRepository {
             BigDecimal tax,
             BigDecimal discount,
             BigDecimal total) {
+        if (failureReason != null && failureReason.isBlank()) {
+            failureReason = null;
+        }
+        if (mockChargeFailureCode != null && mockChargeFailureCode.isBlank()) {
+            mockChargeFailureCode = null;
+        }
         String detailsJson = null;
         if (mockChargeDetails != null && !mockChargeDetails.isEmpty()) {
             try {

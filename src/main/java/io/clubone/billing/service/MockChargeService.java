@@ -22,6 +22,7 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -52,6 +53,26 @@ public class MockChargeService {
         this.applicationEventPublisher = applicationEventPublisher;
         this.auditLogRepository = auditLogRepository;
         this.subscriptionBillingHistoryRepository = subscriptionBillingHistoryRepository;
+    }
+
+    /**
+     * Persists mock-charge lifecycle to {@code billing_audit_log} with {@code entity_type = STAGE_RUN} so
+     * {@code GET /api/v1/billing/audit?entityType=STAGE_RUN&entityId=<mock_charge_run_id>} returns a timeline.
+     */
+    private void auditMockChargeStage(
+            String action, UUID stageRunId, UUID billingRunId, String actor, Map<String, Object> details) {
+        if (stageRunId == null) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        if (billingRunId != null) {
+            payload.put("billing_run_id", billingRunId.toString());
+        }
+        if (details != null && !details.isEmpty()) {
+            payload.putAll(details);
+        }
+        String user = (actor != null && !actor.isBlank()) ? actor : "system";
+        auditLogRepository.insertAuditLog("MOCK_CHARGE", "STAGE_RUN", stageRunId, action, user, payload);
     }
 
     @Transactional
@@ -135,6 +156,12 @@ public class MockChargeService {
                 stageRunRepository.updateIdempotencyKey(target.stageRunId(), idempotencyKey.trim());
             }
             publishMockChargeQueued(target.stageRunId(), "RUNNING_republish_worker");
+            auditMockChargeStage(
+                    "WORKER_REPUBLISHED",
+                    target.stageRunId(),
+                    billingRunId,
+                    request.triggeredBy() != null ? request.triggeredBy().toString() : "system",
+                    Map.of("reason", "RUNNING_republish_worker"));
             return new MockChargeCommandResult(
                     toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
                     MockChargeStartHttpStatus.OK_200);
@@ -145,6 +172,12 @@ public class MockChargeService {
                 stageRunRepository.updateIdempotencyKey(target.stageRunId(), idempotencyKey.trim());
             }
             publishMockChargeQueued(target.stageRunId(), "QUEUED_or_SCHEDULED_republish");
+            auditMockChargeStage(
+                    "WORKER_REPUBLISHED",
+                    target.stageRunId(),
+                    billingRunId,
+                    request.triggeredBy() != null ? request.triggeredBy().toString() : "system",
+                    Map.of("reason", "QUEUED_or_SCHEDULED_republish"));
             return new MockChargeCommandResult(
                     toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
                     MockChargeStartHttpStatus.OK_200);
@@ -237,6 +270,16 @@ public class MockChargeService {
         log.info(
                 "mock-charge enqueueMockCharge: returning 202 ACCEPTED pollUrl=/api/billing/mock-charge/runs/{}",
                 stageRunId);
+        String actor = "system";
+        if (fresh != null && fresh.summaryJson() != null && fresh.summaryJson().get("triggered_by") != null) {
+            actor = String.valueOf(fresh.summaryJson().get("triggered_by"));
+        }
+        auditMockChargeStage(
+                "ASYNC_QUEUED",
+                stageRunId,
+                billingRun.billingRunId(),
+                actor,
+                Map.of("billing_run_code", billingRun.billingRunCode() != null ? billingRun.billingRunCode() : ""));
         return new MockChargeCommandResult(
                 toRunResponse(stageRunRepository.findById(stageRunId), billingRun),
                 MockChargeStartHttpStatus.ACCEPTED_202);
@@ -450,6 +493,12 @@ public class MockChargeService {
         }
         stageRunRepository.cancelStageRun(mockChargeRunId, reason);
         BillingRunDto br = billingRunRepository.findById(stage.billingRunId());
+        auditMockChargeStage(
+                "CANCEL_REQUEST",
+                mockChargeRunId,
+                stage.billingRunId(),
+                request != null && request.requestedBy() != null ? request.requestedBy().toString() : "system",
+                Map.of("reason", reason));
         return toRunResponse(stageRunRepository.findById(mockChargeRunId), br);
     }
 
@@ -475,6 +524,12 @@ public class MockChargeService {
         }
         merged.put("mock_charge_requested_at", OffsetDateTime.now().toString());
         stageRunRepository.updateStageRunSummary(newId, merged);
+        auditMockChargeStage(
+                "RETRY_NEW_STAGE",
+                newId,
+                billingRunId,
+                request != null && request.triggeredBy() != null ? request.triggeredBy().toString() : "system",
+                Map.of("retry_of_stage_run_id", mockChargeRunId.toString()));
         return enqueueMockCharge(newId, billingRun);
     }
 
@@ -499,11 +554,10 @@ public class MockChargeService {
             stageRunRepository.completeStageRun(stage.stageRunId(), m);
         }
         advanceAfterMockCharge(billingRunId, request.skippedBy());
-        auditLogRepository.insertAuditLog(
-                "MOCK_CHARGE",
-                "BILLING_RUN",
-                billingRunId,
+        auditMockChargeStage(
                 "SKIP",
+                stage.stageRunId(),
+                billingRunId,
                 request.skippedBy().toString(),
                 Map.of("reason", request.reason() != null ? request.reason() : ""));
         return billingRunService.getBillingRun(billingRunId);
@@ -545,13 +599,15 @@ public class MockChargeService {
         m.put("proceed_to_actual_charge_by", request.requestedBy().toString());
         stageRunRepository.completeStageRun(stage.stageRunId(), m);
         advanceAfterMockCharge(billingRunId, request.requestedBy());
-        auditLogRepository.insertAuditLog(
-                "MOCK_CHARGE",
-                "BILLING_RUN",
-                billingRunId,
+        auditMockChargeStage(
                 "PROCEED_ACTUAL_CHARGE",
+                stage.stageRunId(),
+                billingRunId,
                 request.requestedBy().toString(),
-                Map.of("eligibleCount", eligible, "blockedCount", blocked, "eligibleAmount", eligibleAmt.toPlainString()));
+                Map.of(
+                        "eligible_count", eligible,
+                        "blocked_count", blocked,
+                        "eligible_amount", eligibleAmt.toPlainString()));
         return billingRunService.getBillingRun(billingRunId);
     }
 
@@ -780,6 +836,12 @@ public class MockChargeService {
                     .filter(r -> r.mockChargeStatus() == null || !"READY_FOR_CHARGE".equals(r.mockChargeStatus()))
                     .toList();
         }
+        auditMockChargeStage(
+                "EXPORT_CSV",
+                mockChargeRunId,
+                s.billingRunId(),
+                "system",
+                Map.of("failed_only", failedOnly, "row_count", rows.size()));
         return buildMockChargeCsv(rows).getBytes(StandardCharsets.UTF_8);
     }
 
@@ -831,6 +893,12 @@ public class MockChargeService {
             m.put("timezone", request.timezone());
         }
         stageRunRepository.updateStageRunSummary(stageRunId, m);
+        auditMockChargeStage(
+                "SCHEDULED",
+                stageRunId,
+                billingRunId,
+                request.triggeredBy() != null ? request.triggeredBy().toString() : "system",
+                Map.of("scheduled_for", request.scheduledFor().toString()));
         return Map.of(
                 "scheduledRunId", stageRunId,
                 "scheduledFor", request.scheduledFor().toString());
@@ -845,5 +913,11 @@ public class MockChargeService {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Run is not SCHEDULED");
         }
         stageRunRepository.cancelStageRun(scheduledRunId, "Schedule cancelled");
+        auditMockChargeStage(
+                "SCHEDULE_CANCELLED",
+                scheduledRunId,
+                s.billingRunId(),
+                "system",
+                Map.of("reason", "Schedule cancelled"));
     }
 }

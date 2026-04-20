@@ -212,7 +212,7 @@ public class InvoiceGenerationDraftDlqRetryService {
                     notes + " (invoice_id=" + success.invoiceId() + ")");
             Map<String, Object> strategyOk = new LinkedHashMap<>();
             strategyOk.put("last_retry_status", "SUCCEEDED");
-            strategyOk.put("last_retry_message", "");
+            strategyOk.put("last_retry_message", null);
             strategyOk.put("invoice_id", success.invoiceId().toString());
             if (triggeredBy != null) {
                 strategyOk.put("triggered_by", triggeredBy.toString());

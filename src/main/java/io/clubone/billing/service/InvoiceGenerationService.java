@@ -29,6 +29,8 @@ public class InvoiceGenerationService {
 
     private static final Logger log = LoggerFactory.getLogger(InvoiceGenerationService.class);
     private static final String STAGE_CODE = "INVOICE_GENERATION";
+    /** Next stage after invoice lock: leave ready for explicit mock-charge start (not auto-RUNNING). */
+    private static final String MOCK_CHARGE_STAGE_CODE = "MOCK_CHARGE";
 
     private final StageRunRepository stageRunRepository;
     private final BillingRunRepository billingRunRepository;
@@ -800,17 +802,43 @@ public class InvoiceGenerationService {
         }
         billingRunRepository.updateCurrentStage(billingRunId, nextCode);
         StageRunDto nextSr = stageRunRepository.findByBillingRunIdAndStageCode(billingRunId, nextCode);
+        boolean nextIsMockCharge = MOCK_CHARGE_STAGE_CODE.equals(nextCode);
+
         if (nextSr == null) {
+            // Mock charge waits for an explicit start; other stages auto-transition to RUNNING.
+            boolean setStartedOnAtInsert = !nextIsMockCharge;
             UUID newId = stageRunRepository.createStageRun(
-                    billingRunId, nextCode, OffsetDateTime.now(), null, actorUserId, true);
-            stageRunRepository.startStageRun(newId);
-            log.info("Created and started stage {} stageRunId={} billingRunId={}", nextCode, newId, billingRunId);
+                    billingRunId, nextCode, OffsetDateTime.now(), null, actorUserId, setStartedOnAtInsert);
+            if (nextIsMockCharge) {
+                if (!stageRunRepository.trySetStageRunStatusByCode(newId, "IDLE")) {
+                    log.warn(
+                            "Could not set MOCK_CHARGE stage to IDLE (is IDLE in billing_config.stage_run_status?): stageRunId={}",
+                            newId);
+                }
+                log.info("Created MOCK_CHARGE stage as IDLE stageRunId={} billingRunId={}", newId, billingRunId);
+            } else {
+                stageRunRepository.startStageRun(newId);
+                log.info("Created and started stage {} stageRunId={} billingRunId={}", nextCode, newId, billingRunId);
+            }
             return;
         }
         String st = nextSr.statusCode();
         if ("PENDING".equals(st) || "QUEUED".equals(st)) {
-            stageRunRepository.startStageRun(nextSr.stageRunId());
-            log.info("Started existing stage {} stageRunId={} billingRunId={}", nextCode, nextSr.stageRunId(), billingRunId);
+            if (nextIsMockCharge) {
+                if (!stageRunRepository.trySetStageRunStatusByCode(nextSr.stageRunId(), "IDLE")) {
+                    log.warn(
+                            "Could not set MOCK_CHARGE stage to IDLE (is IDLE in billing_config.stage_run_status?): stageRunId={}",
+                            nextSr.stageRunId());
+                }
+                log.info(
+                        "Set existing MOCK_CHARGE stage to IDLE (was {}) stageRunId={} billingRunId={}",
+                        st,
+                        nextSr.stageRunId(),
+                        billingRunId);
+            } else {
+                stageRunRepository.startStageRun(nextSr.stageRunId());
+                log.info("Started existing stage {} stageRunId={} billingRunId={}", nextCode, nextSr.stageRunId(), billingRunId);
+            }
         }
     }
 }

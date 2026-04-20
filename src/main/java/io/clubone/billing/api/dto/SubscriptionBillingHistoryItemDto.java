@@ -12,7 +12,9 @@ import java.util.UUID;
 
 /**
  * Row for {@code GET /api/v1/billing/runs/{billingRunId}/invoices} (mock charge grid and related lists).
- * JSON uses snake_case per FE contract; {@code failure_code} maps from {@code mock_charge_failure_code}.
+ * JSON uses snake_case per FE contract; {@code failure_code} maps from {@code mock_charge_failure_code}
+ * (set only for blocked/error mock outcomes — successful mock charge leaves them null).
+ * {@code failure_reason} and {@code failure_code} are always serialized (explicit JSON {@code null}) so clients are not ambiguous.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
@@ -23,6 +25,8 @@ public record SubscriptionBillingHistoryItemDto(
         UUID subscriptionInstanceId,
         OffsetDateTime billingAttemptOn,
         String billingStatusCode,
+        /** Populated for mock failures/blocks; null when mock validation passed (see {@link #mockChargeStatus}). */
+        @JsonInclude(JsonInclude.Include.ALWAYS)
         String failureReason,
         Boolean isMock,
         UUID billingRunId,
@@ -32,6 +36,8 @@ public record SubscriptionBillingHistoryItemDto(
         BigDecimal invoiceDiscountAmount,
         BigDecimal invoiceTotalAmount,
         String mockChargeStatus,
+        /** Maps from {@code mock_charge_failure_code}; null on successful mock — always present in JSON. */
+        @JsonInclude(JsonInclude.Include.ALWAYS)
         String failureCode,
         Map<String, Object> mockChargeDetails,
         String clientName,
@@ -50,6 +56,8 @@ public record SubscriptionBillingHistoryItemDto(
         OffsetDateTime mandateValidFrom,
         OffsetDateTime mandateValidTo,
         BigDecimal mandateMaxAmount,
+        /** ISO currency code from {@code client_gateway_mandate.mandate_currency} when present. */
+        String mandateCurrency,
         OffsetDateTime mandateLastVerifiedAt,
         String paymentLast4,
         String paymentExpiry,

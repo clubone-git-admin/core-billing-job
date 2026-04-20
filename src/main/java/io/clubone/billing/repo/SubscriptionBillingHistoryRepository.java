@@ -138,6 +138,7 @@ public class SubscriptionBillingHistoryRepository {
                    mg.mandate_end_date AS mandate_valid_to,
                    CASE WHEN mg.mandate_max_amount_minor IS NOT NULL
                         THEN (mg.mandate_max_amount_minor::numeric / 100.0) END AS mandate_max_amount,
+                   mg.mandate_currency AS mandate_currency,
                    CAST(NULL AS timestamptz) AS mandate_last_verified_at,
                    cpm.card_last4 AS payment_last4,
                    CAST(NULL AS varchar) AS payment_expiry,
@@ -146,6 +147,15 @@ public class SubscriptionBillingHistoryRepository {
             LEFT JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id
             LEFT JOIN transactions.invoice i ON i.invoice_id = h.invoice_id
             LEFT JOIN LATERAL (
+                SELECT ie.subscription_instance_id
+                FROM transactions.invoice_entity ie
+                WHERE ie.invoice_id = h.invoice_id
+                  AND ie.subscription_instance_id IS NOT NULL
+                  AND COALESCE(ie.is_active, true) = true
+                ORDER BY ie.created_on ASC NULLS LAST
+                LIMIT 1
+            ) ie_resolve ON true
+            LEFT JOIN LATERAL (
                 SELECT sbs0.billing_period_start, sbs0.billing_period_end
                 FROM client_subscription_billing.subscription_billing_schedule sbs0
                 WHERE sbs0.invoice_id = i.invoice_id
@@ -153,7 +163,7 @@ public class SubscriptionBillingHistoryRepository {
                 LIMIT 1
             ) sbs ON true
             LEFT JOIN client_subscription_billing.subscription_instance si
-                ON si.subscription_instance_id = h.subscription_instance_id
+                ON si.subscription_instance_id = COALESCE(h.subscription_instance_id, ie_resolve.subscription_instance_id)
             LEFT JOIN client_subscription_billing.subscription_plan sp
                 ON sp.subscription_plan_id = si.subscription_plan_id AND COALESCE(sp.is_active, true) = true
             LEFT JOIN client_agreements.client_agreement ca
@@ -178,7 +188,8 @@ public class SubscriptionBillingHistoryRepository {
                        lgs.code AS mandate_status,
                        cgm.mandate_start_date,
                        cgm.mandate_end_date,
-                       cgm.mandate_max_amount_minor
+                       cgm.mandate_max_amount_minor,
+                       cgm.mandate_currency
                 FROM client_payments.client_gateway_mandate cgm
                 JOIN client_payments.lu_gateway_mandate_status lgs
                   ON lgs.gateway_mandate_status_id = cgm.mandate_status_id
@@ -260,11 +271,13 @@ public class SubscriptionBillingHistoryRepository {
                 loc.location_id AS location_id,
                 pt.method_type_name AS payment_method_type,
                 pgw.name AS gateway_name,
-                CAST(NULL AS uuid) AS mandate_id,
-                CAST(NULL AS varchar) AS mandate_status,
-                CAST(NULL AS timestamptz) AS mandate_valid_from,
-                CAST(NULL AS timestamptz) AS mandate_valid_to,
-                CAST(NULL AS numeric) AS mandate_max_amount,
+                mg.client_gateway_mandate_id AS mandate_id,
+                mg.mandate_status AS mandate_status,
+                mg.mandate_start_date AS mandate_valid_from,
+                mg.mandate_end_date AS mandate_valid_to,
+                CASE WHEN mg.mandate_max_amount_minor IS NOT NULL
+                     THEN (mg.mandate_max_amount_minor::numeric / 100.0) END AS mandate_max_amount,
+                mg.mandate_currency AS mandate_currency,
                 CAST(NULL AS timestamptz) AS mandate_last_verified_at,
                 cpm.card_last4 AS payment_last4,
                 CAST(NULL AS varchar) AS payment_expiry,
@@ -296,7 +309,7 @@ public class SubscriptionBillingHistoryRepository {
                 LIMIT 1
             ) ie ON true
             LEFT JOIN client_subscription_billing.subscription_instance si
-                ON si.subscription_instance_id = ie.subscription_instance_id
+                ON si.subscription_instance_id = COALESCE(h.subscription_instance_id, ie.subscription_instance_id)
             LEFT JOIN client_subscription_billing.subscription_plan sp
                 ON sp.subscription_plan_id = si.subscription_plan_id AND COALESCE(sp.is_active, true) = true
             LEFT JOIN client_agreements.client_agreement ca
@@ -315,6 +328,22 @@ public class SubscriptionBillingHistoryRepository {
                 ON pgw.payment_gateway_id = pgsm.payment_gateway_id
             LEFT JOIN payment_gateway.lu_payment_gateway_method_type pt
                 ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id
+            LEFT JOIN LATERAL (
+                SELECT cgm.client_gateway_mandate_id,
+                       lgs.code AS mandate_status,
+                       cgm.mandate_start_date,
+                       cgm.mandate_end_date,
+                       cgm.mandate_max_amount_minor,
+                       cgm.mandate_currency
+                FROM client_payments.client_gateway_mandate cgm
+                JOIN client_payments.lu_gateway_mandate_status lgs
+                  ON lgs.gateway_mandate_status_id = cgm.mandate_status_id
+                WHERE sp.subscription_plan_id IS NOT NULL
+                  AND cgm.subscription_plan_id = sp.subscription_plan_id
+                  AND COALESCE(cgm.is_active, true) = true
+                ORDER BY cgm.created_on DESC NULLS LAST
+                LIMIT 1
+            ) mg ON true
             LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id
             LEFT JOIN LATERAL (
                 SELECT
@@ -397,11 +426,13 @@ public class SubscriptionBillingHistoryRepository {
                 loc.location_id AS location_id,
                 pt.method_type_name AS payment_method_type,
                 pgw.name AS gateway_name,
-                CAST(NULL AS uuid) AS mandate_id,
-                CAST(NULL AS varchar) AS mandate_status,
-                CAST(NULL AS timestamptz) AS mandate_valid_from,
-                CAST(NULL AS timestamptz) AS mandate_valid_to,
-                CAST(NULL AS numeric) AS mandate_max_amount,
+                mg.client_gateway_mandate_id AS mandate_id,
+                mg.mandate_status AS mandate_status,
+                mg.mandate_start_date AS mandate_valid_from,
+                mg.mandate_end_date AS mandate_valid_to,
+                CASE WHEN mg.mandate_max_amount_minor IS NOT NULL
+                     THEN (mg.mandate_max_amount_minor::numeric / 100.0) END AS mandate_max_amount,
+                mg.mandate_currency AS mandate_currency,
                 CAST(NULL AS timestamptz) AS mandate_last_verified_at,
                 cpm.card_last4 AS payment_last4,
                 CAST(NULL AS varchar) AS payment_expiry,
@@ -433,7 +464,7 @@ public class SubscriptionBillingHistoryRepository {
                 LIMIT 1
             ) ie ON true
             LEFT JOIN client_subscription_billing.subscription_instance si
-                ON si.subscription_instance_id = ie.subscription_instance_id
+                ON si.subscription_instance_id = COALESCE(h.subscription_instance_id, ie.subscription_instance_id)
             LEFT JOIN client_subscription_billing.subscription_plan sp
                 ON sp.subscription_plan_id = si.subscription_plan_id AND COALESCE(sp.is_active, true) = true
             LEFT JOIN client_agreements.client_agreement ca
@@ -452,6 +483,22 @@ public class SubscriptionBillingHistoryRepository {
                 ON pgw.payment_gateway_id = pgsm.payment_gateway_id
             LEFT JOIN payment_gateway.lu_payment_gateway_method_type pt
                 ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id
+            LEFT JOIN LATERAL (
+                SELECT cgm.client_gateway_mandate_id,
+                       lgs.code AS mandate_status,
+                       cgm.mandate_start_date,
+                       cgm.mandate_end_date,
+                       cgm.mandate_max_amount_minor,
+                       cgm.mandate_currency
+                FROM client_payments.client_gateway_mandate cgm
+                JOIN client_payments.lu_gateway_mandate_status lgs
+                  ON lgs.gateway_mandate_status_id = cgm.mandate_status_id
+                WHERE sp.subscription_plan_id IS NOT NULL
+                  AND cgm.subscription_plan_id = sp.subscription_plan_id
+                  AND COALESCE(cgm.is_active, true) = true
+                ORDER BY cgm.created_on DESC NULLS LAST
+                LIMIT 1
+            ) mg ON true
             LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id
             LEFT JOIN LATERAL (
                 SELECT
@@ -588,6 +635,7 @@ public class SubscriptionBillingHistoryRepository {
                 toOffsetUtc(rs.getTimestamp("mandate_valid_from")),
                 toOffsetUtc(rs.getTimestamp("mandate_valid_to")),
                 rs.getBigDecimal("mandate_max_amount"),
+                blankToNull(rs.getString("mandate_currency")),
                 toOffsetUtc(rs.getTimestamp("mandate_last_verified_at")),
                 rs.getString("payment_last4"),
                 rs.getString("payment_expiry"),
