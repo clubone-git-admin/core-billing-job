@@ -94,14 +94,14 @@ public class BillingJobProperties {
 		}
 
 		public static class Http {
-			private String baseUrl = "http://localhost:8010";
+			private String baseUrl = "https://develop-api.clubone.io";
 			private String createAndCapturePath = "/api/payments/capture-invoice";
 			private int timeoutMs = 8000;
 			private String validateMethodPath = "/payment/razorpay/billing/validate-method";
 			private String createIntentPath = "/payment/api/payment/razorpay/intents";
 			private String chargeAtWillPath = "/payment/razorpay/billing/charge-at-will";
 
-			private String txnBaseUrl = "http://localhost:8012"; // transaction service
+			private String txnBaseUrl = "https://develop-api.clubone.io"; // transaction service
 			private String finalizePath = "/transaction/api/transactions/v3/finalize";
 
 			private String actorId = "00000000-0000-0000-0000-000000000001"; // system user

@@ -32,7 +32,7 @@ public class NotificationClient {
     public NotificationClient(
             RestTemplate restTemplate,
             ObjectMapper objectMapper,
-            @Value("${clubone.notification.base-url:http://localhost:8000}") String baseUrl,
+            @Value("${clubone.notification.base-url:https://develop-api.clubone.io}") String baseUrl,
             CrmRequestContext context
     ) {
         this.restTemplate = restTemplate;

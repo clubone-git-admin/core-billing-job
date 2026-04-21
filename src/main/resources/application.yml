@@ -109,7 +109,7 @@ clubone:
       # For local/dev, set CLUBONE_PAYMENT_STRATEGY=NOOP to avoid hitting real gateway.
       strategy: ${CLUBONE_PAYMENT_STRATEGY:HTTP}
       http:
-        base-url: ${CLUBONE_PAYMENT_BASE_URL:http://localhost:8010}
+        base-url: ${CLUBONE_PAYMENT_BASE_URL:https://develop-api.clubone.io}
         create-and-capture-path: ${CLUBONE_PAYMENT_CAPTURE_PATH:/api/payments/capture-invoice}
         timeout-ms: ${CLUBONE_PAYMENT_TIMEOUT_MS:8000}
         # Test mode for simulating retry failures
