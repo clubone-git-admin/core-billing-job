@@ -72,6 +72,14 @@ public class ActualChargeController {
         return ResponseEntity.ok(actualChargeService.getRun(actualChargeRunId));
     }
 
+    /**
+     * Recomputes KPIs from latest live billing history for the billing run and merges into {@code summary_json}.
+     */
+    @PostMapping("/runs/{actualChargeRunId}/refresh-summary")
+    public ResponseEntity<ActualChargeRunResponse> refreshSummary(@PathVariable UUID actualChargeRunId) {
+        return ResponseEntity.ok(actualChargeService.refreshRunSummary(actualChargeRunId));
+    }
+
     @GetMapping("/runs")
     public ResponseEntity<PageResponse<ActualChargeListItemDto>> listRuns(
             @RequestParam UUID billingRunId,

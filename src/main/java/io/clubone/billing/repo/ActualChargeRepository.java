@@ -7,6 +7,7 @@ import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -294,6 +295,47 @@ public class ActualChargeRepository {
                 subscriptionBillingHistoryId.toString());
     }
 
+    /**
+     * Latest live ({@code is_mock = false}) billing history row per invoice for a billing run.
+     * Used to refresh actual-charge KPIs after gateway reconciliation updates history in place.
+     */
+    public Map<UUID, LatestLiveChargeRow> findLatestLiveChargePerInvoice(UUID billingRunId) {
+        Map<UUID, LatestLiveChargeRow> out = new HashMap<>();
+        if (billingRunId == null) {
+            return out;
+        }
+        try {
+            List<LatestLiveChargeRow> rows = jdbc.query(
+                    """
+                    SELECT DISTINCT ON (sbh.invoice_id)
+                        sbh.invoice_id,
+                        bs.status_code,
+                        sbh.invoice_total_amount
+                    FROM client_subscription_billing.subscription_billing_history sbh
+                    JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
+                    WHERE sbh.billing_run_id = ?::uuid
+                      AND COALESCE(sbh.is_mock, false) = false
+                    ORDER BY sbh.invoice_id,
+                             sbh.billing_attempt_on DESC NULLS LAST,
+                             sbh.created_on DESC NULLS LAST,
+                             sbh.subscription_billing_history_id DESC
+                    """,
+                    (rs, rn) -> new LatestLiveChargeRow(
+                            (UUID) rs.getObject("invoice_id"),
+                            rs.getString("status_code"),
+                            rs.getBigDecimal("invoice_total_amount")),
+                    billingRunId.toString());
+            for (LatestLiveChargeRow r : rows) {
+                if (r.invoiceId() != null) {
+                    out.put(r.invoiceId(), r);
+                }
+            }
+        } catch (DataAccessException ex) {
+            return out;
+        }
+        return out;
+    }
+
     public PendingKpi pendingKpisForBillingRun(UUID billingRunId, int stuckMinutes) {
         if (billingRunId == null) {
             return new PendingKpi(0, 0.0, 0);
@@ -337,4 +379,6 @@ public class ActualChargeRepository {
             int pendingCount,
             double pendingAgeP95Seconds,
             int stuckPendingCount) {}
+
+    public record LatestLiveChargeRow(UUID invoiceId, String statusCode, BigDecimal invoiceTotalAmount) {}
 }

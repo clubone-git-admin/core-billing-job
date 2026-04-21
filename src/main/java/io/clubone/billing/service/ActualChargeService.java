@@ -1,13 +1,17 @@
 package io.clubone.billing.service;
 
 import io.clubone.billing.api.dto.*;
+import io.clubone.billing.repo.ActualChargeRepository;
 import io.clubone.billing.repo.AuditLogRepository;
 import io.clubone.billing.repo.BillingRunRepository;
+import io.clubone.billing.repo.MockChargeRepository;
+import io.clubone.billing.repo.MockChargeRepository.MockInvoiceRow;
 import io.clubone.billing.repo.StageRunRepository;
 import io.clubone.billing.repo.SubscriptionBillingHistoryRepository;
 import io.clubone.billing.service.actualcharge.ActualChargeQueuedEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -35,6 +39,9 @@ public class ActualChargeService {
     private final ApplicationEventPublisher applicationEventPublisher;
     private final AuditLogRepository auditLogRepository;
     private final SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository;
+    private final MockChargeRepository mockChargeRepository;
+    private final ActualChargeRepository actualChargeRepository;
+    private final int pendingStuckThresholdMinutes;
 
     public ActualChargeService(
             StageRunRepository stageRunRepository,
@@ -42,13 +49,19 @@ public class ActualChargeService {
             BillingRunService billingRunService,
             ApplicationEventPublisher applicationEventPublisher,
             AuditLogRepository auditLogRepository,
-            SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository) {
+            SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository,
+            MockChargeRepository mockChargeRepository,
+            ActualChargeRepository actualChargeRepository,
+            @Value("${clubone.billing.actual-charge.pending.stuck-threshold-minutes:30}") int pendingStuckThresholdMinutes) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
         this.billingRunService = billingRunService;
         this.applicationEventPublisher = applicationEventPublisher;
         this.auditLogRepository = auditLogRepository;
         this.subscriptionBillingHistoryRepository = subscriptionBillingHistoryRepository;
+        this.mockChargeRepository = mockChargeRepository;
+        this.actualChargeRepository = actualChargeRepository;
+        this.pendingStuckThresholdMinutes = Math.max(1, pendingStuckThresholdMinutes);
     }
 
     @Transactional
@@ -301,6 +314,129 @@ public class ActualChargeService {
         }
         BillingRunDto br = billingRunRepository.findById(stage.billingRunId());
         return toRunResponse(stage, br);
+    }
+
+    /**
+     * Recomputes KPIs from latest live {@code subscription_billing_history} rows for this billing run and merges into
+     * {@code billing_stage_run.summary_json}. Does not start or retry charges.
+     */
+    @Transactional
+    public ActualChargeRunResponse refreshRunSummary(UUID actualChargeRunId) {
+        StageRunDto s = stageRunRepository.findById(actualChargeRunId);
+        if (s == null || !STAGE_CODE.equals(s.stageCode())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Actual charge run not found");
+        }
+        UUID billingRunId = s.billingRunId();
+        List<MockInvoiceRow> invoices = mockChargeRepository.findInvoicesForBillingRun(billingRunId);
+        invoices = filterBySubscriptionInstanceIds(invoices, s.summaryJson());
+        Map<UUID, ActualChargeRepository.LatestLiveChargeRow> latestByInvoice =
+                actualChargeRepository.findLatestLiveChargePerInvoice(billingRunId);
+
+        int success = 0;
+        int pendingInvoices = 0;
+        int failed = 0;
+        int noLiveHistory = 0;
+        BigDecimal totalSelectedAmount = BigDecimal.ZERO;
+        BigDecimal chargedAmount = BigDecimal.ZERO;
+        BigDecimal pendingAmount = BigDecimal.ZERO;
+        BigDecimal failedAmount = BigDecimal.ZERO;
+
+        for (MockInvoiceRow row : invoices) {
+            BigDecimal amt = row.totalAmount() != null ? row.totalAmount() : BigDecimal.ZERO;
+            totalSelectedAmount = totalSelectedAmount.add(amt);
+            ActualChargeRepository.LatestLiveChargeRow latest = latestByInvoice.get(row.invoiceId());
+            if (latest == null) {
+                noLiveHistory++;
+                continue;
+            }
+            String code = latest.statusCode() != null ? latest.statusCode().trim() : "";
+            if (isLiveSuccess(code)) {
+                success++;
+                chargedAmount = chargedAmount.add(amt);
+            } else if ("PENDING_CAPTURE".equals(code)) {
+                pendingInvoices++;
+                pendingAmount = pendingAmount.add(amt);
+            } else {
+                failed++;
+                failedAmount = failedAmount.add(amt);
+            }
+        }
+
+        ActualChargeRepository.PendingKpi pendingKpi =
+                actualChargeRepository.pendingKpisForBillingRun(billingRunId, pendingStuckThresholdMinutes);
+
+        Map<String, Object> patch = new HashMap<>();
+        patch.put("total_selected", invoices.size());
+        patch.put("totalSelected", invoices.size());
+        patch.put("success_count", success);
+        patch.put("successCount", success);
+        patch.put("pending_count", pendingInvoices);
+        patch.put("pendingCount", pendingInvoices);
+        patch.put("pending_capture_row_count", pendingKpi.pendingCount());
+        patch.put("pendingCaptureRowCount", pendingKpi.pendingCount());
+        patch.put("failed_count", failed);
+        patch.put("failureCount", failed);
+        patch.put("no_live_history_count", noLiveHistory);
+        patch.put("noLiveHistoryCount", noLiveHistory);
+        patch.put("total_amount_selected", totalSelectedAmount);
+        patch.put("selectedAmount", totalSelectedAmount);
+        patch.put("charged_amount", chargedAmount);
+        patch.put("successAmount", chargedAmount);
+        patch.put("pending_amount", pendingAmount);
+        patch.put("pendingAmount", pendingAmount);
+        patch.put("failed_amount", failedAmount);
+        patch.put("failureAmount", failedAmount);
+        patch.put("pending_age_p95_seconds", pendingKpi.pendingAgeP95Seconds());
+        patch.put("pendingAgeP95Seconds", pendingKpi.pendingAgeP95Seconds());
+        patch.put("stuck_pending_count", pendingKpi.stuckPendingCount());
+        patch.put("stuckPendingCount", pendingKpi.stuckPendingCount());
+        patch.put("no_pending_gateway_captures", pendingInvoices == 0 && pendingKpi.pendingCount() == 0);
+        patch.put("actual_charge_summary_refreshed_at", OffsetDateTime.now().toString());
+
+        stageRunRepository.mergeStageRunSummaryJson(actualChargeRunId, patch, false);
+        log.info(
+                "actual-charge refresh-summary: stageRunId={} billingRunId={} invoicesInScope={} success={} pendingInvoices={} pendingCaptureRows={} failed={} noLiveHistory={}",
+                actualChargeRunId,
+                billingRunId,
+                invoices.size(),
+                success,
+                pendingInvoices,
+                pendingKpi.pendingCount(),
+                failed,
+                noLiveHistory);
+
+        StageRunDto updated = stageRunRepository.findById(actualChargeRunId);
+        BillingRunDto br = billingRunRepository.findById(billingRunId);
+        return toRunResponse(updated, br);
+    }
+
+    private static List<MockInvoiceRow> filterBySubscriptionInstanceIds(
+            List<MockInvoiceRow> invoices, Map<String, Object> summaryJson) {
+        if (summaryJson == null) {
+            return invoices;
+        }
+        Object opt = summaryJson.get("subscription_instance_ids");
+        if (!(opt instanceof List<?> ids) || ids.isEmpty()) {
+            return invoices;
+        }
+        return invoices.stream()
+                .filter(r -> {
+                    if (r.subscriptionInstanceId() == null) {
+                        return false;
+                    }
+                    String want = r.subscriptionInstanceId().toString();
+                    for (Object id : ids) {
+                        if (id != null && want.equals(id.toString())) {
+                            return true;
+                        }
+                    }
+                    return false;
+                })
+                .toList();
+    }
+
+    private static boolean isLiveSuccess(String code) {
+        return "LIVE_FINALIZED".equals(code) || "LIVE_SUCCESS".equals(code);
     }
 
     public PageResponse<ActualChargeListItemDto> listRuns(
