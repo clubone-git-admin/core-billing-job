@@ -1,9 +1,27 @@
 package io.clubone.billing.service;
 
+import io.clubone.billing.api.dto.BillingCompareExportResponse;
+import io.clubone.billing.api.dto.BillingCompareQueryRequest;
+import io.clubone.billing.api.dto.BillingCompareQueryResponse;
+import io.clubone.billing.api.dto.BillingCompareSnapshotListResponse;
+import io.clubone.billing.api.dto.StageRunDto;
+import io.clubone.billing.api.dto.SubscriptionBillingHistoryItemDto;
 import io.clubone.billing.repo.CompareRepository;
+import io.clubone.billing.repo.StageRunRepository;
+import io.clubone.billing.repo.SubscriptionBillingHistoryRepository;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
-import java.util.*;
+import java.math.BigDecimal;
+import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -13,9 +31,20 @@ import java.util.stream.Collectors;
 public class CompareService {
 
     private final CompareRepository compareRepository;
+    private final StageRunRepository stageRunRepository;
+    private final SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository;
+    private final DuePreviewService duePreviewService;
+    private final Map<String, ExportFile> exports = new ConcurrentHashMap<>();
 
-    public CompareService(CompareRepository compareRepository) {
+    public CompareService(
+            CompareRepository compareRepository,
+            StageRunRepository stageRunRepository,
+            SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository,
+            DuePreviewService duePreviewService) {
         this.compareRepository = compareRepository;
+        this.stageRunRepository = stageRunRepository;
+        this.subscriptionBillingHistoryRepository = subscriptionBillingHistoryRepository;
+        this.duePreviewService = duePreviewService;
     }
 
     public Map<String, Object> compareRuns(UUID runA, UUID runB, String compareType) {
@@ -115,5 +144,690 @@ public class CompareService {
                 "status", item.get("status")
         );
     }
+
+    public BillingCompareQueryResponse query(BillingCompareQueryRequest request) {
+        validateRequest(request);
+        int page = request.page() != null ? request.page() : 1;
+        int pageSize = request.pageSize() != null ? Math.min(request.pageSize(), 500) : 200;
+        String search = request.filters() != null ? request.filters().search() : null;
+        boolean diffOnly = request.filters() != null && Boolean.TRUE.equals(request.filters().diffOnly());
+        String severity = request.filters() != null ? request.filters().severity() : "ALL";
+        String sortBy = request.sort() != null ? normalizeSortBy(request.sort().by()) : "delta_abs";
+        String sortDir = request.sort() != null ? normalizeSortDir(request.sort().dir()) : "desc";
+
+        BillingCompareQueryResponse duePreviewSnapshotResponse = tryDuePreviewSnapshotVsSnapshot(
+                request, search, diffOnly, severity, sortBy, sortDir, page, pageSize);
+        if (duePreviewSnapshotResponse != null) {
+            return duePreviewSnapshotResponse;
+        }
+        BillingCompareQueryResponse duePreviewVsInvoiceResponse = tryDuePreviewSnapshotVsInvoiceGeneration(
+                request, search, diffOnly, severity, sortBy, sortDir, page, pageSize);
+        if (duePreviewVsInvoiceResponse != null) {
+            return duePreviewVsInvoiceResponse;
+        }
+
+        UUID leftResolvedRunId = compareRepository.resolveBillingRunIdForCompare(
+                request.left().stageCode(), request.left().runId());
+        UUID rightResolvedRunId = compareRepository.resolveBillingRunIdForCompare(
+                request.right().stageCode(), request.right().runId());
+        if (leftResolvedRunId == null) {
+            throw new CompareApiException(
+                    "SNAPSHOT_NOT_FOUND",
+                    "Left snapshot not found",
+                    HttpStatus.BAD_REQUEST,
+                    Map.of("left.run_id", request.left().runId(), "left.stage_code", request.left().stageCode()));
+        }
+        if (rightResolvedRunId == null) {
+            throw new CompareApiException(
+                    "SNAPSHOT_NOT_FOUND",
+                    "Right snapshot not found",
+                    HttpStatus.BAD_REQUEST,
+                    Map.of("right.run_id", request.right().runId(), "right.stage_code", request.right().stageCode()));
+        }
+        BillingCompareQueryResponse.Summary summary = compareRepository.querySummary(
+                request.left().stageCode(), leftResolvedRunId,
+                request.right().stageCode(), rightResolvedRunId,
+                search, severity);
+        int totalRows = compareRepository.queryTotalRows(
+                request.left().stageCode(), leftResolvedRunId,
+                request.right().stageCode(), rightResolvedRunId,
+                search, diffOnly, severity);
+        int offset = (page - 1) * pageSize;
+        List<BillingCompareQueryResponse.Row> rows = compareRepository.queryRows(
+                request.left().stageCode(), leftResolvedRunId,
+                request.right().stageCode(), rightResolvedRunId,
+                search, diffOnly, severity, sortBy, sortDir, pageSize, offset);
+        int totalPages = totalRows == 0 ? 0 : (int) Math.ceil((double) totalRows / pageSize);
+        return new BillingCompareQueryResponse(summary, rows, page, pageSize, totalPages, totalRows, page < totalPages);
+    }
+
+    private BillingCompareQueryResponse tryDuePreviewSnapshotVsSnapshot(
+            BillingCompareQueryRequest request,
+            String search,
+            boolean diffOnly,
+            String severity,
+            String sortBy,
+            String sortDir,
+            int page,
+            int pageSize) {
+        if (!"DUE_PREVIEW".equalsIgnoreCase(request.left().stageCode())
+                || !"DUE_PREVIEW".equalsIgnoreCase(request.right().stageCode())) {
+            return null;
+        }
+        StageRunDto leftStageRun = stageRunRepository.findById(request.left().runId());
+        StageRunDto rightStageRun = stageRunRepository.findById(request.right().runId());
+        if (leftStageRun == null || rightStageRun == null) {
+            return null;
+        }
+        if (!"DUE_PREVIEW".equalsIgnoreCase(leftStageRun.stageCode())
+                || !"DUE_PREVIEW".equalsIgnoreCase(rightStageRun.stageCode())) {
+            return null;
+        }
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> leftInvoices = (List<Map<String, Object>>) duePreviewService
+                .getDuePreviewRunDetails(leftStageRun.stageRunId())
+                .getOrDefault("invoices", List.of());
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rightInvoices = (List<Map<String, Object>>) duePreviewService
+                .getDuePreviewRunDetails(rightStageRun.stageRunId())
+                .getOrDefault("invoices", List.of());
+
+        Map<String, Map<String, Object>> leftByKey = toDuePreviewKeyedMap(leftInvoices);
+        Map<String, Map<String, Object>> rightByKey = toDuePreviewKeyedMap(rightInvoices);
+        LinkedHashMap<String, Map<String, Object>> allKeys = new LinkedHashMap<>();
+        leftByKey.forEach((k, v) -> allKeys.put(k, v));
+        rightByKey.forEach((k, v) -> allKeys.put(k, v));
+
+        List<BillingCompareQueryResponse.Row> built = new ArrayList<>();
+        for (String key : allKeys.keySet()) {
+            Map<String, Object> left = leftByKey.get(key);
+            Map<String, Object> right = rightByKey.get(key);
+            built.add(buildDuePreviewRow(key, left, right));
+        }
+        List<BillingCompareQueryResponse.Row> searched = built.stream()
+                .filter(r -> matchesSearchSeverity(r, search, severity))
+                .collect(Collectors.toCollection(ArrayList::new));
+        BillingCompareQueryResponse.Summary summary = summarize(searched);
+        List<BillingCompareQueryResponse.Row> filtered = searched.stream()
+                .filter(r -> !diffOnly || (r.changedFields() != null && !r.changedFields().isEmpty()))
+                .collect(Collectors.toCollection(ArrayList::new));
+
+        Comparator<BillingCompareQueryResponse.Row> comparator = comparator(sortBy, sortDir);
+        filtered.sort(comparator);
+
+        int totalRows = filtered.size();
+        int offset = Math.max((page - 1) * pageSize, 0);
+        int end = Math.min(offset + pageSize, totalRows);
+        List<BillingCompareQueryResponse.Row> pageRows = offset >= totalRows ? List.of() : filtered.subList(offset, end);
+        int totalPages = totalRows == 0 ? 0 : (int) Math.ceil((double) totalRows / pageSize);
+        return new BillingCompareQueryResponse(summary, pageRows, page, pageSize, totalPages, totalRows, page < totalPages);
+    }
+
+    private BillingCompareQueryResponse tryDuePreviewSnapshotVsInvoiceGeneration(
+            BillingCompareQueryRequest request,
+            String search,
+            boolean diffOnly,
+            String severity,
+            String sortBy,
+            String sortDir,
+            int page,
+            int pageSize) {
+        if (!"DUE_PREVIEW".equalsIgnoreCase(request.left().stageCode())
+                || !"INVOICE_GENERATION".equalsIgnoreCase(request.right().stageCode())) {
+            return null;
+        }
+        StageRunDto leftStageRun = stageRunRepository.findById(request.left().runId());
+        if (leftStageRun == null || !"DUE_PREVIEW".equalsIgnoreCase(leftStageRun.stageCode())) {
+            return null;
+        }
+        UUID rightBillingRunId = compareRepository.resolveBillingRunIdForCompare(
+                request.right().stageCode(), request.right().runId());
+        if (rightBillingRunId == null) {
+            return null;
+        }
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> leftInvoices = (List<Map<String, Object>>) duePreviewService
+                .getDuePreviewRunDetails(leftStageRun.stageRunId())
+                .getOrDefault("invoices", List.of());
+        Map<String, Map<String, Object>> leftByKey = toDuePreviewKeyedMap(leftInvoices);
+
+        Map<String, SubscriptionBillingHistoryItemDto> rightByKey = new LinkedHashMap<>();
+        int limit = 5000;
+        int offset = 0;
+        while (true) {
+            List<SubscriptionBillingHistoryItemDto> pageRows = subscriptionBillingHistoryRepository.findByBillingRunId(
+                    rightBillingRunId, null, null, null, null, null, null, limit, offset);
+            if (pageRows.isEmpty()) {
+                break;
+            }
+            for (SubscriptionBillingHistoryItemDto row : pageRows) {
+                String key = row.subscriptionInstanceId() != null
+                        ? row.subscriptionInstanceId().toString()
+                        : (row.invoiceId() != null ? row.invoiceId().toString() : null);
+                if (key != null) {
+                    rightByKey.put(key, row);
+                }
+            }
+            if (pageRows.size() < limit) {
+                break;
+            }
+            offset += limit;
+        }
+
+        LinkedHashMap<String, Boolean> allKeys = new LinkedHashMap<>();
+        leftByKey.keySet().forEach(k -> allKeys.put(k, true));
+        rightByKey.keySet().forEach(k -> allKeys.put(k, true));
+
+        List<BillingCompareQueryResponse.Row> built = new ArrayList<>();
+        for (String key : allKeys.keySet()) {
+            Map<String, Object> left = leftByKey.get(key);
+            SubscriptionBillingHistoryItemDto right = rightByKey.get(key);
+            built.add(buildDuePreviewVsInvoiceRow(key, left, right));
+        }
+        List<BillingCompareQueryResponse.Row> searched = built.stream()
+                .filter(r -> matchesSearchSeverity(r, search, severity))
+                .collect(Collectors.toCollection(ArrayList::new));
+        BillingCompareQueryResponse.Summary summary = summarize(searched);
+        List<BillingCompareQueryResponse.Row> filtered = searched.stream()
+                .filter(r -> !diffOnly || (r.changedFields() != null && !r.changedFields().isEmpty()))
+                .collect(Collectors.toCollection(ArrayList::new));
+
+        Comparator<BillingCompareQueryResponse.Row> comparator = comparator(sortBy, sortDir);
+        filtered.sort(comparator);
+        int totalRows = filtered.size();
+        int rowOffset = Math.max((page - 1) * pageSize, 0);
+        int end = Math.min(rowOffset + pageSize, totalRows);
+        List<BillingCompareQueryResponse.Row> pageRows = rowOffset >= totalRows ? List.of() : filtered.subList(rowOffset, end);
+        int totalPages = totalRows == 0 ? 0 : (int) Math.ceil((double) totalRows / pageSize);
+        return new BillingCompareQueryResponse(summary, pageRows, page, pageSize, totalPages, totalRows, page < totalPages);
+    }
+
+    private static Map<String, Map<String, Object>> toDuePreviewKeyedMap(List<Map<String, Object>> invoices) {
+        Map<String, Map<String, Object>> out = new LinkedHashMap<>();
+        if (invoices == null) {
+            return out;
+        }
+        for (Map<String, Object> row : invoices) {
+            String key = compareKey(row);
+            if (key != null) {
+                out.put(key, row);
+            }
+        }
+        return out;
+    }
+
+    private static String compareKey(Map<String, Object> row) {
+        if (row == null) {
+            return null;
+        }
+        String subscriptionId = str(row.get("subscription_instance_id"));
+        if (subscriptionId != null) {
+            return subscriptionId;
+        }
+        String scheduleId = str(row.get("billing_schedule_id"));
+        if (scheduleId != null) {
+            return scheduleId;
+        }
+        return null;
+    }
+
+    private static BillingCompareQueryResponse.SideSnapshot sideFromDuePreviewMap(Map<String, Object> row, String invoiceStatusLabel) {
+        if (row == null) {
+            return null;
+        }
+        return new BillingCompareQueryResponse.SideSnapshot(
+                fullName(row),
+                firstNonBlank(str(row.get("role_id")), str(row.get("client_role_id"))),
+                str(row.get("agreement_name")),
+                str(row.get("agreement_status")),
+                str(row.get("cycle_number")),
+                str(row.get("location_name")),
+                amount(row),
+                invoiceStatusLabel
+        );
+    }
+
+    private static BillingCompareQueryResponse.SideSnapshot sideFromInvoiceDto(SubscriptionBillingHistoryItemDto r) {
+        if (r == null) {
+            return null;
+        }
+        String cycle = null;
+        if (r.billingPeriodStart() != null && r.billingPeriodEnd() != null) {
+            cycle = r.billingPeriodStart() + " / " + r.billingPeriodEnd();
+        }
+        String invStatus = firstNonBlank(r.invoiceStatus(), r.billingStatusCode());
+        return new BillingCompareQueryResponse.SideSnapshot(
+                r.clientName(),
+                firstNonBlank(r.roleId(), r.clientRoleId() != null ? r.clientRoleId().toString() : null),
+                firstNonBlank(r.agreementName(), r.agreementOrPlanName()),
+                r.agreementStatus(),
+                cycle,
+                r.locationName(),
+                r.invoiceTotalAmount(),
+                invStatus
+        );
+    }
+
+    private static BillingCompareQueryResponse.Row buildDuePreviewRow(String key, Map<String, Object> left, Map<String, Object> right) {
+        String leftStatus = left != null ? "READY" : null;
+        String rightStatus = right != null ? "READY" : null;
+        BigDecimal leftAmount = amount(left);
+        BigDecimal rightAmount = amount(right);
+        BigDecimal delta = rightAmount.subtract(leftAmount);
+
+        BillingCompareQueryResponse.SideSnapshot leftS = sideFromDuePreviewMap(left, "READY");
+        BillingCompareQueryResponse.SideSnapshot rightS = sideFromDuePreviewMap(right, "READY");
+
+        String leftClient = left != null ? fullName(left) : null;
+        String rightClient = right != null ? fullName(right) : null;
+        String client = firstNonBlank(leftClient, rightClient);
+        String agreement = firstNonBlank(str(left != null ? left.get("agreement_name") : null), str(right != null ? right.get("agreement_name") : null));
+        String location = firstNonBlank(str(left != null ? left.get("location_name") : null), str(right != null ? right.get("location_name") : null));
+
+        String subId = firstNonBlank(
+                str(left != null ? left.get("subscription_instance_id") : null),
+                str(right != null ? right.get("subscription_instance_id") : null));
+        String invoiceId = firstNonBlank(
+                str(left != null ? left.get("invoice_id") : null),
+                str(right != null ? right.get("invoice_id") : null));
+
+        List<String> changed = new ArrayList<>();
+        if (!Objects.equals(leftStatus, rightStatus)) {
+            changed.add("status");
+        }
+        if (leftAmount.subtract(rightAmount).abs().compareTo(new BigDecimal("0.0001")) > 0) {
+            changed.add("amount");
+        }
+        if (!Objects.equals(str(leftClient), str(rightClient))) {
+            changed.add("client_name");
+        }
+        if (!Objects.equals(str(left != null ? left.get("agreement_name") : null), str(right != null ? right.get("agreement_name") : null))) {
+            changed.add("agreement_name");
+        }
+        if (!Objects.equals(str(left != null ? left.get("location_name") : null), str(right != null ? right.get("location_name") : null))) {
+            changed.add("location_name");
+        }
+
+        String sev = severity(left != null, right != null, changed);
+        return new BillingCompareQueryResponse.Row(
+                subId,
+                invoiceId,
+                key,
+                leftS,
+                rightS,
+                client,
+                agreement,
+                location,
+                leftStatus,
+                rightStatus,
+                leftAmount,
+                rightAmount,
+                delta,
+                changed,
+                sev
+        );
+    }
+
+    private static BillingCompareQueryResponse.Row buildDuePreviewVsInvoiceRow(
+            String key,
+            Map<String, Object> left,
+            SubscriptionBillingHistoryItemDto right) {
+        String leftStatus = left != null ? "READY" : null;
+        String rightStatus = right != null ? firstNonBlank(right.billingStatusCode(), right.invoiceStatus()) : null;
+        BigDecimal leftAmount = amount(left);
+        BigDecimal rightAmount = right != null && right.invoiceTotalAmount() != null ? right.invoiceTotalAmount() : BigDecimal.ZERO;
+        BigDecimal delta = rightAmount.subtract(leftAmount);
+
+        BillingCompareQueryResponse.SideSnapshot leftS = sideFromDuePreviewMap(left, "READY");
+        BillingCompareQueryResponse.SideSnapshot rightS = sideFromInvoiceDto(right);
+
+        String leftClient = left != null ? fullName(left) : null;
+        String rightClient = right != null ? right.clientName() : null;
+        String client = firstNonBlank(leftClient, rightClient);
+        String agreement = firstNonBlank(
+                str(left != null ? left.get("agreement_name") : null),
+                firstNonBlank(right != null ? right.agreementName() : null, right != null ? right.agreementOrPlanName() : null));
+        String location = firstNonBlank(str(left != null ? left.get("location_name") : null), right != null ? right.locationName() : null);
+
+        String subId = firstNonBlank(
+                str(left != null ? left.get("subscription_instance_id") : null),
+                right != null && right.subscriptionInstanceId() != null ? right.subscriptionInstanceId().toString() : null);
+        String invoiceId = firstNonBlank(
+                str(left != null ? left.get("invoice_id") : null),
+                right != null && right.invoiceId() != null ? right.invoiceId().toString() : null);
+
+        List<String> changed = new ArrayList<>();
+        if (!Objects.equals(leftStatus, rightStatus)) {
+            changed.add("status");
+        }
+        if (leftAmount.subtract(rightAmount).abs().compareTo(new BigDecimal("0.0001")) > 0) {
+            changed.add("amount");
+        }
+        if (!Objects.equals(str(leftClient), str(rightClient))) {
+            changed.add("client_name");
+        }
+        if (!Objects.equals(str(left != null ? left.get("agreement_name") : null), str(agreement))) {
+            changed.add("agreement_name");
+        }
+        if (!Objects.equals(str(left != null ? left.get("location_name") : null), str(location))) {
+            changed.add("location_name");
+        }
+
+        String sev = severity(left != null, right != null, changed);
+        return new BillingCompareQueryResponse.Row(
+                subId,
+                invoiceId,
+                key,
+                leftS,
+                rightS,
+                client,
+                agreement,
+                location,
+                leftStatus,
+                rightStatus,
+                leftAmount,
+                rightAmount,
+                delta,
+                changed,
+                sev
+        );
+    }
+
+    private static String severity(boolean leftPresent, boolean rightPresent, List<String> changed) {
+        if (!leftPresent || !rightPresent || changed.contains("amount")) {
+            return "HIGH";
+        }
+        if (changed.contains("client_name") || changed.contains("agreement_name") || changed.contains("location_name")) {
+            return "MEDIUM";
+        }
+        if (changed.contains("status")) {
+            return "LOW";
+        }
+        return "LOW";
+    }
+
+    private static boolean matchesSearchSeverity(BillingCompareQueryResponse.Row row, String search, String severity) {
+        if (severity != null && !severity.isBlank() && !"ALL".equalsIgnoreCase(severity)
+                && !severity.equalsIgnoreCase(row.severity())) {
+            return false;
+        }
+        if (search == null || search.isBlank()) {
+            return true;
+        }
+        String s = search.toLowerCase();
+        return contains(row.entityKey(), s)
+                || contains(row.subscriptionInstanceId(), s)
+                || contains(row.invoiceId(), s)
+                || contains(row.clientName(), s)
+                || contains(row.agreementName(), s)
+                || contains(row.locationName(), s)
+                || sideMatchesSearch(row.left(), s)
+                || sideMatchesSearch(row.right(), s);
+    }
+
+    private static boolean sideMatchesSearch(BillingCompareQueryResponse.SideSnapshot side, String s) {
+        if (side == null) {
+            return false;
+        }
+        return contains(side.clientName(), s)
+                || contains(side.clientRole(), s)
+                || contains(side.agreementName(), s)
+                || contains(side.agreementStatus(), s)
+                || contains(side.cycleNo(), s)
+                || contains(side.locationName(), s)
+                || contains(side.invoiceStatus(), s);
+    }
+
+    private static Comparator<BillingCompareQueryResponse.Row> comparator(String sortBy, String sortDir) {
+        Comparator<BillingCompareQueryResponse.Row> c;
+        if ("entity_key".equals(sortBy)) {
+            c = Comparator.comparing(r -> safe(r.entityKey()), String.CASE_INSENSITIVE_ORDER);
+        } else if ("delta_amount".equals(sortBy)) {
+            c = Comparator.comparing(BillingCompareQueryResponse.Row::deltaAmount, Comparator.nullsFirst(BigDecimal::compareTo))
+                    .thenComparing(r -> safe(r.entityKey()), String.CASE_INSENSITIVE_ORDER);
+        } else {
+            c = Comparator.comparing((BillingCompareQueryResponse.Row r) ->
+                            r.deltaAmount() != null ? r.deltaAmount().abs() : BigDecimal.ZERO,
+                    Comparator.nullsFirst(BigDecimal::compareTo))
+                    .thenComparing(r -> safe(r.entityKey()), String.CASE_INSENSITIVE_ORDER);
+        }
+        return "asc".equalsIgnoreCase(sortDir) ? c : c.reversed();
+    }
+
+    private static BillingCompareQueryResponse.Summary summarize(List<BillingCompareQueryResponse.Row> rows) {
+        int total = rows.size();
+        int matched = 0;
+        int changed = 0;
+        int leftOnly = 0;
+        int rightOnly = 0;
+        BigDecimal leftAmount = BigDecimal.ZERO;
+        BigDecimal rightAmount = BigDecimal.ZERO;
+        BigDecimal delta = BigDecimal.ZERO;
+        for (BillingCompareQueryResponse.Row r : rows) {
+            leftAmount = leftAmount.add(r.leftAmount() != null ? r.leftAmount() : BigDecimal.ZERO);
+            rightAmount = rightAmount.add(r.rightAmount() != null ? r.rightAmount() : BigDecimal.ZERO);
+            delta = delta.add(r.deltaAmount() != null ? r.deltaAmount() : BigDecimal.ZERO);
+            boolean l = r.leftStatus() != null;
+            boolean rr = r.rightStatus() != null;
+            if (l && rr) {
+                if (r.changedFields() == null || r.changedFields().isEmpty()) matched++;
+                else changed++;
+            } else if (l) {
+                leftOnly++;
+            } else if (rr) {
+                rightOnly++;
+            }
+        }
+        return new BillingCompareQueryResponse.Summary(total, matched, changed, leftOnly, rightOnly, leftAmount, rightAmount, delta);
+    }
+
+    private static BigDecimal amount(Map<String, Object> row) {
+        if (row == null) {
+            return BigDecimal.ZERO;
+        }
+        Object v = row.get("total_amount");
+        if (v == null) {
+            return BigDecimal.ZERO;
+        }
+        if (v instanceof BigDecimal bd) {
+            return bd;
+        }
+        try {
+            return new BigDecimal(v.toString().trim());
+        } catch (Exception e) {
+            return BigDecimal.ZERO;
+        }
+    }
+
+    private static String fullName(Map<String, Object> row) {
+        String first = str(row.get("client_first_name"));
+        String last = str(row.get("client_last_name"));
+        if (first == null && last == null) return null;
+        return ((first == null ? "" : first) + " " + (last == null ? "" : last)).trim();
+    }
+
+    private static String str(Object o) {
+        if (o == null) return null;
+        String s = o.toString().trim();
+        return s.isEmpty() ? null : s;
+    }
+
+    private static String firstNonBlank(String a, String b) {
+        return (a != null && !a.isBlank()) ? a : b;
+    }
+
+    private static boolean contains(String value, String searchLower) {
+        return value != null && value.toLowerCase().contains(searchLower);
+    }
+
+    private static String safe(String s) {
+        return s == null ? "" : s;
+    }
+
+    public BillingCompareExportResponse export(BillingCompareQueryRequest request, String baseUrl) {
+        List<BillingCompareQueryResponse.Row> allRows = new ArrayList<>();
+        for (int exportPage = 1; ; exportPage++) {
+            BillingCompareQueryRequest paged = new BillingCompareQueryRequest(
+                    request.scenarioCode(),
+                    request.left(),
+                    request.right(),
+                    request.filters(),
+                    request.sort(),
+                    request.format(),
+                    exportPage,
+                    500);
+            BillingCompareQueryResponse chunk = query(paged);
+            if (chunk.rows() != null && !chunk.rows().isEmpty()) {
+                allRows.addAll(chunk.rows());
+            }
+            if (!Boolean.TRUE.equals(chunk.hasNext())) {
+                break;
+            }
+            if (exportPage > 10_000) {
+                break;
+            }
+        }
+        String exportId = "cmp-exp-" + UUID.randomUUID().toString().substring(0, 8);
+        String csv = toCsv(allRows);
+        OffsetDateTime expiresAt = OffsetDateTime.now().plusHours(24);
+        exports.put(exportId, new ExportFile(csv.getBytes(), expiresAt));
+        String downloadUrl = baseUrl + "/api/v1/billing/compare/export/" + exportId + "/download";
+        return new BillingCompareExportResponse(exportId, "READY", downloadUrl, expiresAt);
+    }
+
+    public byte[] downloadExport(String exportId) {
+        ExportFile exportFile = exports.get(exportId);
+        if (exportFile == null || exportFile.expiresAt().isBefore(OffsetDateTime.now())) {
+            exports.remove(exportId);
+            throw new CompareApiException(
+                    "SNAPSHOT_NOT_FOUND",
+                    "Export not found or expired",
+                    HttpStatus.NOT_FOUND,
+                    Map.of("export_id", exportId));
+        }
+        return exportFile.payload();
+    }
+
+    public BillingCompareSnapshotListResponse listSnapshots(
+            String stageCode,
+            java.time.LocalDate dueDateFrom,
+            java.time.LocalDate dueDateTo,
+            String search,
+            Integer limit,
+            Integer offset) {
+        int safeLimit = limit != null ? Math.min(Math.max(limit, 1), 500) : 300;
+        int safeOffset = offset != null ? Math.max(offset, 0) : 0;
+        List<BillingCompareSnapshotListResponse.Item> data = compareRepository.listSnapshots(
+                stageCode, dueDateFrom, dueDateTo, search, safeLimit, safeOffset);
+        int total = compareRepository.countSnapshots(stageCode, dueDateFrom, dueDateTo, search);
+        return new BillingCompareSnapshotListResponse(data, total, safeLimit, safeOffset);
+    }
+
+    private void validateRequest(BillingCompareQueryRequest request) {
+        if (request == null || request.left() == null || request.right() == null) {
+            throw new CompareApiException(
+                    "COMPARE_QUERY_INVALID",
+                    "Left and right snapshots are required",
+                    HttpStatus.BAD_REQUEST,
+                    Map.of());
+        }
+        validateStage(request.left().stageCode(), "left.stage_code");
+        validateStage(request.right().stageCode(), "right.stage_code");
+        validateScenario(request.scenarioCode(), request.left().stageCode(), request.right().stageCode());
+    }
+
+    private static void validateStage(String stageCode, String field) {
+        List<String> allowed = List.of("DUE_PREVIEW", "INVOICE_GENERATION", "ACTUAL_CHARGE", "MOCK_CHARGE");
+        if (stageCode == null || !allowed.contains(stageCode.toUpperCase())) {
+            throw new CompareApiException(
+                    "COMPARE_QUERY_INVALID",
+                    "Invalid stage code",
+                    HttpStatus.BAD_REQUEST,
+                    Map.of(field, stageCode));
+        }
+    }
+
+    private static void validateScenario(String scenarioCode, String leftStageCode, String rightStageCode) {
+        String sc = scenarioCode == null ? "" : scenarioCode.toUpperCase();
+        if ("CUSTOM".equals(sc)) {
+            return;
+        }
+        Map<String, String> scenarios = Map.of(
+                "DUE_PREVIEW_VS_DUE_PREVIEW", "DUE_PREVIEW:DUE_PREVIEW",
+                "DUE_PREVIEW_VS_INVOICE_GENERATION", "DUE_PREVIEW:INVOICE_GENERATION",
+                "INVOICE_GENERATION_VS_ACTUAL_CHARGE", "INVOICE_GENERATION:ACTUAL_CHARGE");
+        String expected = scenarios.get(sc);
+        String actual = (leftStageCode == null ? "" : leftStageCode.toUpperCase()) + ":" +
+                (rightStageCode == null ? "" : rightStageCode.toUpperCase());
+        if (expected == null || !expected.equals(actual)) {
+            throw new CompareApiException(
+                    "COMPARE_NOT_SUPPORTED",
+                    "Scenario and stage combination is not supported",
+                    HttpStatus.BAD_REQUEST,
+                    Map.of("scenario_code", scenarioCode, "left.stage_code", leftStageCode, "right.stage_code", rightStageCode));
+        }
+    }
+
+    private static String normalizeSortBy(String sortBy) {
+        if (sortBy == null) {
+            return "delta_abs";
+        }
+        List<String> allowed = List.of("delta_abs", "delta_amount", "entity_key");
+        return allowed.contains(sortBy) ? sortBy : "delta_abs";
+    }
+
+    private static String normalizeSortDir(String sortDir) {
+        return "asc".equalsIgnoreCase(sortDir) ? "asc" : "desc";
+    }
+
+    private static String toCsv(List<BillingCompareQueryResponse.Row> rows) {
+        List<String> lines = new ArrayList<>();
+        lines.add(String.join(",",
+                "left_client_name", "left_client_role", "left_agreement_name", "left_agreement_status", "left_cycle_no",
+                "left_location_name", "left_amount", "left_invoice_status",
+                "subscription_instance_id", "invoice_id", "entity_key",
+                "right_client_name", "right_client_role", "right_agreement_name", "right_agreement_status", "right_cycle_no",
+                "right_location_name", "right_amount", "right_invoice_status",
+                "delta_amount", "changed_fields", "severity"));
+        for (BillingCompareQueryResponse.Row r : rows) {
+            BillingCompareQueryResponse.SideSnapshot l = r.left();
+            BillingCompareQueryResponse.SideSnapshot rt = r.right();
+            lines.add(String.join(",",
+                    esc(l != null ? l.clientName() : null),
+                    esc(l != null ? l.clientRole() : null),
+                    esc(l != null ? l.agreementName() : null),
+                    esc(l != null ? l.agreementStatus() : null),
+                    esc(l != null ? l.cycleNo() : null),
+                    esc(l != null ? l.locationName() : null),
+                    l != null && l.amount() != null ? String.valueOf(l.amount()) : "",
+                    esc(l != null ? l.invoiceStatus() : null),
+                    esc(r.subscriptionInstanceId()),
+                    esc(r.invoiceId()),
+                    esc(r.entityKey()),
+                    esc(rt != null ? rt.clientName() : null),
+                    esc(rt != null ? rt.clientRole() : null),
+                    esc(rt != null ? rt.agreementName() : null),
+                    esc(rt != null ? rt.agreementStatus() : null),
+                    esc(rt != null ? rt.cycleNo() : null),
+                    esc(rt != null ? rt.locationName() : null),
+                    rt != null && rt.amount() != null ? String.valueOf(rt.amount()) : "",
+                    esc(rt != null ? rt.invoiceStatus() : null),
+                    String.valueOf(r.deltaAmount()),
+                    esc(String.join("|", r.changedFields() != null ? r.changedFields() : List.of())),
+                    esc(r.severity())));
+        }
+        return String.join("\n", lines);
+    }
+
+    private static String esc(String in) {
+        if (in == null) {
+            return "";
+        }
+        return "\"" + in.replace("\"", "\"\"") + "\"";
+    }
+
+    private record ExportFile(byte[] payload, OffsetDateTime expiresAt) {}
 }
 

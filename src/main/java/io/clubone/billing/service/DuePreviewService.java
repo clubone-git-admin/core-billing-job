@@ -64,6 +64,7 @@ public class DuePreviewService {
     /**
      * List due preview run history with pagination.
      *
+     * @param billingRunId if non-null, restrict to due preview stage runs for this parent billing run
      * @param limit    page size
      * @param offset   offset for pagination
      * @param sortBy   optional sort field (e.g. generated_at, status, run_id)
@@ -71,9 +72,10 @@ public class DuePreviewService {
      * @return paginated list of due preview run history records
      */
     public PageResponse<DuePreviewRunHistoryDto> listDuePreviewRunHistory(
-            int limit, int offset, String sortBy, String sortOrder) {
-        int total = duePreviewRepository.countDuePreviewRunHistory();
-        List<DuePreviewRunHistoryDto> data = duePreviewRepository.findDuePreviewRunHistory(limit, offset, sortBy, sortOrder);
+            UUID billingRunId, int limit, int offset, String sortBy, String sortOrder) {
+        int total = duePreviewRepository.countDuePreviewRunHistory(billingRunId);
+        List<DuePreviewRunHistoryDto> data = duePreviewRepository.findDuePreviewRunHistory(
+                billingRunId, limit, offset, sortBy, sortOrder);
         return PageResponse.of(data, total, limit, offset);
     }
 

@@ -1,11 +1,19 @@
 package io.clubone.billing.api.v1;
 
+import io.clubone.billing.api.dto.BillingCompareExportResponse;
+import io.clubone.billing.api.dto.BillingCompareQueryRequest;
+import io.clubone.billing.api.dto.BillingCompareQueryResponse;
+import io.clubone.billing.api.dto.BillingCompareSnapshotListResponse;
 import io.clubone.billing.service.CompareService;
+import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDate;
 import java.util.Map;
 import java.util.UUID;
 
@@ -59,5 +67,41 @@ public class CompareController {
         }
         
         return ResponseEntity.ok(comparison);
+    }
+
+    @PostMapping("/query")
+    public ResponseEntity<BillingCompareQueryResponse> query(@Valid @RequestBody BillingCompareQueryRequest request) {
+        return ResponseEntity.ok(compareService.query(request));
+    }
+
+    @PostMapping("/export")
+    public ResponseEntity<BillingCompareExportResponse> export(
+            @Valid @RequestBody BillingCompareQueryRequest request,
+            @RequestHeader(value = "X-Forwarded-Proto", required = false) String forwardedProto,
+            @RequestHeader(value = "Host", required = false) String host) {
+        String proto = (forwardedProto != null && !forwardedProto.isBlank()) ? forwardedProto : "http";
+        String safeHost = (host != null && !host.isBlank()) ? host : "localhost";
+        String baseUrl = proto + "://" + safeHost;
+        return ResponseEntity.ok(compareService.export(request, baseUrl));
+    }
+
+    @GetMapping("/export/{exportId}/download")
+    public ResponseEntity<byte[]> downloadExport(@PathVariable String exportId) {
+        byte[] payload = compareService.downloadExport(exportId);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_TYPE, "text/csv")
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + exportId + ".csv\"")
+                .body(payload);
+    }
+
+    @GetMapping("/snapshots")
+    public ResponseEntity<BillingCompareSnapshotListResponse> snapshots(
+            @RequestParam(required = false) String stageCode,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dueDateFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dueDateTo,
+            @RequestParam(required = false) String search,
+            @RequestParam(defaultValue = "300") Integer limit,
+            @RequestParam(defaultValue = "0") Integer offset) {
+        return ResponseEntity.ok(compareService.listSnapshots(stageCode, dueDateFrom, dueDateTo, search, limit, offset));
     }
 }

@@ -110,13 +110,14 @@ public class DuePreviewController {
             )
     })
     public ResponseEntity<PageResponse<DuePreviewRunHistoryDto>> listDuePreviewRunHistory(
+            @Parameter(description = "If set, only due preview stage runs for this parent billing run") @RequestParam(required = false) UUID billingRunId,
             @Parameter(description = "Page size") @RequestParam(defaultValue = "20") Integer limit,
             @Parameter(description = "Offset for pagination") @RequestParam(defaultValue = "0") Integer offset,
             @Parameter(description = "Sort by: generated_at, status, run_id") @RequestParam(required = false) String sortBy,
             @Parameter(description = "Sort order: asc, desc") @RequestParam(defaultValue = "desc") String sortOrder) {
 
         PageResponse<DuePreviewRunHistoryDto> response = duePreviewService.listDuePreviewRunHistory(
-                limit, offset, sortBy != null ? sortBy : "generated_at", sortOrder);
+                billingRunId, limit, offset, sortBy != null ? sortBy : "generated_at", sortOrder);
         return ResponseEntity.ok(response);
     }
 

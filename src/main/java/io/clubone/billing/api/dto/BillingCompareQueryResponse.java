@@ -1,0 +1,72 @@
+package io.clubone.billing.api.dto;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
+
+import java.math.BigDecimal;
+import java.util.List;
+
+@JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record BillingCompareQueryResponse(
+        Summary summary,
+        List<Row> rows,
+        Integer page,
+        Integer pageSize,
+        Integer totalPages,
+        Integer totalRows,
+        Boolean hasNext
+) {
+    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+    public record Summary(
+            Integer totalRecords,
+            Integer matchedRecords,
+            Integer changedRecords,
+            Integer leftOnlyRecords,
+            Integer rightOnlyRecords,
+            BigDecimal leftAmount,
+            BigDecimal rightAmount,
+            BigDecimal deltaAmount
+    ) {}
+
+    /**
+     * Per-side mirrored snapshot fields for the compare grid (§1.2.1).
+     */
+    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SideSnapshot(
+            String clientName,
+            String clientRole,
+            String agreementName,
+            String agreementStatus,
+            String cycleNo,
+            String locationName,
+            BigDecimal amount,
+            String invoiceStatus
+    ) {}
+
+    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Row(
+            /** Center identity: subscription when known (UUID string). */
+            String subscriptionInstanceId,
+            /** Center identity: invoice UUID string when known. */
+            String invoiceId,
+            /** Join / legacy key (often same as subscription id). */
+            String entityKey,
+            SideSnapshot left,
+            SideSnapshot right,
+            /** Legacy flat fields for FE fallback. */
+            String clientName,
+            String agreementName,
+            String locationName,
+            String leftStatus,
+            String rightStatus,
+            BigDecimal leftAmount,
+            BigDecimal rightAmount,
+            BigDecimal deltaAmount,
+            List<String> changedFields,
+            String severity
+    ) {}
+}

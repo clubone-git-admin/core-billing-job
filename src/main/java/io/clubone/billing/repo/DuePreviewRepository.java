@@ -259,8 +259,11 @@ public class DuePreviewRepository {
 
     /**
      * Find due preview run history (paginated). Each row is a DUE_PREVIEW stage run with summary and parent run approval.
+     *
+     * @param billingRunId if non-null, only stage runs for this parent billing run (matches {@code bsr.billing_run_id}).
      */
-    public List<DuePreviewRunHistoryDto> findDuePreviewRunHistory(int limit, int offset, String sortBy, String sortOrder) {
+    public List<DuePreviewRunHistoryDto> findDuePreviewRunHistory(
+            UUID billingRunId, int limit, int offset, String sortBy, String sortOrder) {
         String orderCol = "bsr.ended_on";
         if ("generated_at".equalsIgnoreCase(sortBy) || "ended_on".equalsIgnoreCase(sortBy)) {
             orderCol = "COALESCE(bsr.ended_on, bsr.started_on, bsr.created_on)";
@@ -270,8 +273,9 @@ public class DuePreviewRepository {
             orderCol = "bsr.stage_run_id";
         }
         String dir = "desc".equalsIgnoreCase(sortOrder) ? "DESC" : "ASC";
+        String billingRunFilter = billingRunId != null ? " AND bsr.billing_run_id = ?::uuid" : "";
 
-        String sql = """
+        String fromWhere = """
             SELECT bsr.stage_run_id,
                    bsr.stage_run_code AS run_code,
                    COALESCE(bsr.ended_on, bsr.started_on, bsr.created_on) AS generated_at,
@@ -288,10 +292,18 @@ public class DuePreviewRepository {
             JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             LEFT JOIN client_subscription_billing.billing_run br ON br.billing_run_id = bsr.billing_run_id
             LEFT JOIN billing_config.approval_status ap ON ap.approval_status_id = br.approval_status_id
-            WHERE bsc.stage_code = 'DUE_PREVIEW'
-            ORDER BY %s %s
-            LIMIT ? OFFSET ?
-            """.formatted(orderCol, dir);
+            WHERE bsc.stage_code = 'DUE_PREVIEW'""";
+        // Append filter + ORDER/LIMIT in one shot so `?::uuid` is never glued to "ORDER" (text-block concat bug).
+        String sql = fromWhere + billingRunFilter
+                + "\n            ORDER BY " + orderCol + " " + dir
+                + "\n            LIMIT ? OFFSET ?\n";
+
+        List<Object> args = new ArrayList<>();
+        if (billingRunId != null) {
+            args.add(billingRunId.toString());
+        }
+        args.add(limit);
+        args.add(offset);
 
         return jdbc.query(sql, (rs, rowNum) -> {
             UUID runId = (UUID) rs.getObject("stage_run_id");
@@ -306,19 +318,23 @@ public class DuePreviewRepository {
                 isMarkReady = null;
             }
             return new DuePreviewRunHistoryDto(runId, runCode, generatedAt, status, filename, invoices, totalAmount, isMarkReady);
-        }, limit, offset);
+        }, args.toArray());
     }
 
     /**
-     * Count total due preview run history records.
+     * Count total due preview run history records (optionally for one parent billing run only).
      */
-    public int countDuePreviewRunHistory() {
+    public int countDuePreviewRunHistory(UUID billingRunId) {
+        String billingRunFilter = billingRunId != null ? " AND bsr.billing_run_id = ?::uuid" : "";
         String sql = """
             SELECT COUNT(1)
             FROM client_subscription_billing.billing_stage_run bsr
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
-            WHERE bsc.stage_code = 'DUE_PREVIEW'
-            """;
+            WHERE bsc.stage_code = 'DUE_PREVIEW'""" + billingRunFilter;
+        if (billingRunId != null) {
+            Integer n = jdbc.queryForObject(sql, Integer.class, billingRunId.toString());
+            return n != null ? n : 0;
+        }
         Integer n = jdbc.queryForObject(sql, Integer.class);
         return n != null ? n : 0;
     }

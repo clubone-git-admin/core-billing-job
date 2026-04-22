@@ -1,6 +1,7 @@
 package io.clubone.billing.api.v1;
 
 import io.clubone.billing.api.dto.ErrorResponse;
+import io.clubone.billing.service.CompareApiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -87,5 +88,14 @@ public class GlobalExceptionHandler {
         
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(new ErrorResponse(error));
+    }
+
+    @ExceptionHandler(CompareApiException.class)
+    public ResponseEntity<Map<String, Object>> handleCompareApiException(CompareApiException e) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("code", e.code());
+        body.put("message", e.getMessage());
+        body.put("details", e.details() != null ? e.details() : Map.of());
+        return ResponseEntity.status(e.status()).body(body);
     }
 }
