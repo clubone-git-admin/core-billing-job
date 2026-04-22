@@ -46,14 +46,15 @@ public class SubscriptionBillingHistoryRepository {
             Boolean isMock,
             String mockChargeStatus,
             String mockChargeFailureCode,
+            String search,
             int limit,
             int offset) {
         if (useHistoryOnlyQuery(stageRunId, billingStatusCode, isMock, mockChargeStatus, mockChargeFailureCode)) {
             return findByBillingRunIdFromHistory(
                     billingRunId, stageRunId, billingStatusCode, isMock, mockChargeStatus, mockChargeFailureCode,
-                    limit, offset);
+                    search, limit, offset);
         }
-        return findByBillingRunIdFromInvoiceTable(billingRunId, limit, offset);
+        return findByBillingRunIdFromInvoiceTable(billingRunId, search, limit, offset);
     }
 
     public int countByBillingRunId(
@@ -62,12 +63,14 @@ public class SubscriptionBillingHistoryRepository {
             String billingStatusCode,
             Boolean isMock,
             String mockChargeStatus,
-            String mockChargeFailureCode) {
+            String mockChargeFailureCode,
+            String search) {
         if (useHistoryOnlyQuery(stageRunId, billingStatusCode, isMock, mockChargeStatus, mockChargeFailureCode)) {
             return countByBillingRunIdFromHistory(
-                    billingRunId, stageRunId, billingStatusCode, isMock, mockChargeStatus, mockChargeFailureCode);
+                    billingRunId, stageRunId, billingStatusCode, isMock, mockChargeStatus, mockChargeFailureCode,
+                    search);
         }
-        return countInvoicesByBillingRunId(billingRunId);
+        return countInvoicesByBillingRunId(billingRunId, search);
     }
 
     private static boolean useHistoryOnlyQuery(
@@ -103,6 +106,47 @@ public class SubscriptionBillingHistoryRepository {
         }
     }
 
+    /**
+     * Free-text filter on invoice number, ids, subscription instance, and client name (when {@code ch} is in scope).
+     */
+    private static void appendHistorySearchFilter(StringBuilder sql, List<Object> params, String search) {
+        if (search == null || search.isBlank()) {
+            return;
+        }
+        String p = "%" + search.trim() + "%";
+        sql.append(
+                """
+                 AND (
+                   COALESCE(i.invoice_number, '') ILIKE ?
+                   OR CAST(h.invoice_id AS text) ILIKE ?
+                   OR CAST(h.subscription_instance_id AS text) ILIKE ?
+                   OR TRIM(CONCAT(COALESCE(ch.client_first_name, ''), ' ', COALESCE(ch.client_last_name, ''))) ILIKE ?
+                 )""");
+        params.add(p);
+        params.add(p);
+        params.add(p);
+        params.add(p);
+    }
+
+    private static void appendInvoiceTableSearchFilter(StringBuilder sql, List<Object> params, String search) {
+        if (search == null || search.isBlank()) {
+            return;
+        }
+        String p = "%" + search.trim() + "%";
+        sql.append(
+                """
+                 AND (
+                   COALESCE(i.invoice_number, '') ILIKE ?
+                   OR CAST(i.invoice_id AS text) ILIKE ?
+                   OR CAST(COALESCE(h.subscription_instance_id, ie.subscription_instance_id)::text, '') ILIKE ?
+                   OR TRIM(CONCAT(COALESCE(ch.client_first_name, ''), ' ', COALESCE(ch.client_last_name, ''))) ILIKE ?
+                 )""");
+        params.add(p);
+        params.add(p);
+        params.add(p);
+        params.add(p);
+    }
+
     private List<SubscriptionBillingHistoryItemDto> findByBillingRunIdFromHistory(
             UUID billingRunId,
             UUID stageRunId,
@@ -110,6 +154,7 @@ public class SubscriptionBillingHistoryRepository {
             Boolean isMock,
             String mockChargeStatus,
             String mockChargeFailureCode,
+            String search,
             int limit,
             int offset) {
         StringBuilder sql = new StringBuilder("""
@@ -118,7 +163,19 @@ public class SubscriptionBillingHistoryRepository {
                    h.invoice_sub_total, h.invoice_tax_amount, h.invoice_discount_amount, h.invoice_total_amount,
                    h.mock_charge_status, h.mock_charge_failure_code, h.mock_charge_details,
                    h.simulated_on,
-                   s.status_code AS billing_status_code, i.invoice_number,
+                   h.client_payment_intent_id, h.client_payment_transaction_id,
+                   s.status_code AS billing_status_code,
+                   s.display_name AS billing_status_name,
+                   CASE WHEN NOT COALESCE(h.is_mock, false) THEN s.status_code END AS actual_charge_status,
+                   gts.status_code AS gateway_status,
+                   pgw.name AS gateway_name,
+                   pgw.name AS gateway_code,
+                   (SELECT COUNT(1)::int
+                      FROM client_subscription_billing.subscription_billing_history h_ac
+                      WHERE h_ac.billing_run_id = h.billing_run_id
+                        AND h_ac.invoice_id = h.invoice_id
+                        AND COALESCE(h_ac.is_mock, false) = false) AS attempt_count,
+                   i.invoice_number,
                    TRIM(CONCAT(COALESCE(ch.client_first_name, ''), ' ', COALESCE(ch.client_last_name, ''))) AS client_name,
                    CAST(NULL AS uuid) AS client_id,
                    COALESCE(ca.client_role_id, i.client_role_id) AS client_role_id,
@@ -131,7 +188,6 @@ public class SubscriptionBillingHistoryRepository {
                    loc.name AS location_name,
                    loc.location_id AS location_id,
                    pt.method_type_name AS payment_method_type,
-                   pgw.name AS gateway_name,
                    mg.client_gateway_mandate_id AS mandate_id,
                    mg.mandate_status AS mandate_status,
                    mg.mandate_start_date AS mandate_valid_from,
@@ -214,6 +270,10 @@ public class SubscriptionBillingHistoryRepository {
                     AND COALESCE(cct.is_active, true) = true
                 WHERE cc.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
             ) ch ON true
+            LEFT JOIN client_payments.client_payment_transaction cpt
+              ON cpt.client_payment_transaction_id = h.client_payment_transaction_id
+            LEFT JOIN payment_gateway.lu_payment_gateway_transaction_status gts
+              ON gts.payment_gateway_transaction_status_id = cpt.payment_gateway_transaction_status_id
             WHERE h.billing_run_id = ?::uuid
             """);
         List<Object> params = new ArrayList<>();
@@ -227,6 +287,7 @@ public class SubscriptionBillingHistoryRepository {
             params.add(billingStatusCode);
         }
         appendHistoryMockFilters(sql, params, isMock, mockChargeStatus, mockChargeFailureCode);
+        appendHistorySearchFilter(sql, params, search);
         sql.append(" ORDER BY h.billing_attempt_on DESC NULLS LAST LIMIT ? OFFSET ?");
         params.add(limit);
         params.add(offset);
@@ -237,8 +298,8 @@ public class SubscriptionBillingHistoryRepository {
      * Invoices for this billing run (draft or posted), including rows created by invoice generation.
      */
     private List<SubscriptionBillingHistoryItemDto> findByBillingRunIdFromInvoiceTable(
-            UUID billingRunId, int limit, int offset) {
-        String sql = """
+            UUID billingRunId, String search, int limit, int offset) {
+        StringBuilder sql = new StringBuilder("""
             SELECT
                 h.subscription_billing_history_id,
                 i.invoice_id,
@@ -256,7 +317,19 @@ public class SubscriptionBillingHistoryRepository {
                 h.mock_charge_failure_code,
                 h.mock_charge_details,
                 h.simulated_on,
+                h.client_payment_intent_id,
+                h.client_payment_transaction_id,
                 s.status_code AS billing_status_code,
+                s.display_name AS billing_status_name,
+                CASE WHEN NOT COALESCE(h.is_mock, false) THEN s.status_code END AS actual_charge_status,
+                gts.status_code AS gateway_status,
+                pgw.name AS gateway_name,
+                pgw.name AS gateway_code,
+                (SELECT COUNT(1)::int
+                   FROM client_subscription_billing.subscription_billing_history h_ac
+                   WHERE h_ac.billing_run_id = i.billing_run_id
+                     AND h_ac.invoice_id = i.invoice_id
+                     AND COALESCE(h_ac.is_mock, false) = false) AS attempt_count,
                 i.invoice_number,
                 TRIM(CONCAT(COALESCE(ch.client_first_name, ''), ' ', COALESCE(ch.client_last_name, ''))) AS client_name,
                 CAST(NULL AS uuid) AS client_id,
@@ -270,7 +343,6 @@ public class SubscriptionBillingHistoryRepository {
                 loc.name AS location_name,
                 loc.location_id AS location_id,
                 pt.method_type_name AS payment_method_type,
-                pgw.name AS gateway_name,
                 mg.client_gateway_mandate_id AS mandate_id,
                 mg.mandate_status AS mandate_status,
                 mg.mandate_start_date AS mandate_valid_from,
@@ -299,6 +371,10 @@ public class SubscriptionBillingHistoryRepository {
                 LIMIT 1
             ) h ON true
             LEFT JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id
+            LEFT JOIN client_payments.client_payment_transaction cpt
+              ON cpt.client_payment_transaction_id = h.client_payment_transaction_id
+            LEFT JOIN payment_gateway.lu_payment_gateway_transaction_status gts
+              ON gts.payment_gateway_transaction_status_id = cpt.payment_gateway_transaction_status_id
             LEFT JOIN LATERAL (
                 SELECT ie.subscription_instance_id
                 FROM transactions.invoice_entity ie
@@ -362,15 +438,14 @@ public class SubscriptionBillingHistoryRepository {
             ) ch ON true
             WHERE i.billing_run_id = ?::uuid
               AND COALESCE(i.is_active, true) = true
-            ORDER BY i.created_on DESC NULLS LAST
-            LIMIT ? OFFSET ?
-            """;
-        return jdbc.query(
-                sql,
-                (rs, rowNum) -> mapHistoryRow(rs),
-                billingRunId.toString(),
-                limit,
-                offset);
+            """);
+        List<Object> params = new ArrayList<>();
+        params.add(billingRunId.toString());
+        appendInvoiceTableSearchFilter(sql, params, search);
+        sql.append(" ORDER BY i.created_on DESC NULLS LAST LIMIT ? OFFSET ?");
+        params.add(limit);
+        params.add(offset);
+        return jdbc.query(sql.toString(), params.toArray(), (rs, rowNum) -> mapHistoryRow(rs));
     }
 
     /**
@@ -379,7 +454,7 @@ public class SubscriptionBillingHistoryRepository {
      * for an {@code INVOICE_GENERATION} run). Empty {@code invoiceIds} yields an empty list.
      */
     public List<SubscriptionBillingHistoryItemDto> findByBillingRunIdAndInvoiceIds(
-            UUID billingRunId, List<UUID> invoiceIds, int limit, int offset) {
+            UUID billingRunId, List<UUID> invoiceIds, String search, int limit, int offset) {
         if (invoiceIds == null || invoiceIds.isEmpty()) {
             return List.of();
         }
@@ -393,7 +468,7 @@ public class SubscriptionBillingHistoryRepository {
             inPlaceholders.append("?::uuid");
             params.add(invoiceIds.get(i).toString());
         }
-        String sql = """
+        StringBuilder sql = new StringBuilder("""
             SELECT
                 h.subscription_billing_history_id,
                 i.invoice_id,
@@ -411,7 +486,19 @@ public class SubscriptionBillingHistoryRepository {
                 h.mock_charge_failure_code,
                 h.mock_charge_details,
                 h.simulated_on,
+                h.client_payment_intent_id,
+                h.client_payment_transaction_id,
                 s.status_code AS billing_status_code,
+                s.display_name AS billing_status_name,
+                CASE WHEN NOT COALESCE(h.is_mock, false) THEN s.status_code END AS actual_charge_status,
+                gts.status_code AS gateway_status,
+                pgw.name AS gateway_name,
+                pgw.name AS gateway_code,
+                (SELECT COUNT(1)::int
+                   FROM client_subscription_billing.subscription_billing_history h_ac
+                   WHERE h_ac.billing_run_id = i.billing_run_id
+                     AND h_ac.invoice_id = i.invoice_id
+                     AND COALESCE(h_ac.is_mock, false) = false) AS attempt_count,
                 i.invoice_number,
                 TRIM(CONCAT(COALESCE(ch.client_first_name, ''), ' ', COALESCE(ch.client_last_name, ''))) AS client_name,
                 CAST(NULL AS uuid) AS client_id,
@@ -425,7 +512,6 @@ public class SubscriptionBillingHistoryRepository {
                 loc.name AS location_name,
                 loc.location_id AS location_id,
                 pt.method_type_name AS payment_method_type,
-                pgw.name AS gateway_name,
                 mg.client_gateway_mandate_id AS mandate_id,
                 mg.mandate_status AS mandate_status,
                 mg.mandate_start_date AS mandate_valid_from,
@@ -454,6 +540,10 @@ public class SubscriptionBillingHistoryRepository {
                 LIMIT 1
             ) h ON true
             LEFT JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id
+            LEFT JOIN client_payments.client_payment_transaction cpt
+              ON cpt.client_payment_transaction_id = h.client_payment_transaction_id
+            LEFT JOIN payment_gateway.lu_payment_gateway_transaction_status gts
+              ON gts.payment_gateway_transaction_status_id = cpt.payment_gateway_transaction_status_id
             LEFT JOIN LATERAL (
                 SELECT ie.subscription_instance_id
                 FROM transactions.invoice_entity ie
@@ -521,15 +611,15 @@ public class SubscriptionBillingHistoryRepository {
                 + inPlaceholders
                 + """
             )
-            ORDER BY i.created_on DESC NULLS LAST
-            LIMIT ? OFFSET ?
-            """;
+            """);
+        appendInvoiceTableSearchFilter(sql, params, search);
+        sql.append(" ORDER BY i.created_on DESC NULLS LAST LIMIT ? OFFSET ?");
         params.add(limit);
         params.add(offset);
-        return jdbc.query(sql, params.toArray(), (rs, rowNum) -> mapHistoryRow(rs));
+        return jdbc.query(sql.toString(), params.toArray(), (rs, rowNum) -> mapHistoryRow(rs));
     }
 
-    public int countByBillingRunIdAndInvoiceIds(UUID billingRunId, List<UUID> invoiceIds) {
+    public int countByBillingRunIdAndInvoiceIds(UUID billingRunId, List<UUID> invoiceIds, String search) {
         if (invoiceIds == null || invoiceIds.isEmpty()) {
             return 0;
         }
@@ -543,17 +633,73 @@ public class SubscriptionBillingHistoryRepository {
             inPlaceholders.append("?::uuid");
             params.add(invoiceIds.get(i).toString());
         }
-        String sql = """
-            SELECT COUNT(1)
-            FROM transactions.invoice i
-            WHERE i.billing_run_id = ?::uuid
-              AND COALESCE(i.is_active, true) = true
-              AND i.invoice_id IN ("""
-                + inPlaceholders
-                + """
-            )
-            """;
-        Integer n = jdbc.queryForObject(sql, params.toArray(), Integer.class);
+        if (search == null || search.isBlank()) {
+            String sql = """
+                    SELECT COUNT(1)
+                    FROM transactions.invoice i
+                    WHERE i.billing_run_id = ?::uuid
+                      AND COALESCE(i.is_active, true) = true
+                      AND i.invoice_id IN ("""
+                    + inPlaceholders
+                    + """
+                    )
+                    """;
+            Integer n = jdbc.queryForObject(sql, params.toArray(), Integer.class);
+            return n != null ? n : 0;
+        }
+        StringBuilder sql = new StringBuilder(
+                """
+                SELECT COUNT(1)
+                FROM transactions.invoice i
+                LEFT JOIN LATERAL (
+                    SELECT h2.*
+                    FROM client_subscription_billing.subscription_billing_history h2
+                    WHERE h2.invoice_id = i.invoice_id
+                      AND h2.billing_run_id = i.billing_run_id
+                    ORDER BY h2.billing_attempt_on DESC NULLS LAST, h2.created_on DESC NULLS LAST
+                    LIMIT 1
+                ) h ON true
+                LEFT JOIN LATERAL (
+                    SELECT ie.subscription_instance_id
+                    FROM transactions.invoice_entity ie
+                    WHERE ie.invoice_id = i.invoice_id
+                      AND ie.subscription_instance_id IS NOT NULL
+                      AND COALESCE(ie.is_active, true) = true
+                    ORDER BY ie.created_on ASC NULLS LAST
+                    LIMIT 1
+                ) ie ON true
+                LEFT JOIN client_subscription_billing.subscription_instance si
+                    ON si.subscription_instance_id = COALESCE(h.subscription_instance_id, ie.subscription_instance_id)
+                LEFT JOIN client_subscription_billing.subscription_plan sp
+                    ON sp.subscription_plan_id = si.subscription_plan_id AND COALESCE(sp.is_active, true) = true
+                LEFT JOIN client_agreements.client_agreement ca
+                    ON ca.client_agreement_id = COALESCE(sp.client_agreement_id, i.client_agreement_id)
+                       AND COALESCE(ca.is_active, true) = true
+                LEFT JOIN clients.client_role cr ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
+                LEFT JOIN LATERAL (
+                    SELECT
+                        MAX(CASE WHEN cct.name = 'First Name' AND COALESCE(cc.is_active, true) = true
+                            AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                            THEN cc.characteristic END) AS client_first_name,
+                        MAX(CASE WHEN cct.name = 'Last Name' AND COALESCE(cc.is_active, true) = true
+                            AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                            THEN cc.characteristic END) AS client_last_name
+                    FROM clients.client_characteristic cc
+                    INNER JOIN clients.client_characteristic_type cct
+                        ON cct.client_characteristic_type_id = cc.client_characteristic_type_id
+                        AND cct.name IN ('First Name', 'Last Name')
+                        AND COALESCE(cct.is_active, true) = true
+                    WHERE cc.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
+                ) ch ON true
+                WHERE i.billing_run_id = ?::uuid
+                  AND COALESCE(i.is_active, true) = true
+                  AND i.invoice_id IN ("""
+                        + inPlaceholders
+                        + """
+                )
+                """);
+        appendInvoiceTableSearchFilter(sql, params, search);
+        Integer n = jdbc.queryForObject(sql.toString(), params.toArray(), Integer.class);
         return n != null ? n : 0;
     }
 
@@ -563,11 +709,45 @@ public class SubscriptionBillingHistoryRepository {
             String billingStatusCode,
             Boolean isMock,
             String mockChargeStatus,
-            String mockChargeFailureCode) {
+            String mockChargeFailureCode,
+            String search) {
         StringBuilder sql = new StringBuilder("""
             SELECT COUNT(1)
             FROM client_subscription_billing.subscription_billing_history h
             LEFT JOIN billing_config.billing_status s ON s.billing_status_id = h.billing_status_id
+            LEFT JOIN transactions.invoice i ON i.invoice_id = h.invoice_id
+            LEFT JOIN LATERAL (
+                SELECT ie.subscription_instance_id
+                FROM transactions.invoice_entity ie
+                WHERE ie.invoice_id = h.invoice_id
+                  AND ie.subscription_instance_id IS NOT NULL
+                  AND COALESCE(ie.is_active, true) = true
+                ORDER BY ie.created_on ASC NULLS LAST
+                LIMIT 1
+            ) ie_resolve ON true
+            LEFT JOIN client_subscription_billing.subscription_instance si
+                ON si.subscription_instance_id = COALESCE(h.subscription_instance_id, ie_resolve.subscription_instance_id)
+            LEFT JOIN client_subscription_billing.subscription_plan sp
+                ON sp.subscription_plan_id = si.subscription_plan_id AND COALESCE(sp.is_active, true) = true
+            LEFT JOIN client_agreements.client_agreement ca
+                ON ca.client_agreement_id = COALESCE(sp.client_agreement_id, i.client_agreement_id)
+                   AND COALESCE(ca.is_active, true) = true
+            LEFT JOIN clients.client_role cr ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
+            LEFT JOIN LATERAL (
+                SELECT
+                    MAX(CASE WHEN cct.name = 'First Name' AND COALESCE(cc.is_active, true) = true
+                        AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                        THEN cc.characteristic END) AS client_first_name,
+                    MAX(CASE WHEN cct.name = 'Last Name' AND COALESCE(cc.is_active, true) = true
+                        AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                        THEN cc.characteristic END) AS client_last_name
+                FROM clients.client_characteristic cc
+                INNER JOIN clients.client_characteristic_type cct
+                    ON cct.client_characteristic_type_id = cc.client_characteristic_type_id
+                    AND cct.name IN ('First Name', 'Last Name')
+                    AND COALESCE(cct.is_active, true) = true
+                WHERE cc.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
+            ) ch ON true
             WHERE h.billing_run_id = ?::uuid
             """);
         List<Object> params = new ArrayList<>();
@@ -581,20 +761,87 @@ public class SubscriptionBillingHistoryRepository {
             params.add(billingStatusCode);
         }
         appendHistoryMockFilters(sql, params, isMock, mockChargeStatus, mockChargeFailureCode);
+        appendHistorySearchFilter(sql, params, search);
         Integer n = jdbc.queryForObject(sql.toString(), params.toArray(), Integer.class);
         return n != null ? n : 0;
     }
 
-    private int countInvoicesByBillingRunId(UUID billingRunId) {
+    private int countInvoicesByBillingRunId(UUID billingRunId, String search) {
+        if (search == null || search.isBlank()) {
+            Integer n = jdbc.queryForObject(
+                    """
+                    SELECT COUNT(1)
+                    FROM transactions.invoice i
+                    WHERE i.billing_run_id = ?::uuid
+                      AND COALESCE(i.is_active, true) = true
+                    """,
+                    Integer.class,
+                    billingRunId.toString());
+            return n != null ? n : 0;
+        }
+        String p = "%" + search.trim() + "%";
         Integer n = jdbc.queryForObject(
                 """
                 SELECT COUNT(1)
                 FROM transactions.invoice i
+                LEFT JOIN LATERAL (
+                    SELECT h2.*
+                    FROM client_subscription_billing.subscription_billing_history h2
+                    WHERE h2.invoice_id = i.invoice_id
+                      AND h2.billing_run_id = i.billing_run_id
+                    ORDER BY h2.billing_attempt_on DESC NULLS LAST, h2.created_on DESC NULLS LAST
+                    LIMIT 1
+                ) h ON true
+                LEFT JOIN client_subscription_billing.subscription_instance si
+                    ON si.subscription_instance_id = COALESCE(h.subscription_instance_id, (
+                        SELECT ie.subscription_instance_id
+                        FROM transactions.invoice_entity ie
+                        WHERE ie.invoice_id = i.invoice_id AND ie.subscription_instance_id IS NOT NULL
+                          AND COALESCE(ie.is_active, true) = true
+                        ORDER BY ie.created_on ASC NULLS LAST LIMIT 1
+                    ))
+                LEFT JOIN client_subscription_billing.subscription_plan sp
+                    ON sp.subscription_plan_id = si.subscription_plan_id AND COALESCE(sp.is_active, true) = true
+                LEFT JOIN client_agreements.client_agreement ca
+                    ON ca.client_agreement_id = COALESCE(sp.client_agreement_id, i.client_agreement_id)
+                       AND COALESCE(ca.is_active, true) = true
+                LEFT JOIN clients.client_role cr ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
+                LEFT JOIN LATERAL (
+                    SELECT
+                        MAX(CASE WHEN cct.name = 'First Name' AND COALESCE(cc.is_active, true) = true
+                            AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                            THEN cc.characteristic END) AS client_first_name,
+                        MAX(CASE WHEN cct.name = 'Last Name' AND COALESCE(cc.is_active, true) = true
+                            AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                            THEN cc.characteristic END) AS client_last_name
+                    FROM clients.client_characteristic cc
+                    INNER JOIN clients.client_characteristic_type cct
+                        ON cct.client_characteristic_type_id = cc.client_characteristic_type_id
+                        AND cct.name IN ('First Name', 'Last Name')
+                        AND COALESCE(cct.is_active, true) = true
+                    WHERE cc.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
+                ) ch ON true
                 WHERE i.billing_run_id = ?::uuid
                   AND COALESCE(i.is_active, true) = true
+                  AND (
+                    COALESCE(i.invoice_number, '') ILIKE ?
+                    OR CAST(i.invoice_id AS text) ILIKE ?
+                    OR CAST(COALESCE(h.subscription_instance_id, (
+                        SELECT ie2.subscription_instance_id
+                        FROM transactions.invoice_entity ie2
+                        WHERE ie2.invoice_id = i.invoice_id AND ie2.subscription_instance_id IS NOT NULL
+                          AND COALESCE(ie2.is_active, true) = true
+                        ORDER BY ie2.created_on ASC NULLS LAST LIMIT 1
+                    ))::text, '') ILIKE ?
+                    OR TRIM(CONCAT(COALESCE(ch.client_first_name, ''), ' ', COALESCE(ch.client_last_name, ''))) ILIKE ?
+                  )
                 """,
                 Integer.class,
-                billingRunId.toString());
+                billingRunId.toString(),
+                p,
+                p,
+                p,
+                p);
         return n != null ? n : 0;
     }
 
@@ -603,6 +850,11 @@ public class SubscriptionBillingHistoryRepository {
         OffsetDateTime simulatedOn = toOffsetUtc(rs.getTimestamp("simulated_on"));
         Boolean isMock = rs.getObject("is_mock") != null ? rs.getBoolean("is_mock") : false;
         String clientName = blankToNull(rs.getString("client_name"));
+        Integer attemptCount = null;
+        Object acn = rs.getObject("attempt_count");
+        if (acn instanceof Number n) {
+            attemptCount = n.intValue();
+        }
         return new SubscriptionBillingHistoryItemDto(
                 (UUID) rs.getObject("subscription_billing_history_id"),
                 (UUID) rs.getObject("invoice_id"),
@@ -610,6 +862,7 @@ public class SubscriptionBillingHistoryRepository {
                 (UUID) rs.getObject("subscription_instance_id"),
                 attempt,
                 rs.getString("billing_status_code"),
+                blankToNull(rs.getString("billing_status_name")),
                 rs.getString("failure_reason"),
                 isMock,
                 (UUID) rs.getObject("billing_run_id"),
@@ -644,6 +897,12 @@ public class SubscriptionBillingHistoryRepository {
                 blankToNull(rs.getString("agreement_status")),
                 blankToNull(rs.getString("agreement_name")),
                 blankToNull(rs.getString("gateway_name")),
+                blankToNull(rs.getString("gateway_code")),
+                blankToNull(rs.getString("gateway_status")),
+                attemptCount,
+                blankToNull(rs.getString("actual_charge_status")),
+                (UUID) rs.getObject("client_payment_intent_id"),
+                (UUID) rs.getObject("client_payment_transaction_id"),
                 blankToNull(rs.getString("invoice_status")));
     }
 

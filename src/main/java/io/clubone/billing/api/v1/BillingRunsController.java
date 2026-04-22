@@ -121,23 +121,27 @@ public class BillingRunsController {
             @RequestParam(required = false) String mockChargeStatus,
             @RequestParam(required = false) String mockChargeFailureCode,
             @RequestParam(required = false) String failureCode,
+            @RequestParam(required = false) String search,
             @RequestParam(defaultValue = "50") Integer limit,
             @RequestParam(defaultValue = "0") Integer offset) {
 
-        UUID stageRunFilter = firstNonNull(
-                mockChargeRunId, mockChargeRunIdSnake, invoiceGenerationRunId, actualChargeRunId, actualChargeRunIdSnake);
+        UUID mockRun = firstNonNull(mockChargeRunId, mockChargeRunIdSnake);
+        UUID actualRun = firstNonNull(actualChargeRunId, actualChargeRunIdSnake);
         Boolean isMockFilter = isMock;
-        if ((actualChargeRunId != null || actualChargeRunIdSnake != null) && isMock == null) {
+        if (actualRun != null && isMockFilter == null) {
             isMockFilter = false;
         }
         String failureCodeFilter = failureCode != null && !failureCode.isBlank() ? failureCode : mockChargeFailureCode;
         PageResponse<SubscriptionBillingHistoryItemDto> page = invoiceGenerationService.listInvoicesForBillingRun(
                 billingRunId,
-                stageRunFilter,
+                invoiceGenerationRunId,
+                mockRun,
+                actualRun,
                 status,
                 isMockFilter,
                 mockChargeStatus,
                 failureCodeFilter,
+                search,
                 limit,
                 offset);
         return ResponseEntity.ok(page);

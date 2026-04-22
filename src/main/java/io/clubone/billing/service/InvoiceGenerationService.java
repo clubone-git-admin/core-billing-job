@@ -31,6 +31,7 @@ public class InvoiceGenerationService {
     private static final String STAGE_CODE = "INVOICE_GENERATION";
     /** Next stage after invoice lock: leave ready for explicit mock-charge start (not auto-RUNNING). */
     private static final String MOCK_CHARGE_STAGE_CODE = "MOCK_CHARGE";
+    private static final String ACTUAL_CHARGE_STAGE_CODE = "ACTUAL_CHARGE";
 
     private final StageRunRepository stageRunRepository;
     private final BillingRunRepository billingRunRepository;
@@ -586,74 +587,117 @@ public class InvoiceGenerationService {
     public PageResponse<SubscriptionBillingHistoryItemDto> listInvoicesForBillingRun(
             UUID billingRunId,
             UUID invoiceGenerationRunId,
+            UUID mockChargeRunId,
+            UUID actualChargeRunId,
             String billingStatusCode,
             Boolean isMock,
             String mockChargeStatus,
             String mockChargeFailureCode,
+            String search,
             int limit,
             int offset) {
         if (billingRunId == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "billingRunId is required");
         }
+        int scopeParams = 0;
+        if (invoiceGenerationRunId != null) {
+            scopeParams++;
+        }
+        if (mockChargeRunId != null) {
+            scopeParams++;
+        }
+        if (actualChargeRunId != null) {
+            scopeParams++;
+        }
+        if (scopeParams > 1) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Use at most one of invoice_generation_run_id, mock_charge_run_id, and actual_charge_run_id");
+        }
+        if (mockChargeRunId != null) {
+            requireStageRunForList(billingRunId, mockChargeRunId, MOCK_CHARGE_STAGE_CODE, "mock_charge_run_id");
+        }
+        if (actualChargeRunId != null) {
+            requireStageRunForList(billingRunId, actualChargeRunId, ACTUAL_CHARGE_STAGE_CODE, "actual_charge_run_id");
+        }
+        String searchTrimmed = search != null && !search.isBlank() ? search.trim() : null;
+        Boolean isMockFilter = isMock;
+        if (actualChargeRunId != null && isMockFilter == null) {
+            isMockFilter = false;
+        }
         // INVOICE_GENERATION runs do not insert subscription_billing_history rows tagged with this stage_run_id;
         // draft invoices live on transactions.invoice and IDs are stored on the stage run as generated_invoice_ids.
         if (invoiceGenerationRunId != null) {
-            StageRunDto sr = stageRunRepository.findById(invoiceGenerationRunId);
-            if (sr == null) {
-                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Stage run not found: " + invoiceGenerationRunId);
-            }
-            if (!billingRunId.equals(sr.billingRunId())) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Stage run does not belong to this billing run");
-            }
-            if (STAGE_CODE.equals(sr.stageCode())) {
-                ParsedGeneratedInvoiceIds parsed = parseGeneratedInvoiceIds(sr.summaryJson());
-                if (parsed.keyPresent()) {
-                    if (parsed.ids().isEmpty()) {
-                        return PageResponse.of(List.of(), 0, limit, offset);
-                    }
-                    List<SubscriptionBillingHistoryItemDto> igRows =
-                            subscriptionBillingHistoryRepository.findByBillingRunIdAndInvoiceIds(
-                                    billingRunId, parsed.ids(), limit, offset);
-                    int igTotal = subscriptionBillingHistoryRepository.countByBillingRunIdAndInvoiceIds(
-                            billingRunId, parsed.ids());
-                    return PageResponse.of(igRows, igTotal, limit, offset);
+            StageRunDto sr = requireStageRunForList(billingRunId, invoiceGenerationRunId, STAGE_CODE, "invoice_generation_run_id");
+            ParsedGeneratedInvoiceIds parsed = parseGeneratedInvoiceIds(sr.summaryJson());
+            if (parsed.keyPresent()) {
+                if (parsed.ids().isEmpty()) {
+                    return PageResponse.of(List.of(), 0, limit, offset);
                 }
-                var legacyRows = subscriptionBillingHistoryRepository.findByBillingRunId(
-                        billingRunId,
-                        null,
-                        billingStatusCode,
-                        isMock,
-                        mockChargeStatus,
-                        mockChargeFailureCode,
-                        limit,
-                        offset);
-                int legacyTotal = subscriptionBillingHistoryRepository.countByBillingRunId(
-                        billingRunId,
-                        null,
-                        billingStatusCode,
-                        isMock,
-                        mockChargeStatus,
-                        mockChargeFailureCode);
-                return PageResponse.of(legacyRows, legacyTotal, limit, offset);
+                List<SubscriptionBillingHistoryItemDto> igRows =
+                        subscriptionBillingHistoryRepository.findByBillingRunIdAndInvoiceIds(
+                                billingRunId, parsed.ids(), searchTrimmed, limit, offset);
+                int igTotal = subscriptionBillingHistoryRepository.countByBillingRunIdAndInvoiceIds(
+                        billingRunId, parsed.ids(), searchTrimmed);
+                return PageResponse.of(igRows, igTotal, limit, offset);
             }
+            var legacyRows = subscriptionBillingHistoryRepository.findByBillingRunId(
+                    billingRunId,
+                    null,
+                    billingStatusCode,
+                    isMockFilter,
+                    mockChargeStatus,
+                    mockChargeFailureCode,
+                    searchTrimmed,
+                    limit,
+                    offset);
+            int legacyTotal = subscriptionBillingHistoryRepository.countByBillingRunId(
+                    billingRunId,
+                    null,
+                    billingStatusCode,
+                    isMockFilter,
+                    mockChargeStatus,
+                    mockChargeFailureCode,
+                    searchTrimmed);
+            return PageResponse.of(legacyRows, legacyTotal, limit, offset);
         }
+        UUID stageRunForHistory =
+                mockChargeRunId != null ? mockChargeRunId : actualChargeRunId;
         var rows = subscriptionBillingHistoryRepository.findByBillingRunId(
                 billingRunId,
-                invoiceGenerationRunId,
+                stageRunForHistory,
                 billingStatusCode,
-                isMock,
+                isMockFilter,
                 mockChargeStatus,
                 mockChargeFailureCode,
+                searchTrimmed,
                 limit,
                 offset);
         int total = subscriptionBillingHistoryRepository.countByBillingRunId(
                 billingRunId,
-                invoiceGenerationRunId,
+                stageRunForHistory,
                 billingStatusCode,
-                isMock,
+                isMockFilter,
                 mockChargeStatus,
-                mockChargeFailureCode);
+                mockChargeFailureCode,
+                searchTrimmed);
         return PageResponse.of(rows, total, limit, offset);
+    }
+
+    private StageRunDto requireStageRunForList(
+            UUID billingRunId, UUID stageRunId, String expectedStageCode, String paramName) {
+        StageRunDto sr = stageRunRepository.findById(stageRunId);
+        if (sr == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Stage run not found: " + stageRunId);
+        }
+        if (!billingRunId.equals(sr.billingRunId())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Stage run does not belong to this billing run");
+        }
+        if (!expectedStageCode.equals(sr.stageCode())) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, paramName + " must be a " + expectedStageCode + " stage run");
+        }
+        return sr;
     }
 
     private record ParsedGeneratedInvoiceIds(boolean keyPresent, List<UUID> ids) {}

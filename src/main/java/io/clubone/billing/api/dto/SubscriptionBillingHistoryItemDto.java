@@ -1,6 +1,7 @@
 package io.clubone.billing.api.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 
@@ -11,9 +12,8 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Row for {@code GET /api/v1/billing/runs/{billingRunId}/invoices} (mock charge grid and related lists).
- * JSON uses snake_case per FE contract; {@code failure_code} maps from {@code mock_charge_failure_code}
- * (set only for blocked/error mock outcomes — successful mock charge leaves them null).
+ * Row for {@code GET /api/v1/billing/runs/{billingRunId}/invoices} (mock charge grid, actual charge grid, and related lists).
+ * JSON uses snake_case; {@code status_code} is the billing status code (FE {@code billingStatusCode}).
  * {@code failure_reason} and {@code failure_code} are always serialized (explicit JSON {@code null}) so clients are not ambiguous.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -24,7 +24,9 @@ public record SubscriptionBillingHistoryItemDto(
         String invoiceNumber,
         UUID subscriptionInstanceId,
         OffsetDateTime billingAttemptOn,
+        @JsonProperty("status_code")
         String billingStatusCode,
+        String billingStatusName,
         /** Populated for mock failures/blocks; null when mock validation passed (see {@link #mockChargeStatus}). */
         @JsonInclude(JsonInclude.Include.ALWAYS)
         String failureReason,
@@ -69,6 +71,16 @@ public record SubscriptionBillingHistoryItemDto(
         String agreementName,
         /** Payment processor / gateway display (e.g. Stripe), when linked from {@code payment_gateway_supported_method}. */
         String gatewayName,
+        /** PSP / gateway identifier; currently same source as {@link #gatewayName} when no separate code column is available. */
+        String gatewayCode,
+        /** Raw gateway transaction status from {@code lu_payment_gateway_transaction_status}, when a payment transaction is linked. */
+        String gatewayStatus,
+        /** Number of live ({@code is_mock = false}) history rows for this invoice in this billing run. */
+        Integer attemptCount,
+        /** Billing status code for live charges only; null when {@link #isMock} is true. */
+        String actualChargeStatus,
+        UUID clientPaymentIntentId,
+        UUID clientPaymentTransactionId,
         /** {@code transactions.lu_invoice_status.status_name} (e.g. PENDING, DUE). */
         String invoiceStatus
 ) {
