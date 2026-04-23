@@ -112,6 +112,153 @@ public class InvoiceGenerationService {
                 .isPresent();
     }
 
+    private static List<String> readUuidStringListFromSummary(Map<String, Object> summaryJson, String key) {
+        if (summaryJson == null || key == null) {
+            return new ArrayList<>();
+        }
+        Object raw = summaryJson.get(key);
+        if (!(raw instanceof List<?> list)) {
+            return new ArrayList<>();
+        }
+        List<String> out = new ArrayList<>();
+        for (Object o : list) {
+            if (o != null) {
+                String s = String.valueOf(o).trim();
+                if (!s.isEmpty()) {
+                    out.add(s);
+                }
+            }
+        }
+        return out;
+    }
+
+    private static Map<String, Object> invoiceActionRowToSummaryMap(InvoiceGenerationInvoiceActionRow r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (r.subscriptionBillingHistoryId() != null) {
+            m.put("subscription_billing_history_id", r.subscriptionBillingHistoryId().toString());
+        }
+        if (r.invoiceId() != null) {
+            m.put("invoice_id", r.invoiceId().toString());
+        }
+        if (r.invoiceStatus() != null) {
+            m.put("invoice_status", r.invoiceStatus());
+        }
+        if (r.voidedAt() != null) {
+            m.put("voided_at", r.voidedAt().toString());
+        }
+        if (r.revertedAt() != null) {
+            m.put("reverted_at", r.revertedAt().toString());
+        }
+        if (r.note() != null) {
+            m.put("note", r.note());
+        }
+        return m;
+    }
+
+    private static Map<String, Object> invoiceActionErrorToSummaryMap(InvoiceGenerationInvoiceActionError e) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (e.subscriptionBillingHistoryId() != null) {
+            m.put("subscription_billing_history_id", e.subscriptionBillingHistoryId().toString());
+        }
+        if (e.invoiceId() != null) {
+            m.put("invoice_id", e.invoiceId().toString());
+        }
+        m.put("code", e.code());
+        m.put("message", e.message());
+        return m;
+    }
+
+    /**
+     * Shallow-merge void outcome into {@code billing_stage_run.summary_json} so GET /runs/{id} returns latest
+     * void batch and cumulative {@code voided_invoice_ids}.
+     */
+    /**
+     * Refreshes {@code totalAmount} / {@code grandTotal} on the stage summary to the sum of active
+     * {@code PENDING} + {@code DUE} invoices only (voided and other statuses excluded), and
+     * {@code voided_invoices_amount} to the sum of {@code VOID} invoices on the same billing run.
+     */
+    private void appendPendingDueTotalsToSummaryPatch(UUID billingRunId, Map<String, Object> patch) {
+        BigDecimal pendingDueTotal = invoiceRepository.sumTotalAmountPendingOrDueForBillingRun(billingRunId);
+        int pendingDueCount = invoiceRepository.countInvoicesPendingOrDueForBillingRun(billingRunId);
+        BigDecimal voidedTotal = invoiceRepository.sumTotalAmountVoidForBillingRun(billingRunId);
+        patch.put("totalAmount", pendingDueTotal);
+        patch.put("grandTotal", pendingDueTotal);
+        patch.put("pending_due_invoice_count", pendingDueCount);
+        patch.put("voided_invoices_amount", voidedTotal);
+        patch.put("total_amount_pending_due_recalculated_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
+    }
+
+    private void mergeVoidInvoiceRunSummaryJson(
+            UUID stageRunId,
+            StageRunDto stage,
+            UUID billingRunId,
+            int voided,
+            int failed,
+            List<InvoiceGenerationInvoiceActionRow> results,
+            List<InvoiceGenerationInvoiceActionError> errors,
+            InvoiceGenerationVoidInvoicesRequest request,
+            String idempotencyKey) {
+        Map<String, Object> last = new LinkedHashMap<>();
+        last.put("at", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        last.put("billing_run_id", billingRunId.toString());
+        last.put("voided", voided);
+        last.put("failed", failed);
+        last.put("results", results.stream().map(InvoiceGenerationService::invoiceActionRowToSummaryMap).toList());
+        last.put("errors", errors.stream().map(InvoiceGenerationService::invoiceActionErrorToSummaryMap).toList());
+        if (request.reason() != null && !request.reason().isBlank()) {
+            last.put("reason", request.reason());
+        }
+        if (request.requestedBy() != null && !request.requestedBy().isBlank()) {
+            last.put("requested_by", request.requestedBy());
+        }
+        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            last.put("idempotency_key", idempotencyKey);
+        }
+        Map<String, Object> patch = new LinkedHashMap<>();
+        patch.put("last_invoice_void_batch", last);
+        LinkedHashSet<String> voidedIds = new LinkedHashSet<>(readUuidStringListFromSummary(stage.summaryJson(), "voided_invoice_ids"));
+        for (InvoiceGenerationInvoiceActionRow r : results) {
+            if (r.invoiceId() != null && r.invoiceStatus() != null && "VOID".equalsIgnoreCase(r.invoiceStatus())) {
+                voidedIds.add(r.invoiceId().toString());
+            }
+        }
+        patch.put("voided_invoice_ids", new ArrayList<>(voidedIds));
+        appendPendingDueTotalsToSummaryPatch(billingRunId, patch);
+        stageRunRepository.mergeStageRunSummaryJson(stageRunId, patch, false);
+    }
+
+    private void mergeRevertInvoiceRunSummaryJson(
+            UUID stageRunId,
+            StageRunDto stage,
+            UUID billingRunId,
+            int reverted,
+            int failed,
+            List<InvoiceGenerationInvoiceActionRow> results,
+            List<InvoiceGenerationInvoiceActionError> errors,
+            InvoiceGenerationRevertInvoicesRequest request) {
+        Map<String, Object> last = new LinkedHashMap<>();
+        last.put("at", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        last.put("billing_run_id", billingRunId.toString());
+        last.put("reverted", reverted);
+        last.put("failed", failed);
+        last.put("results", results.stream().map(InvoiceGenerationService::invoiceActionRowToSummaryMap).toList());
+        last.put("errors", errors.stream().map(InvoiceGenerationService::invoiceActionErrorToSummaryMap).toList());
+        if (request.requestedBy() != null && !request.requestedBy().isBlank()) {
+            last.put("requested_by", request.requestedBy());
+        }
+        Map<String, Object> patch = new LinkedHashMap<>();
+        patch.put("last_invoice_revert_batch", last);
+        LinkedHashSet<String> voidedIds = new LinkedHashSet<>(readUuidStringListFromSummary(stage.summaryJson(), "voided_invoice_ids"));
+        for (InvoiceGenerationInvoiceActionRow r : results) {
+            if (r.invoiceId() != null && r.invoiceStatus() != null && "PENDING".equalsIgnoreCase(r.invoiceStatus())) {
+                voidedIds.remove(r.invoiceId().toString());
+            }
+        }
+        patch.put("voided_invoice_ids", new ArrayList<>(voidedIds));
+        appendPendingDueTotalsToSummaryPatch(billingRunId, patch);
+        stageRunRepository.mergeStageRunSummaryJson(stageRunId, patch, false);
+    }
+
     /**
      * Queues async invoice generation; client uses 202 + poll GET /runs/{id}.
      */
@@ -1071,6 +1218,17 @@ public class InvoiceGenerationService {
             }
         }
 
+        mergeVoidInvoiceRunSummaryJson(
+                invoiceGenerationRunId,
+                stage,
+                billingRunId,
+                voided,
+                errors.size(),
+                List.copyOf(results),
+                List.copyOf(errors),
+                request,
+                idempotencyKey);
+
         Map<String, Object> voidAudit = new LinkedHashMap<>();
         voidAudit.put("operation", "VOID_INVOICES");
         voidAudit.put("billing_run_id", billingRunId.toString());
@@ -1224,6 +1382,16 @@ public class InvoiceGenerationService {
                                 "Could not revert to pending"));
             }
         }
+
+        mergeRevertInvoiceRunSummaryJson(
+                invoiceGenerationRunId,
+                stage,
+                billingRunId,
+                reverted,
+                errors.size(),
+                List.copyOf(results),
+                List.copyOf(errors),
+                request);
 
         Map<String, Object> revertAudit = new LinkedHashMap<>();
         revertAudit.put("operation", "REVERT_INVOICES");

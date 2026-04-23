@@ -5,6 +5,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -87,6 +88,83 @@ public class InvoiceRepository {
                 """,
                 (rs, rowNum) -> (UUID) rs.getObject("invoice_id"),
                 billingRunId.toString());
+    }
+
+    /**
+     * Sum of {@code transactions.invoice.total_amount} for this billing run where invoice status is
+     * {@code PENDING} or {@code DUE} (excludes {@code VOID} and other statuses). Used to refresh stage
+     * {@code summary_json.totalAmount} after void/revert.
+     */
+    public BigDecimal sumTotalAmountPendingOrDueForBillingRun(UUID billingRunId) {
+        if (billingRunId == null) {
+            return BigDecimal.ZERO;
+        }
+        try {
+            BigDecimal v = jdbc.queryForObject(
+                    """
+                    SELECT COALESCE(SUM(COALESCE(i.total_amount, 0)), 0)
+                    FROM transactions.invoice i
+                    INNER JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
+                    WHERE i.billing_run_id = ?::uuid
+                      AND COALESCE(i.is_active, true) = true
+                      AND UPPER(TRIM(COALESCE(lis.status_name, ''))) IN ('PENDING', 'DUE')
+                    """,
+                    BigDecimal.class,
+                    billingRunId.toString());
+            return v != null ? v : BigDecimal.ZERO;
+        } catch (DataAccessException e) {
+            return BigDecimal.ZERO;
+        }
+    }
+
+    /**
+     * Count of active invoices on the billing run in {@code PENDING} or {@code DUE} status.
+     */
+    public int countInvoicesPendingOrDueForBillingRun(UUID billingRunId) {
+        if (billingRunId == null) {
+            return 0;
+        }
+        try {
+            Integer n = jdbc.queryForObject(
+                    """
+                    SELECT COUNT(*)::int
+                    FROM transactions.invoice i
+                    INNER JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
+                    WHERE i.billing_run_id = ?::uuid
+                      AND COALESCE(i.is_active, true) = true
+                      AND UPPER(TRIM(COALESCE(lis.status_name, ''))) IN ('PENDING', 'DUE')
+                    """,
+                    Integer.class,
+                    billingRunId.toString());
+            return n != null ? n : 0;
+        } catch (DataAccessException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Sum of {@code transactions.invoice.total_amount} for this billing run where invoice status is {@code VOID}.
+     */
+    public BigDecimal sumTotalAmountVoidForBillingRun(UUID billingRunId) {
+        if (billingRunId == null) {
+            return BigDecimal.ZERO;
+        }
+        try {
+            BigDecimal v = jdbc.queryForObject(
+                    """
+                    SELECT COALESCE(SUM(COALESCE(i.total_amount, 0)), 0)
+                    FROM transactions.invoice i
+                    INNER JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
+                    WHERE i.billing_run_id = ?::uuid
+                      AND COALESCE(i.is_active, true) = true
+                      AND UPPER(TRIM(COALESCE(lis.status_name, ''))) = 'VOID'
+                    """,
+                    BigDecimal.class,
+                    billingRunId.toString());
+            return v != null ? v : BigDecimal.ZERO;
+        } catch (DataAccessException e) {
+            return BigDecimal.ZERO;
+        }
     }
 
     public Optional<UUID> findBillingRunIdForInvoice(UUID invoiceId) {
