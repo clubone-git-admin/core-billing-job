@@ -1,6 +1,7 @@
 package io.clubone.billing.api.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 
@@ -53,6 +54,7 @@ public record BillingCompareQueryResponse(
             /** Center identity: subscription when known (UUID string). */
             String subscriptionInstanceId,
             /** Center identity: invoice UUID string when known. */
+            @JsonIgnore
             String invoiceId,
             /** Join / legacy key (often same as subscription id). */
             String entityKey,
@@ -63,13 +65,21 @@ public record BillingCompareQueryResponse(
             SideSnapshot left,
             SideSnapshot right,
             /** Legacy flat fields for FE fallback. */
+            @JsonIgnore
             String clientName,
+            @JsonIgnore
             String agreementName,
+            @JsonIgnore
             String locationName,
+            @JsonIgnore
             String leftStatus,
+            @JsonIgnore
             String rightStatus,
+            @JsonIgnore
             BigDecimal leftAmount,
+            @JsonIgnore
             BigDecimal rightAmount,
+            @JsonIgnore
             BigDecimal deltaAmount,
             List<String> changedFields,
             String severity

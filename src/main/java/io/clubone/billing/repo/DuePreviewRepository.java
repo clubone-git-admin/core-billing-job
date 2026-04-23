@@ -39,6 +39,7 @@ public class DuePreviewRepository {
         sbs.billing_schedule_id,
         si.subscription_instance_id,
         sbs.subscription_plan_id,
+        sp.subscription_plan_code,
         sbs.billing_date AS payment_due_date,
         sbs.cycle_number,
         sbs.billing_period_start AS start_date,
@@ -165,6 +166,7 @@ public class DuePreviewRepository {
             row.put("billing_schedule_id", rs.getObject("billing_schedule_id", UUID.class));
             row.put("subscription_instance_id", rs.getObject("subscription_instance_id", UUID.class));
             row.put("subscription_plan_id", rs.getObject("subscription_plan_id", UUID.class));
+            row.put("subscription_plan_code", rs.getString("subscription_plan_code"));
             row.put("payment_due_date", rs.getObject("payment_due_date", LocalDate.class));
             row.put("cycle_number", rs.getObject("cycle_number", Integer.class));
             row.put("start_date", rs.getObject("start_date", LocalDate.class));

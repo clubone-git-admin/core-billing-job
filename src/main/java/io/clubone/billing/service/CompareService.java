@@ -373,20 +373,38 @@ public class CompareService {
         return null;
     }
 
-    private static BillingCompareQueryResponse.SideSnapshot sideFromDuePreviewMap(Map<String, Object> row, String invoiceStatusLabel) {
+    /**
+     * Status shown for a due-preview line: real CSV / projection fields only (no synthetic labels).
+     */
+    private static String duePreviewStatusFromRow(Map<String, Object> row) {
+        if (row == null) {
+            return null;
+        }
+        return firstNonBlank(
+                str(row.get("invoice_status")),
+                firstNonBlank(
+                        str(row.get("eligibility_reason")),
+                        firstNonBlank(
+                                str(row.get("client_agreement_status")),
+                                firstNonBlank(
+                                        str(row.get("agreement_status")),
+                                        str(row.get("subscription_instance_status_name"))))));
+    }
+
+    private static BillingCompareQueryResponse.SideSnapshot sideFromDuePreviewMap(Map<String, Object> row) {
         if (row == null) {
             return null;
         }
         return new BillingCompareQueryResponse.SideSnapshot(
-                str(row.get("invoice_id")),
+                firstNonBlank(str(row.get("invoice_number")), str(row.get("invoice_id"))),
                 fullName(row),
                 firstNonBlank(str(row.get("role_id")), str(row.get("client_role_id"))),
                 str(row.get("agreement_name")),
-                str(row.get("agreement_status")),
+                firstNonBlank(str(row.get("agreement_status")), str(row.get("client_agreement_status"))),
                 str(row.get("cycle_number")),
                 str(row.get("location_name")),
                 amount(row),
-                invoiceStatusLabel
+                duePreviewStatusFromRow(row)
         );
     }
 
@@ -400,7 +418,7 @@ public class CompareService {
         }
         String invStatus = firstNonBlank(r.invoiceStatus(), r.billingStatusCode());
         return new BillingCompareQueryResponse.SideSnapshot(
-                r.invoiceId() != null ? r.invoiceId().toString() : null,
+                firstNonBlank(r.invoiceNumber(), r.invoiceId() != null ? r.invoiceId().toString() : null),
                 r.clientName(),
                 firstNonBlank(r.roleId(), r.clientRoleId() != null ? r.clientRoleId().toString() : null),
                 firstNonBlank(r.agreementName(), r.agreementOrPlanName()),
@@ -413,14 +431,14 @@ public class CompareService {
     }
 
     private static BillingCompareQueryResponse.Row buildDuePreviewRow(String key, Map<String, Object> left, Map<String, Object> right) {
-        String leftStatus = left != null ? "READY" : null;
-        String rightStatus = right != null ? "READY" : null;
+        String leftStatus = left != null ? duePreviewStatusFromRow(left) : null;
+        String rightStatus = right != null ? duePreviewStatusFromRow(right) : null;
         BigDecimal leftAmount = amount(left);
         BigDecimal rightAmount = amount(right);
         BigDecimal delta = rightAmount.subtract(leftAmount);
 
-        BillingCompareQueryResponse.SideSnapshot leftS = sideFromDuePreviewMap(left, "READY");
-        BillingCompareQueryResponse.SideSnapshot rightS = sideFromDuePreviewMap(right, "READY");
+        BillingCompareQueryResponse.SideSnapshot leftS = sideFromDuePreviewMap(left);
+        BillingCompareQueryResponse.SideSnapshot rightS = sideFromDuePreviewMap(right);
 
         String leftClient = left != null ? fullName(left) : null;
         String rightClient = right != null ? fullName(right) : null;
@@ -428,15 +446,17 @@ public class CompareService {
         String agreement = firstNonBlank(str(left != null ? left.get("agreement_name") : null), str(right != null ? right.get("agreement_name") : null));
         String location = firstNonBlank(str(left != null ? left.get("location_name") : null), str(right != null ? right.get("location_name") : null));
         String subscriptionPlan = firstNonBlank(
-                str(left != null ? left.get("plan_name") : null),
-                firstNonBlank(str(right != null ? right.get("plan_name") : null), firstNonBlank(agreement, key)));
+                str(left != null ? left.get("subscription_plan_code") : null),
+                firstNonBlank(str(right != null ? right.get("subscription_plan_code") : null),
+                        firstNonBlank(str(left != null ? left.get("plan_name") : null),
+                                firstNonBlank(str(right != null ? right.get("plan_name") : null), firstNonBlank(agreement, key)))));
 
         String subId = firstNonBlank(
                 str(left != null ? left.get("subscription_instance_id") : null),
                 str(right != null ? right.get("subscription_instance_id") : null));
         String invoiceId = firstNonBlank(
-                str(left != null ? left.get("invoice_id") : null),
-                str(right != null ? right.get("invoice_id") : null));
+                firstNonBlank(str(left != null ? left.get("invoice_number") : null), str(left != null ? left.get("invoice_id") : null)),
+                firstNonBlank(str(right != null ? right.get("invoice_number") : null), str(right != null ? right.get("invoice_id") : null)));
 
         List<String> changed = new ArrayList<>();
         if (!Objects.equals(leftStatus, rightStatus)) {
@@ -481,13 +501,13 @@ public class CompareService {
             String key,
             Map<String, Object> left,
             SubscriptionBillingHistoryItemDto right) {
-        String leftStatus = left != null ? "READY" : null;
+        String leftStatus = left != null ? duePreviewStatusFromRow(left) : null;
         String rightStatus = right != null ? firstNonBlank(right.billingStatusCode(), right.invoiceStatus()) : null;
         BigDecimal leftAmount = amount(left);
         BigDecimal rightAmount = right != null && right.invoiceTotalAmount() != null ? right.invoiceTotalAmount() : BigDecimal.ZERO;
         BigDecimal delta = rightAmount.subtract(leftAmount);
 
-        BillingCompareQueryResponse.SideSnapshot leftS = sideFromDuePreviewMap(left, "READY");
+        BillingCompareQueryResponse.SideSnapshot leftS = sideFromDuePreviewMap(left);
         BillingCompareQueryResponse.SideSnapshot rightS = sideFromInvoiceDto(right);
 
         String leftClient = left != null ? fullName(left) : null;
@@ -498,15 +518,17 @@ public class CompareService {
                 firstNonBlank(right != null ? right.agreementName() : null, right != null ? right.agreementOrPlanName() : null));
         String location = firstNonBlank(str(left != null ? left.get("location_name") : null), right != null ? right.locationName() : null);
         String subscriptionPlan = firstNonBlank(
-                str(left != null ? left.get("plan_name") : null),
-                firstNonBlank(right != null ? right.agreementOrPlanName() : null, firstNonBlank(agreement, key)));
+                str(left != null ? left.get("subscription_plan_code") : null),
+                firstNonBlank(str(left != null ? left.get("plan_name") : null),
+                        firstNonBlank(right != null ? right.agreementOrPlanName() : null, firstNonBlank(agreement, key))));
 
         String subId = firstNonBlank(
                 str(left != null ? left.get("subscription_instance_id") : null),
                 right != null && right.subscriptionInstanceId() != null ? right.subscriptionInstanceId().toString() : null);
         String invoiceId = firstNonBlank(
-                str(left != null ? left.get("invoice_id") : null),
-                right != null && right.invoiceId() != null ? right.invoiceId().toString() : null);
+                firstNonBlank(str(left != null ? left.get("invoice_number") : null), str(left != null ? left.get("invoice_id") : null)),
+                firstNonBlank(right != null ? right.invoiceNumber() : null,
+                        right != null && right.invoiceId() != null ? right.invoiceId().toString() : null));
 
         List<String> changed = new ArrayList<>();
         if (!Objects.equals(leftStatus, rightStatus)) {

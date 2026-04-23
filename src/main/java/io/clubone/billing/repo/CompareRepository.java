@@ -615,7 +615,11 @@ public class CompareRepository {
                         TRIM(CONCAT(COALESCE(ch.client_first_name, ''), ' ', COALESCE(ch.client_last_name, ''))) AS client_name,
                         COALESCE(a.agreement_name, '') AS agreement_name,
                         COALESCE(loc.name, '') AS location_name,
-                        'READY' AS status_code,
+                        COALESCE(
+                            NULLIF(TRIM(invs_dp.status_name), ''),
+                            NULLIF(TRIM(lcas.name), ''),
+                            NULLIF(TRIM(sis.status_name), '')
+                        ) AS status_code,
                         GREATEST(
                             COALESCE(
                                 sbs.final_amount,
@@ -630,11 +634,11 @@ public class CompareRepository {
                             0::numeric
                         ) AS amount,
                         CAST(si.subscription_instance_id AS text) AS sub_id,
-                        CAST(sbs.invoice_id AS text) AS inv_id,
+                        COALESCE(NULLIF(TRIM(inv.invoice_number), ''), CAST(sbs.invoice_id AS text)) AS inv_id,
                         CAST(cr.client_role_id AS text) AS client_role,
                         COALESCE(lcas.name, '') AS agreement_status,
                         CAST(sbs.cycle_number AS text) AS cycle_no,
-                        COALESCE(a.agreement_name, '') AS plan_name
+                        COALESCE(sp.subscription_plan_code, a.agreement_name, '') AS plan_name
                     FROM client_subscription_billing.billing_run br
                     JOIN client_subscription_billing.subscription_billing_schedule sbs
                       ON sbs.billing_date IS NOT NULL
@@ -642,6 +646,8 @@ public class CompareRepository {
                     LEFT JOIN transactions.invoice inv
                       ON inv.invoice_id = sbs.invoice_id
                      AND COALESCE(inv.is_active, true) = true
+                    LEFT JOIN transactions.lu_invoice_status invs_dp
+                      ON invs_dp.invoice_status_id = inv.invoice_status_id
                     JOIN client_subscription_billing.subscription_instance si
                       ON si.subscription_instance_id = sbs.subscription_instance_id
                     JOIN billing_config.subscription_instance_status sis
@@ -709,11 +715,11 @@ public class CompareRepository {
                         COALESCE(bs.status_code, invs.status_name, 'UNKNOWN') AS status_code,
                         COALESCE(h.invoice_total_amount, i.total_amount, 0::numeric) AS amount,
                         CAST(h.subscription_instance_id AS text) AS sub_id,
-                        CAST(h.invoice_id AS text) AS inv_id,
+                        COALESCE(NULLIF(TRIM(i.invoice_number), ''), CAST(h.invoice_id AS text)) AS inv_id,
                         CAST(COALESCE(ca.client_role_id, i.client_role_id) AS text) AS client_role,
                         COALESCE(lcas.name, '') AS agreement_status,
                         CAST(NULL AS varchar) AS cycle_no,
-                        COALESCE(a.agreement_name, '') AS plan_name
+                        COALESCE(sp.subscription_plan_code, a.agreement_name, '') AS plan_name
                     FROM (
                         SELECT DISTINCT ON (h0.invoice_id)
                             h0.invoice_id, h0.subscription_instance_id, h0.billing_status_id, h0.invoice_total_amount
@@ -755,11 +761,11 @@ public class CompareRepository {
                     COALESCE(bs.status_code, invs.status_name, 'UNKNOWN') AS status_code,
                     COALESCE(h.invoice_total_amount, i.total_amount, 0::numeric) AS amount,
                     CAST(COALESCE(h.subscription_instance_id, ie.subscription_instance_id) AS text) AS sub_id,
-                    CAST(i.invoice_id AS text) AS inv_id,
+                    COALESCE(NULLIF(TRIM(i.invoice_number), ''), CAST(i.invoice_id AS text)) AS inv_id,
                     CAST(COALESCE(ca.client_role_id, i.client_role_id) AS text) AS client_role,
                     COALESCE(lcas.name, '') AS agreement_status,
                     CAST(NULL AS varchar) AS cycle_no,
-                    COALESCE(a.agreement_name, '') AS plan_name
+                    COALESCE(sp.subscription_plan_code, a.agreement_name, '') AS plan_name
                 FROM transactions.invoice i
                 LEFT JOIN LATERAL (
                     SELECT h2.*

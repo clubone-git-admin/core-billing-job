@@ -782,7 +782,7 @@ public class DuePreviewService {
         StringBuilder csv = new StringBuilder();
 
         // CSV Header
-        csv.append("billing_schedule_id,subscription_instance_id,subscription_plan_id,subscription_id,cycle_number,")
+        csv.append("billing_schedule_id,subscription_instance_id,subscription_plan_id,subscription_plan_code,subscription_id,cycle_number,")
                 .append("payment_due_date,start_date,last_billed_on,")
                 .append("client_role_id,role_id,client_first_name,client_last_name,client_email,")
                 .append("client_agreement_id,client_agreement_status,agreement_name,")
@@ -798,6 +798,7 @@ public class DuePreviewService {
             csv.append(formatCSVValue(instance.get("billing_schedule_id"))).append(",");
             csv.append(formatCSVValue(instance.get("subscription_instance_id"))).append(",");
             csv.append(formatCSVValue(instance.get("subscription_plan_id"))).append(",");
+            csv.append(formatCSVValue(instance.get("subscription_plan_code"))).append(",");
             csv.append(formatCSVValue(instance.get("subscription_id"))).append(",");
             csv.append(formatCSVValue(instance.get("cycle_number"))).append(",");
             csv.append(formatCSVValue(instance.get("payment_due_date"))).append(",");
