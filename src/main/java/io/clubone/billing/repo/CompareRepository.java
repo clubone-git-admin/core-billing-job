@@ -385,6 +385,7 @@ public class CompareRepository {
         params.add(new SqlParameterValue(Types.VARCHAR, like));
         params.add(new SqlParameterValue(Types.VARCHAR, like));
         params.add(new SqlParameterValue(Types.VARCHAR, like));
+        params.add(new SqlParameterValue(Types.VARCHAR, like));
         params.add(new SqlParameterValue(Types.VARCHAR, normalizedSeverity));
         params.add(new SqlParameterValue(Types.VARCHAR, normalizedSeverity));
     }
@@ -406,6 +407,7 @@ public class CompareRepository {
         }
         BillingCompareQueryResponse.SideSnapshot left = hasLeft
                 ? new BillingCompareQueryResponse.SideSnapshot(
+                rs.getString("left_invoice_id"),
                 rs.getString("left_client_name"),
                 rs.getString("left_client_role"),
                 rs.getString("left_agreement_name"),
@@ -417,6 +419,7 @@ public class CompareRepository {
                 : null;
         BillingCompareQueryResponse.SideSnapshot right = hasRight
                 ? new BillingCompareQueryResponse.SideSnapshot(
+                rs.getString("right_invoice_id"),
                 rs.getString("right_client_name"),
                 rs.getString("right_client_role"),
                 rs.getString("right_agreement_name"),
@@ -430,6 +433,8 @@ public class CompareRepository {
                 rs.getString("subscription_instance_id"),
                 rs.getString("invoice_id"),
                 rs.getString("entity_key"),
+                rs.getString("subscription_plan"),
+                rs.getString("plan_name"),
                 left,
                 right,
                 rs.getString("client_name"),
@@ -456,6 +461,7 @@ public class CompareRepository {
         String orderClause = switch (sortBy == null ? "delta_abs" : sortBy) {
             case "delta_amount" -> "ORDER BY delta_amount %s, entity_key ASC";
             case "entity_key" -> "ORDER BY entity_key %s";
+            case "subscription_plan", "plan_name" -> "ORDER BY subscription_plan %s, entity_key ASC";
             default -> "ORDER BY delta_abs %s, entity_key ASC";
         };
         String orderDir = "asc".equalsIgnoreCase(sortDir) ? "ASC " : "DESC ";
@@ -469,6 +475,7 @@ public class CompareRepository {
                         OR COALESCE(client_name, '') ILIKE ?::text
                         OR COALESCE(agreement_name, '') ILIKE ?::text
                         OR COALESCE(location_name, '') ILIKE ?::text
+                        OR COALESCE(subscription_plan, '') ILIKE ?::text
                         OR COALESCE(subscription_instance_id, '') ILIKE ?::text
                         OR COALESCE(invoice_id, '') ILIKE ?::text
                     )
@@ -497,6 +504,10 @@ public class CompareRepository {
                         COALESCE(NULLIF(TRIM(l.location_name), ''), NULLIF(TRIM(r.location_name), '')) AS location_name,
                         COALESCE(l.sub_id, r.sub_id) AS subscription_instance_id,
                         COALESCE(l.inv_id, r.inv_id) AS invoice_id,
+                        COALESCE(NULLIF(TRIM(l.plan_name), ''), NULLIF(TRIM(r.plan_name), ''), COALESCE(l.compare_key, r.compare_key)) AS subscription_plan,
+                        COALESCE(NULLIF(TRIM(l.plan_name), ''), NULLIF(TRIM(r.plan_name), ''), COALESCE(l.compare_key, r.compare_key)) AS plan_name,
+                        NULLIF(TRIM(l.inv_id), '') AS left_invoice_id,
+                        NULLIF(TRIM(r.inv_id), '') AS right_invoice_id,
                         NULLIF(TRIM(l.client_name), '') AS left_client_name,
                         NULLIF(TRIM(r.client_name), '') AS right_client_name,
                         NULLIF(TRIM(l.client_role), '') AS left_client_role,
@@ -562,11 +573,15 @@ public class CompareRepository {
                   entity_key,
                   subscription_instance_id,
                   invoice_id,
+                  subscription_plan,
+                  plan_name,
                   client_name,
                   agreement_name,
                   location_name,
                   has_left,
                   has_right,
+                  left_invoice_id,
+                  right_invoice_id,
                   left_client_name,
                   right_client_name,
                   left_client_role,
@@ -618,7 +633,8 @@ public class CompareRepository {
                         CAST(sbs.invoice_id AS text) AS inv_id,
                         CAST(cr.client_role_id AS text) AS client_role,
                         COALESCE(lcas.name, '') AS agreement_status,
-                        CAST(sbs.cycle_number AS text) AS cycle_no
+                        CAST(sbs.cycle_number AS text) AS cycle_no,
+                        COALESCE(a.agreement_name, '') AS plan_name
                     FROM client_subscription_billing.billing_run br
                     JOIN client_subscription_billing.subscription_billing_schedule sbs
                       ON sbs.billing_date IS NOT NULL
@@ -696,7 +712,8 @@ public class CompareRepository {
                         CAST(h.invoice_id AS text) AS inv_id,
                         CAST(COALESCE(ca.client_role_id, i.client_role_id) AS text) AS client_role,
                         COALESCE(lcas.name, '') AS agreement_status,
-                        CAST(NULL AS varchar) AS cycle_no
+                        CAST(NULL AS varchar) AS cycle_no,
+                        COALESCE(a.agreement_name, '') AS plan_name
                     FROM (
                         SELECT DISTINCT ON (h0.invoice_id)
                             h0.invoice_id, h0.subscription_instance_id, h0.billing_status_id, h0.invoice_total_amount
@@ -741,7 +758,8 @@ public class CompareRepository {
                     CAST(i.invoice_id AS text) AS inv_id,
                     CAST(COALESCE(ca.client_role_id, i.client_role_id) AS text) AS client_role,
                     COALESCE(lcas.name, '') AS agreement_status,
-                    CAST(NULL AS varchar) AS cycle_no
+                    CAST(NULL AS varchar) AS cycle_no,
+                    COALESCE(a.agreement_name, '') AS plan_name
                 FROM transactions.invoice i
                 LEFT JOIN LATERAL (
                     SELECT h2.*

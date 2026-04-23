@@ -378,6 +378,7 @@ public class CompareService {
             return null;
         }
         return new BillingCompareQueryResponse.SideSnapshot(
+                str(row.get("invoice_id")),
                 fullName(row),
                 firstNonBlank(str(row.get("role_id")), str(row.get("client_role_id"))),
                 str(row.get("agreement_name")),
@@ -399,6 +400,7 @@ public class CompareService {
         }
         String invStatus = firstNonBlank(r.invoiceStatus(), r.billingStatusCode());
         return new BillingCompareQueryResponse.SideSnapshot(
+                r.invoiceId() != null ? r.invoiceId().toString() : null,
                 r.clientName(),
                 firstNonBlank(r.roleId(), r.clientRoleId() != null ? r.clientRoleId().toString() : null),
                 firstNonBlank(r.agreementName(), r.agreementOrPlanName()),
@@ -425,6 +427,9 @@ public class CompareService {
         String client = firstNonBlank(leftClient, rightClient);
         String agreement = firstNonBlank(str(left != null ? left.get("agreement_name") : null), str(right != null ? right.get("agreement_name") : null));
         String location = firstNonBlank(str(left != null ? left.get("location_name") : null), str(right != null ? right.get("location_name") : null));
+        String subscriptionPlan = firstNonBlank(
+                str(left != null ? left.get("plan_name") : null),
+                firstNonBlank(str(right != null ? right.get("plan_name") : null), firstNonBlank(agreement, key)));
 
         String subId = firstNonBlank(
                 str(left != null ? left.get("subscription_instance_id") : null),
@@ -455,6 +460,8 @@ public class CompareService {
                 subId,
                 invoiceId,
                 key,
+                subscriptionPlan,
+                subscriptionPlan,
                 leftS,
                 rightS,
                 client,
@@ -490,6 +497,9 @@ public class CompareService {
                 str(left != null ? left.get("agreement_name") : null),
                 firstNonBlank(right != null ? right.agreementName() : null, right != null ? right.agreementOrPlanName() : null));
         String location = firstNonBlank(str(left != null ? left.get("location_name") : null), right != null ? right.locationName() : null);
+        String subscriptionPlan = firstNonBlank(
+                str(left != null ? left.get("plan_name") : null),
+                firstNonBlank(right != null ? right.agreementOrPlanName() : null, firstNonBlank(agreement, key)));
 
         String subId = firstNonBlank(
                 str(left != null ? left.get("subscription_instance_id") : null),
@@ -520,6 +530,8 @@ public class CompareService {
                 subId,
                 invoiceId,
                 key,
+                subscriptionPlan,
+                subscriptionPlan,
                 leftS,
                 rightS,
                 client,
@@ -558,6 +570,8 @@ public class CompareService {
         }
         String s = search.toLowerCase();
         return contains(row.entityKey(), s)
+                || contains(row.subscriptionPlan(), s)
+                || contains(row.planName(), s)
                 || contains(row.subscriptionInstanceId(), s)
                 || contains(row.invoiceId(), s)
                 || contains(row.clientName(), s)
@@ -584,6 +598,11 @@ public class CompareService {
         Comparator<BillingCompareQueryResponse.Row> c;
         if ("entity_key".equals(sortBy)) {
             c = Comparator.comparing(r -> safe(r.entityKey()), String.CASE_INSENSITIVE_ORDER);
+        } else if ("subscription_plan".equals(sortBy) || "plan_name".equals(sortBy)) {
+            c = Comparator.comparing((BillingCompareQueryResponse.Row r) ->
+                            safe(firstNonBlank(r.subscriptionPlan(), r.planName())),
+                    String.CASE_INSENSITIVE_ORDER)
+                    .thenComparing(r -> safe(r.entityKey()), String.CASE_INSENSITIVE_ORDER);
         } else if ("delta_amount".equals(sortBy)) {
             c = Comparator.comparing(BillingCompareQueryResponse.Row::deltaAmount, Comparator.nullsFirst(BigDecimal::compareTo))
                     .thenComparing(r -> safe(r.entityKey()), String.CASE_INSENSITIVE_ORDER);
@@ -774,7 +793,7 @@ public class CompareService {
         if (sortBy == null) {
             return "delta_abs";
         }
-        List<String> allowed = List.of("delta_abs", "delta_amount", "entity_key");
+        List<String> allowed = List.of("delta_abs", "delta_amount", "entity_key", "subscription_plan", "plan_name");
         return allowed.contains(sortBy) ? sortBy : "delta_abs";
     }
 
@@ -785,16 +804,17 @@ public class CompareService {
     private static String toCsv(List<BillingCompareQueryResponse.Row> rows) {
         List<String> lines = new ArrayList<>();
         lines.add(String.join(",",
-                "left_client_name", "left_client_role", "left_agreement_name", "left_agreement_status", "left_cycle_no",
+                "left_invoice_id", "left_client_name", "left_client_role", "left_agreement_name", "left_agreement_status", "left_cycle_no",
                 "left_location_name", "left_amount", "left_invoice_status",
-                "subscription_instance_id", "invoice_id", "entity_key",
-                "right_client_name", "right_client_role", "right_agreement_name", "right_agreement_status", "right_cycle_no",
+                "subscription_plan", "plan_name", "subscription_instance_id", "invoice_id", "entity_key",
+                "right_invoice_id", "right_client_name", "right_client_role", "right_agreement_name", "right_agreement_status", "right_cycle_no",
                 "right_location_name", "right_amount", "right_invoice_status",
                 "delta_amount", "changed_fields", "severity"));
         for (BillingCompareQueryResponse.Row r : rows) {
             BillingCompareQueryResponse.SideSnapshot l = r.left();
             BillingCompareQueryResponse.SideSnapshot rt = r.right();
             lines.add(String.join(",",
+                    esc(l != null ? l.invoiceId() : null),
                     esc(l != null ? l.clientName() : null),
                     esc(l != null ? l.clientRole() : null),
                     esc(l != null ? l.agreementName() : null),
@@ -803,9 +823,12 @@ public class CompareService {
                     esc(l != null ? l.locationName() : null),
                     l != null && l.amount() != null ? String.valueOf(l.amount()) : "",
                     esc(l != null ? l.invoiceStatus() : null),
+                    esc(r.subscriptionPlan()),
+                    esc(r.planName()),
                     esc(r.subscriptionInstanceId()),
                     esc(r.invoiceId()),
                     esc(r.entityKey()),
+                    esc(rt != null ? rt.invoiceId() : null),
                     esc(rt != null ? rt.clientName() : null),
                     esc(rt != null ? rt.clientRole() : null),
                     esc(rt != null ? rt.agreementName() : null),

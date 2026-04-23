@@ -36,6 +36,7 @@ public record BillingCompareQueryResponse(
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record SideSnapshot(
+            String invoiceId,
             String clientName,
             String clientRole,
             String agreementName,
@@ -55,6 +56,10 @@ public record BillingCompareQueryResponse(
             String invoiceId,
             /** Join / legacy key (often same as subscription id). */
             String entityKey,
+            /** Preferred center label for compare grid (fallback still handled by FE). */
+            String subscriptionPlan,
+            /** Compatibility alias used by some clients. */
+            String planName,
             SideSnapshot left,
             SideSnapshot right,
             /** Legacy flat fields for FE fallback. */
