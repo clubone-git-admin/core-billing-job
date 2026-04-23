@@ -5,6 +5,9 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.sql.Timestamp;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -84,5 +87,120 @@ public class InvoiceRepository {
                 """,
                 (rs, rowNum) -> (UUID) rs.getObject("invoice_id"),
                 billingRunId.toString());
+    }
+
+    public Optional<UUID> findBillingRunIdForInvoice(UUID invoiceId) {
+        if (invoiceId == null) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.ofNullable(jdbc.query(
+                    """
+                    SELECT billing_run_id
+                    FROM transactions.invoice
+                    WHERE invoice_id = ?::uuid
+                      AND COALESCE(is_active, true) = true
+                    """,
+                    rs -> rs.next() ? (UUID) rs.getObject("billing_run_id") : null,
+                    invoiceId.toString()));
+        } catch (DataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * {@code status_name} from {@code transactions.lu_invoice_status} for this invoice, when present.
+     */
+    public Optional<String> findInvoiceStatusNameByInvoiceId(UUID invoiceId) {
+        if (invoiceId == null) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.ofNullable(jdbc.query(
+                    """
+                    SELECT lis.status_name
+                    FROM transactions.invoice i
+                    JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
+                    WHERE i.invoice_id = ?::uuid
+                      AND COALESCE(i.is_active, true) = true
+                    """,
+                    rs -> rs.next() ? rs.getString("status_name") : null,
+                    invoiceId.toString()));
+        } catch (DataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    public Optional<OffsetDateTime> findInvoiceModifiedOn(UUID invoiceId) {
+        if (invoiceId == null) {
+            return Optional.empty();
+        }
+        try {
+            Timestamp ts = jdbc.query(
+                    "SELECT modified_on FROM transactions.invoice WHERE invoice_id = ?::uuid",
+                    rs -> rs.next() ? rs.getTimestamp("modified_on") : null,
+                    invoiceId.toString());
+            if (ts == null) {
+                return Optional.empty();
+            }
+            return Optional.of(OffsetDateTime.ofInstant(ts.toInstant(), ZoneOffset.UTC));
+        } catch (DataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Sets {@code transactions.invoice.invoice_status_id} to {@code newStatusId} when current Lu status name
+     * is different from {@code notWhenCurrentStatus} (case-insensitive). Returns rows updated (0 or 1).
+     */
+    public int updateInvoiceStatusUnlessCurrentStatusIs(
+            UUID invoiceId, UUID newStatusId, String notWhenCurrentStatus) {
+        if (invoiceId == null || newStatusId == null || notWhenCurrentStatus == null) {
+            return 0;
+        }
+        try {
+            return jdbc.update(
+                    """
+                    UPDATE transactions.invoice i
+                    SET invoice_status_id = ?::uuid, modified_on = now()
+                    FROM transactions.lu_invoice_status cur
+                    WHERE i.invoice_id = ?::uuid
+                      AND i.invoice_status_id = cur.invoice_status_id
+                      AND COALESCE(i.is_active, true) = true
+                      AND UPPER(TRIM(COALESCE(cur.status_name, ''))) <> UPPER(TRIM(?))
+                    """,
+                    newStatusId.toString(),
+                    invoiceId.toString(),
+                    notWhenCurrentStatus);
+        } catch (DataAccessException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Updates status only when current Lu name matches {@code whenCurrentStatus} (e.g. revert {@code VOID} → {@code PENDING}).
+     */
+    public int updateInvoiceStatusWhenCurrentStatusIs(
+            UUID invoiceId, UUID newStatusId, String whenCurrentStatus) {
+        if (invoiceId == null || newStatusId == null || whenCurrentStatus == null) {
+            return 0;
+        }
+        try {
+            return jdbc.update(
+                    """
+                    UPDATE transactions.invoice i
+                    SET invoice_status_id = ?::uuid, modified_on = now()
+                    FROM transactions.lu_invoice_status cur
+                    WHERE i.invoice_id = ?::uuid
+                      AND i.invoice_status_id = cur.invoice_status_id
+                      AND COALESCE(i.is_active, true) = true
+                      AND UPPER(TRIM(COALESCE(cur.status_name, ''))) = UPPER(TRIM(?))
+                    """,
+                    newStatusId.toString(),
+                    invoiceId.toString(),
+                    whenCurrentStatus);
+        } catch (DataAccessException e) {
+            return 0;
+        }
     }
 }

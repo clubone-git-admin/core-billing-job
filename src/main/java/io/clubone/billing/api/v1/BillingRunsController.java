@@ -122,6 +122,9 @@ public class BillingRunsController {
             @RequestParam(required = false) String mockChargeFailureCode,
             @RequestParam(required = false) String failureCode,
             @RequestParam(required = false) String search,
+            @RequestParam(required = false) String invoiceStatus,
+            @RequestParam(name = "exclude_void", required = false) Boolean excludeVoid,
+            @RequestParam(name = "location_id", required = false) UUID locationId,
             @RequestParam(defaultValue = "50") Integer limit,
             @RequestParam(defaultValue = "0") Integer offset) {
 
@@ -142,6 +145,9 @@ public class BillingRunsController {
                 mockChargeStatus,
                 failureCodeFilter,
                 search,
+                invoiceStatus,
+                excludeVoid,
+                locationId,
                 limit,
                 offset);
         return ResponseEntity.ok(page);

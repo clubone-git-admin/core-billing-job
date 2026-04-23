@@ -7,6 +7,7 @@ import io.clubone.billing.repo.AuditLogRepository;
 import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.InvoiceRepository;
 import io.clubone.billing.repo.StageRunRepository;
+import io.clubone.billing.repo.SbhInvoiceLink;
 import io.clubone.billing.repo.SubscriptionBillingHistoryRepository;
 import io.clubone.billing.service.invoicegen.InvoiceGenerationQueuedEvent;
 import org.slf4j.Logger;
@@ -22,7 +23,9 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 public class InvoiceGenerationService {
@@ -69,6 +72,44 @@ public class InvoiceGenerationService {
 
     private static String actorFromTriggeredBy(UUID triggeredBy) {
         return triggeredBy != null ? triggeredBy.toString() : "system";
+    }
+
+    private static List<String> parseInvoiceStatusCsv(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return null;
+        }
+        List<String> out = new ArrayList<>();
+        for (String p : csv.split(",")) {
+            if (p != null) {
+                String t = p.trim();
+                if (!t.isEmpty()) {
+                    out.add(t);
+                }
+            }
+        }
+        return out.isEmpty() ? null : out;
+    }
+
+    private static boolean isInvoiceActionAllowedStageStatus(String st) {
+        if (st == null) {
+            return false;
+        }
+        return "COMPLETED".equals(st)
+                || "WAITING".equals(st)
+                || "FAILED".equals(st)
+                || "CANCELLED".equals(st);
+    }
+
+    /**
+     * True when the UUID is an invoice row in {@code transactions.invoice} for this billing run. Clients
+     * sometimes pass {@code invoice_id} in the {@code subscription_billing_history_ids} array; this path
+     * allows those to resolve without a false {@code IG_UNKNOWN_SBH}.
+     */
+    private boolean isInvoiceInBillingRun(UUID id, UUID billingRunId) {
+        return invoiceRepository
+                .findBillingRunIdForInvoice(id)
+                .filter(bid -> bid.equals(billingRunId))
+                .isPresent();
     }
 
     /**
@@ -594,6 +635,9 @@ public class InvoiceGenerationService {
             String mockChargeStatus,
             String mockChargeFailureCode,
             String search,
+            String invoiceStatus,
+            Boolean excludeVoid,
+            UUID locationId,
             int limit,
             int offset) {
         if (billingRunId == null) {
@@ -627,6 +671,7 @@ public class InvoiceGenerationService {
         }
         // INVOICE_GENERATION runs do not insert subscription_billing_history rows tagged with this stage_run_id;
         // draft invoices live on transactions.invoice and IDs are stored on the stage run as generated_invoice_ids.
+        List<String> statusFilter = parseInvoiceStatusCsv(invoiceStatus);
         if (invoiceGenerationRunId != null) {
             StageRunDto sr = requireStageRunForList(billingRunId, invoiceGenerationRunId, STAGE_CODE, "invoice_generation_run_id");
             ParsedGeneratedInvoiceIds parsed = parseGeneratedInvoiceIds(sr.summaryJson());
@@ -636,9 +681,16 @@ public class InvoiceGenerationService {
                 }
                 List<SubscriptionBillingHistoryItemDto> igRows =
                         subscriptionBillingHistoryRepository.findByBillingRunIdAndInvoiceIds(
-                                billingRunId, parsed.ids(), searchTrimmed, limit, offset);
+                                billingRunId,
+                                parsed.ids(),
+                                searchTrimmed,
+                                limit,
+                                offset,
+                                statusFilter,
+                                excludeVoid,
+                                locationId);
                 int igTotal = subscriptionBillingHistoryRepository.countByBillingRunIdAndInvoiceIds(
-                        billingRunId, parsed.ids(), searchTrimmed);
+                        billingRunId, parsed.ids(), searchTrimmed, statusFilter, excludeVoid, locationId);
                 return PageResponse.of(igRows, igTotal, limit, offset);
             }
             var legacyRows = subscriptionBillingHistoryRepository.findByBillingRunId(
@@ -884,5 +936,308 @@ public class InvoiceGenerationService {
                 log.info("Started existing stage {} stageRunId={} billingRunId={}", nextCode, nextSr.stageRunId(), billingRunId);
             }
         }
+    }
+
+    @Transactional
+    public InvoiceGenerationInvoiceBatchResponse voidInvoicesInGenerationRun(
+            UUID invoiceGenerationRunId, InvoiceGenerationVoidInvoicesRequest request, String idempotencyKey) {
+        if (request == null) {
+            throw new InvoiceGenerationApiException("IG_INVALID_BODY", "Request body is required", HttpStatus.BAD_REQUEST, Map.of());
+        }
+        List<UUID> sbh = request.subscriptionBillingHistoryIds() != null ? request.subscriptionBillingHistoryIds() : List.of();
+        List<UUID> invFromReq = request.invoiceIds() != null ? request.invoiceIds() : List.of();
+        if (sbh.isEmpty() && invFromReq.isEmpty()) {
+            throw new InvoiceGenerationApiException(
+                    "IG_INVALID_BODY",
+                    "Provide subscription_billing_history_ids and/or invoice_ids",
+                    HttpStatus.BAD_REQUEST,
+                    Map.of());
+        }
+        StageRunDto stage = stageRunRepository.findById(invoiceGenerationRunId);
+        if (stage == null || !STAGE_CODE.equals(stage.stageCode())) {
+            throw new InvoiceGenerationApiException(
+                    "IG_RUN_NOT_FOUND",
+                    "Invoice generation run not found",
+                    HttpStatus.NOT_FOUND,
+                    Map.of("invoice_generation_run_id", String.valueOf(invoiceGenerationRunId)));
+        }
+        if (!isInvoiceActionAllowedStageStatus(stage.statusCode())) {
+            throw new InvoiceGenerationApiException(
+                    "IG_INVOICE_VOID_NOT_ALLOWED",
+                    "Run is not in a voidable state",
+                    HttpStatus.BAD_REQUEST,
+                    Map.of("status", String.valueOf(stage.statusCode())));
+        }
+        UUID billingRunId = stage.billingRunId();
+        UUID voidStatusId = invoiceRepository.findInvoiceStatusIdByName("VOID")
+                .orElseThrow(
+                        () -> new InvoiceGenerationApiException(
+                                "IG_INVOICE_STATUS_CONFIG",
+                                "Add transactions.lu_invoice_status row with status_name = 'VOID' (see docs/ddl/lu_invoice_status_void.sql)",
+                                HttpStatus.INTERNAL_SERVER_ERROR,
+                                Map.of()));
+
+        ParsedGeneratedInvoiceIds parsed = parseGeneratedInvoiceIds(stage.summaryJson());
+        Set<UUID> allowedInvoices = new HashSet<>();
+        if (parsed.keyPresent() && !parsed.ids().isEmpty()) {
+            allowedInvoices.addAll(parsed.ids());
+        } else {
+            allowedInvoices.addAll(invoiceRepository.findInvoiceIdsByBillingRunId(billingRunId));
+        }
+
+        List<SbhInvoiceLink> sbhRows = subscriptionBillingHistoryRepository.findInvoiceLinksBySbhIds(sbh);
+        Map<UUID, UUID> invoiceToSbh = new HashMap<>();
+        for (SbhInvoiceLink link : sbhRows) {
+            if (link.invoiceId() != null) {
+                invoiceToSbh.putIfAbsent(link.invoiceId(), link.subscriptionBillingHistoryId());
+            }
+        }
+        Set<UUID> foundSbh = sbhRows.stream().map(SbhInvoiceLink::subscriptionBillingHistoryId).collect(Collectors.toSet());
+        LinkedHashSet<UUID> toProcess = new LinkedHashSet<>();
+        toProcess.addAll(invFromReq);
+        for (SbhInvoiceLink link : sbhRows) {
+            if (link.invoiceId() != null) {
+                toProcess.add(link.invoiceId());
+            }
+        }
+        for (UUID sid : sbh) {
+            if (!foundSbh.contains(sid) && isInvoiceInBillingRun(sid, billingRunId)) {
+                toProcess.add(sid);
+            }
+        }
+
+        List<InvoiceGenerationInvoiceActionRow> results = new ArrayList<>();
+        List<InvoiceGenerationInvoiceActionError> errors = new ArrayList<>();
+        for (UUID sid : sbh) {
+            if (foundSbh.contains(sid) || isInvoiceInBillingRun(sid, billingRunId)) {
+                continue;
+            }
+            errors.add(
+                    new InvoiceGenerationInvoiceActionError(
+                            sid,
+                            null,
+                            "IG_UNKNOWN_SBH",
+                            "id not found as subscription_billing_history_id and not a valid invoice for this billing run"));
+        }
+
+        int voided = 0;
+        for (UUID invoiceId : toProcess) {
+            Optional<UUID> br = invoiceRepository.findBillingRunIdForInvoice(invoiceId);
+            if (br.isEmpty() || !billingRunId.equals(br.get())) {
+                errors.add(
+                        new InvoiceGenerationInvoiceActionError(
+                                invoiceToSbh.get(invoiceId),
+                                invoiceId,
+                                "IG_INVOICE_NOT_IN_RUN",
+                                "Invoice does not belong to this billing run"));
+                continue;
+            }
+            if (!allowedInvoices.contains(invoiceId)) {
+                errors.add(
+                        new InvoiceGenerationInvoiceActionError(
+                                invoiceToSbh.get(invoiceId),
+                                invoiceId,
+                                "IG_INVOICE_NOT_IN_SCOPE",
+                                "Invoice is not part of this generation run output"));
+                continue;
+            }
+            int n = invoiceRepository.updateInvoiceStatusUnlessCurrentStatusIs(invoiceId, voidStatusId, "VOID");
+            OffsetDateTime at =
+                    invoiceRepository.findInvoiceModifiedOn(invoiceId).orElse(OffsetDateTime.now(ZoneOffset.UTC));
+            String stName = invoiceRepository.findInvoiceStatusNameByInvoiceId(invoiceId).orElse(null);
+            if (n > 0) {
+                voided++;
+                results.add(
+                        new InvoiceGenerationInvoiceActionRow(
+                                invoiceToSbh.get(invoiceId), invoiceId, stName, at, null, null));
+            } else {
+                if (stName != null && stName.equalsIgnoreCase("VOID")) {
+                    results.add(
+                            new InvoiceGenerationInvoiceActionRow(
+                                    invoiceToSbh.get(invoiceId),
+                                    invoiceId,
+                                    "VOID",
+                                    at,
+                                    null,
+                                    "unchanged: already void"));
+                } else {
+                    errors.add(
+                            new InvoiceGenerationInvoiceActionError(
+                                    invoiceToSbh.get(invoiceId),
+                                    invoiceId,
+                                    "IG_INVOICE_VOID_CONFLICT",
+                                    "Could not void (current status: " + stName + ")"));
+                }
+            }
+        }
+
+        Map<String, Object> voidAudit = new LinkedHashMap<>();
+        voidAudit.put("operation", "VOID_INVOICES");
+        voidAudit.put("billing_run_id", billingRunId.toString());
+        voidAudit.put("voided", voided);
+        voidAudit.put("failed", errors.size());
+        voidAudit.put("subscription_billing_history_ids", sbh.stream().map(UUID::toString).toList());
+        voidAudit.put("invoice_ids_from_request", invFromReq.stream().map(UUID::toString).toList());
+        voidAudit.put("invoice_ids_processed", toProcess.stream().map(UUID::toString).toList());
+        if (request.reason() != null && !request.reason().isBlank()) {
+            voidAudit.put("reason", request.reason());
+        }
+        if (request.requestedBy() != null && !request.requestedBy().isBlank()) {
+            voidAudit.put("requested_by", request.requestedBy());
+        }
+        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            voidAudit.put("idempotency_key", idempotencyKey);
+        }
+        String voidActor = request.requestedBy() != null && !request.requestedBy().isBlank() ? request.requestedBy() : "system";
+        auditInvoiceGenerationStage("INVOICE_VOID", invoiceGenerationRunId, voidActor, voidAudit);
+        return InvoiceGenerationInvoiceBatchResponse.voidResult(voided, errors.size(), results, errors);
+    }
+
+    @Transactional
+    public InvoiceGenerationInvoiceBatchResponse revertInvoicesInGenerationRun(
+            UUID invoiceGenerationRunId, InvoiceGenerationRevertInvoicesRequest request) {
+        if (request == null) {
+            throw new InvoiceGenerationApiException("IG_INVALID_BODY", "Request body is required", HttpStatus.BAD_REQUEST, Map.of());
+        }
+        List<UUID> sbh = request.subscriptionBillingHistoryIds() != null ? request.subscriptionBillingHistoryIds() : List.of();
+        List<UUID> invFromReq = request.invoiceIds() != null ? request.invoiceIds() : List.of();
+        if (sbh.isEmpty() && invFromReq.isEmpty()) {
+            throw new InvoiceGenerationApiException(
+                    "IG_INVALID_BODY",
+                    "Provide subscription_billing_history_ids and/or invoice_ids",
+                    HttpStatus.BAD_REQUEST,
+                    Map.of());
+        }
+        StageRunDto stage = stageRunRepository.findById(invoiceGenerationRunId);
+        if (stage == null || !STAGE_CODE.equals(stage.stageCode())) {
+            throw new InvoiceGenerationApiException(
+                    "IG_RUN_NOT_FOUND",
+                    "Invoice generation run not found",
+                    HttpStatus.NOT_FOUND,
+                    Map.of("invoice_generation_run_id", String.valueOf(invoiceGenerationRunId)));
+        }
+        if (!isInvoiceActionAllowedStageStatus(stage.statusCode())) {
+            throw new InvoiceGenerationApiException(
+                    "IG_INVOICE_REVERT_NOT_ALLOWED",
+                    "Run is not in a state that allows revert",
+                    HttpStatus.BAD_REQUEST,
+                    Map.of("status", String.valueOf(stage.statusCode())));
+        }
+        UUID billingRunId = stage.billingRunId();
+        UUID pendingId = invoiceRepository.findInvoiceStatusIdByName("PENDING")
+                .orElseThrow(
+                        () -> new InvoiceGenerationApiException(
+                                "IG_INVOICE_STATUS_CONFIG",
+                                "lu_invoice_status must define status_name = 'PENDING'",
+                                HttpStatus.INTERNAL_SERVER_ERROR,
+                                Map.of()));
+
+        ParsedGeneratedInvoiceIds parsed = parseGeneratedInvoiceIds(stage.summaryJson());
+        Set<UUID> allowedInvoices = new HashSet<>();
+        if (parsed.keyPresent() && !parsed.ids().isEmpty()) {
+            allowedInvoices.addAll(parsed.ids());
+        } else {
+            allowedInvoices.addAll(invoiceRepository.findInvoiceIdsByBillingRunId(billingRunId));
+        }
+
+        List<SbhInvoiceLink> sbhRows = subscriptionBillingHistoryRepository.findInvoiceLinksBySbhIds(sbh);
+        Set<UUID> foundSbh = sbhRows.stream().map(SbhInvoiceLink::subscriptionBillingHistoryId).collect(Collectors.toSet());
+        Map<UUID, UUID> invoiceToSbh = new HashMap<>();
+        for (SbhInvoiceLink link : sbhRows) {
+            if (link.invoiceId() != null) {
+                invoiceToSbh.putIfAbsent(link.invoiceId(), link.subscriptionBillingHistoryId());
+            }
+        }
+        LinkedHashSet<UUID> toProcess = new LinkedHashSet<>();
+        toProcess.addAll(invFromReq);
+        for (SbhInvoiceLink link : sbhRows) {
+            if (link.invoiceId() != null) {
+                toProcess.add(link.invoiceId());
+            }
+        }
+        for (UUID sid : sbh) {
+            if (!foundSbh.contains(sid) && isInvoiceInBillingRun(sid, billingRunId)) {
+                toProcess.add(sid);
+            }
+        }
+
+        List<InvoiceGenerationInvoiceActionRow> results = new ArrayList<>();
+        List<InvoiceGenerationInvoiceActionError> errors = new ArrayList<>();
+        for (UUID sid : sbh) {
+            if (foundSbh.contains(sid) || isInvoiceInBillingRun(sid, billingRunId)) {
+                continue;
+            }
+            errors.add(
+                    new InvoiceGenerationInvoiceActionError(
+                            sid,
+                            null,
+                            "IG_UNKNOWN_SBH",
+                            "id not found as subscription_billing_history_id and not a valid invoice for this billing run"));
+        }
+
+        int reverted = 0;
+        for (UUID invoiceId : toProcess) {
+            Optional<UUID> br = invoiceRepository.findBillingRunIdForInvoice(invoiceId);
+            if (br.isEmpty() || !billingRunId.equals(br.get())) {
+                errors.add(
+                        new InvoiceGenerationInvoiceActionError(
+                                invoiceToSbh.get(invoiceId),
+                                invoiceId,
+                                "IG_INVOICE_NOT_IN_RUN",
+                                "Invoice does not belong to this billing run"));
+                continue;
+            }
+            if (!allowedInvoices.contains(invoiceId)) {
+                errors.add(
+                        new InvoiceGenerationInvoiceActionError(
+                                invoiceToSbh.get(invoiceId),
+                                invoiceId,
+                                "IG_INVOICE_NOT_IN_SCOPE",
+                                "Invoice is not part of this generation run output"));
+                continue;
+            }
+            String stName = invoiceRepository.findInvoiceStatusNameByInvoiceId(invoiceId).orElse(null);
+            if (stName == null || !"VOID".equalsIgnoreCase(stName)) {
+                errors.add(
+                        new InvoiceGenerationInvoiceActionError(
+                                invoiceToSbh.get(invoiceId),
+                                invoiceId,
+                                "IG_INVOICE_REVERT_CONFLICT",
+                                "Revert is only valid when invoice_status is VOID (current: " + stName + ")"));
+                continue;
+            }
+            int n = invoiceRepository.updateInvoiceStatusWhenCurrentStatusIs(invoiceId, pendingId, "VOID");
+            OffsetDateTime at =
+                    invoiceRepository.findInvoiceModifiedOn(invoiceId).orElse(OffsetDateTime.now(ZoneOffset.UTC));
+            stName = invoiceRepository.findInvoiceStatusNameByInvoiceId(invoiceId).orElse("PENDING");
+            if (n > 0) {
+                reverted++;
+                results.add(
+                        new InvoiceGenerationInvoiceActionRow(
+                                invoiceToSbh.get(invoiceId), invoiceId, stName, null, at, null));
+            } else {
+                errors.add(
+                        new InvoiceGenerationInvoiceActionError(
+                                invoiceToSbh.get(invoiceId),
+                                invoiceId,
+                                "IG_INVOICE_REVERT_CONFLICT",
+                                "Could not revert to pending"));
+            }
+        }
+
+        Map<String, Object> revertAudit = new LinkedHashMap<>();
+        revertAudit.put("operation", "REVERT_INVOICES");
+        revertAudit.put("billing_run_id", billingRunId.toString());
+        revertAudit.put("reverted", reverted);
+        revertAudit.put("failed", errors.size());
+        revertAudit.put("subscription_billing_history_ids", sbh.stream().map(UUID::toString).toList());
+        revertAudit.put("invoice_ids_from_request", invFromReq.stream().map(UUID::toString).toList());
+        revertAudit.put("invoice_ids_processed", toProcess.stream().map(UUID::toString).toList());
+        if (request.requestedBy() != null && !request.requestedBy().isBlank()) {
+            revertAudit.put("requested_by", request.requestedBy());
+        }
+        String revertActor = request.requestedBy() != null && !request.requestedBy().isBlank() ? request.requestedBy() : "system";
+        auditInvoiceGenerationStage("INVOICE_REVERT_PENDING", invoiceGenerationRunId, revertActor, revertAudit);
+        return InvoiceGenerationInvoiceBatchResponse.revertResult(reverted, errors.size(), results, errors);
     }
 }

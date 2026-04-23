@@ -131,8 +131,10 @@ public class MockChargeRepository {
                     ORDER BY ie2.created_on ASC NULLS LAST
                     LIMIT 1
                 ) ie ON true
+                LEFT JOIN transactions.lu_invoice_status invs_mc ON invs_mc.invoice_status_id = i.invoice_status_id
                 WHERE i.billing_run_id = ?::uuid
                   AND COALESCE(i.is_active, true) = true
+                  AND UPPER(TRIM(COALESCE(invs_mc.status_name, ''))) <> 'VOID'
                 ORDER BY i.created_on ASC
                 """;
         return jdbc.query(sql, (rs, rn) -> new MockInvoiceRow(

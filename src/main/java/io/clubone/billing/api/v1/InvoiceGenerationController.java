@@ -10,6 +10,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -140,5 +141,36 @@ public class InvoiceGenerationController {
         String notes = request != null ? request.resolutionNotes() : null;
         return ResponseEntity.ok(invoiceGenerationDraftDlqRetryService.retryOne(
                 invoiceGenerationRunId, dlqId, triggeredBy, notes));
+    }
+
+    /**
+     * POST /api/billing/invoice-generation/runs/{id}/invoices/void
+     * <p>Batch void: sets {@code transactions.lu_invoice_status} to {@code VOID} for the listed rows.</p>
+     */
+    @PostMapping("/runs/{invoiceGenerationRunId}/invoices/void")
+    public ResponseEntity<InvoiceGenerationInvoiceBatchResponse> voidInvoices(
+            @PathVariable UUID invoiceGenerationRunId,
+            @RequestBody(required = false) InvoiceGenerationVoidInvoicesRequest request,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        if (request == null) {
+            request = new InvoiceGenerationVoidInvoicesRequest(List.of(), List.of(), null, null);
+        }
+        return ResponseEntity.ok(
+                invoiceGenerationService.voidInvoicesInGenerationRun(invoiceGenerationRunId, request, idempotencyKey));
+    }
+
+    /**
+     * POST /api/billing/invoice-generation/runs/{id}/invoices/revert-pending
+     * <p>Reverts voided rows to {@code PENDING} (canonical awaiting downstream handoff / lock).</p>
+     */
+    @PostMapping("/runs/{invoiceGenerationRunId}/invoices/revert-pending")
+    public ResponseEntity<InvoiceGenerationInvoiceBatchResponse> revertInvoicesToPending(
+            @PathVariable UUID invoiceGenerationRunId,
+            @RequestBody(required = false) InvoiceGenerationRevertInvoicesRequest request) {
+        if (request == null) {
+            request = new InvoiceGenerationRevertInvoicesRequest(List.of(), List.of(), null);
+        }
+        return ResponseEntity.ok(
+                invoiceGenerationService.revertInvoicesInGenerationRun(invoiceGenerationRunId, request));
     }
 }

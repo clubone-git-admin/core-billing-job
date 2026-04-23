@@ -31,6 +31,39 @@ public class SubscriptionBillingHistoryRepository {
     }
 
     /**
+     * Resolves {@code subscription_billing_history_id} → {@code invoice_id} and {@code billing_run_id}.
+     * Unknown ids are omitted from the result (caller treats as 404/unknown).
+     */
+    public List<SbhInvoiceLink> findInvoiceLinksBySbhIds(List<UUID> sbhIds) {
+        if (sbhIds == null || sbhIds.isEmpty()) {
+            return List.of();
+        }
+        StringBuilder in = new StringBuilder();
+        List<Object> params = new ArrayList<>();
+        for (int i = 0; i < sbhIds.size(); i++) {
+            if (i > 0) {
+                in.append(',');
+            }
+            in.append("?::uuid");
+            params.add(sbhIds.get(i).toString());
+        }
+        return jdbc.query(
+                """
+                SELECT h.subscription_billing_history_id, h.invoice_id, h.billing_run_id
+                FROM client_subscription_billing.subscription_billing_history h
+                WHERE h.subscription_billing_history_id IN ("""
+                        + in
+                        + """
+                )
+                """,
+                (rs, rn) -> new SbhInvoiceLink(
+                        (UUID) rs.getObject("subscription_billing_history_id"),
+                        (UUID) rs.getObject("invoice_id"),
+                        (UUID) rs.getObject("billing_run_id")),
+                params.toArray());
+    }
+
+    /**
      * Lists invoice-related rows for a billing run.
      * <ul>
      *   <li>If {@code stageRunId}, {@code billingStatusCode}, or any mock-charge filter is set: only
@@ -453,8 +486,25 @@ public class SubscriptionBillingHistoryRepository {
      * {@code invoice_id} is in {@code invoiceIds} (e.g. from {@code billing_stage_run.summary_json.generated_invoice_ids}
      * for an {@code INVOICE_GENERATION} run). Empty {@code invoiceIds} yields an empty list.
      */
+    /**
+     * Optional filters: {@code invoiceStatusNames} (UPPER match on Lu invoice status name), {@code excludeVoid},
+     * {@code locationId} (client role location for this invoice’s subscription / agreement path).
+     */
     public List<SubscriptionBillingHistoryItemDto> findByBillingRunIdAndInvoiceIds(
             UUID billingRunId, List<UUID> invoiceIds, String search, int limit, int offset) {
+        return findByBillingRunIdAndInvoiceIds(
+                billingRunId, invoiceIds, search, limit, offset, null, null, null);
+    }
+
+    public List<SubscriptionBillingHistoryItemDto> findByBillingRunIdAndInvoiceIds(
+            UUID billingRunId,
+            List<UUID> invoiceIds,
+            String search,
+            int limit,
+            int offset,
+            List<String> invoiceStatusNames,
+            Boolean excludeVoid,
+            UUID locationId) {
         if (invoiceIds == null || invoiceIds.isEmpty()) {
             return List.of();
         }
@@ -613,6 +663,7 @@ public class SubscriptionBillingHistoryRepository {
             )
             """);
         appendInvoiceTableSearchFilter(sql, params, search);
+        appendInvoiceGenerationGridFilters(sql, params, invoiceStatusNames, excludeVoid, locationId, true);
         sql.append(" ORDER BY i.created_on DESC NULLS LAST LIMIT ? OFFSET ?");
         params.add(limit);
         params.add(offset);
@@ -620,6 +671,16 @@ public class SubscriptionBillingHistoryRepository {
     }
 
     public int countByBillingRunIdAndInvoiceIds(UUID billingRunId, List<UUID> invoiceIds, String search) {
+        return countByBillingRunIdAndInvoiceIds(billingRunId, invoiceIds, search, null, null, null);
+    }
+
+    public int countByBillingRunIdAndInvoiceIds(
+            UUID billingRunId,
+            List<UUID> invoiceIds,
+            String search,
+            List<String> invoiceStatusNames,
+            Boolean excludeVoid,
+            UUID locationId) {
         if (invoiceIds == null || invoiceIds.isEmpty()) {
             return 0;
         }
@@ -634,17 +695,19 @@ public class SubscriptionBillingHistoryRepository {
             params.add(invoiceIds.get(i).toString());
         }
         if (search == null || search.isBlank()) {
-            String sql = """
+            StringBuilder sql = new StringBuilder(
+                    """
                     SELECT COUNT(1)
                     FROM transactions.invoice i
                     WHERE i.billing_run_id = ?::uuid
                       AND COALESCE(i.is_active, true) = true
                       AND i.invoice_id IN ("""
-                    + inPlaceholders
-                    + """
+                            + inPlaceholders
+                            + """
                     )
-                    """;
-            Integer n = jdbc.queryForObject(sql, params.toArray(), Integer.class);
+                    """);
+            appendInvoiceGenerationGridFilters(sql, params, invoiceStatusNames, excludeVoid, locationId, false);
+            Integer n = jdbc.queryForObject(sql.toString(), params.toArray(), Integer.class);
             return n != null ? n : 0;
         }
         StringBuilder sql = new StringBuilder(
@@ -699,8 +762,87 @@ public class SubscriptionBillingHistoryRepository {
                 )
                 """);
         appendInvoiceTableSearchFilter(sql, params, search);
+        appendInvoiceGenerationGridFilters(sql, params, invoiceStatusNames, excludeVoid, locationId, false);
         Integer n = jdbc.queryForObject(sql.toString(), params.toArray(), Integer.class);
         return n != null ? n : 0;
+    }
+
+    /**
+     * @param hasInvsAndLocJoins when {@code true}, {@code invs} / {@code loc} are already in the query (IG grid list);
+     *        when {@code false}, use scalar subselects / EXISTS so counts stay correct without extra joins.
+     */
+    private static void appendInvoiceGenerationGridFilters(
+            StringBuilder sql,
+            List<Object> params,
+            List<String> invoiceStatusNames,
+            Boolean excludeVoid,
+            UUID locationId,
+            boolean hasInvsAndLocJoins) {
+        if (hasInvsAndLocJoins) {
+            if (Boolean.TRUE.equals(excludeVoid)) {
+                sql.append(" AND UPPER(TRIM(COALESCE(invs.status_name, ''))) <> 'VOID' ");
+            }
+            if (invoiceStatusNames != null && !invoiceStatusNames.isEmpty()) {
+                sql.append(" AND UPPER(TRIM(COALESCE(invs.status_name, ''))) IN (");
+                for (int i = 0; i < invoiceStatusNames.size(); i++) {
+                    if (i > 0) {
+                        sql.append(',');
+                    }
+                    sql.append('?');
+                    params.add(invoiceStatusNames.get(i).trim().toUpperCase());
+                }
+                sql.append(") ");
+            }
+            if (locationId != null) {
+                sql.append(" AND loc.location_id = ?::uuid ");
+                params.add(locationId.toString());
+            }
+        } else {
+            if (Boolean.TRUE.equals(excludeVoid)) {
+                sql.append(
+                        """
+                         AND UPPER(TRIM(COALESCE((
+                            SELECT lis0.status_name
+                            FROM transactions.lu_invoice_status lis0
+                            WHERE lis0.invoice_status_id = i.invoice_status_id
+                         ), ''))) <> 'VOID'
+                        """);
+            }
+            if (invoiceStatusNames != null && !invoiceStatusNames.isEmpty()) {
+                sql.append(" AND UPPER(TRIM(COALESCE((SELECT lis1.status_name FROM transactions.lu_invoice_status lis1")
+                        .append(" WHERE lis1.invoice_status_id = i.invoice_status_id), ''))) IN (");
+                for (int i = 0; i < invoiceStatusNames.size(); i++) {
+                    if (i > 0) {
+                        sql.append(',');
+                    }
+                    sql.append('?');
+                    params.add(invoiceStatusNames.get(i).trim().toUpperCase());
+                }
+                sql.append(") ");
+            }
+            if (locationId != null) {
+                sql.append(
+                        """
+                         AND EXISTS (
+                            SELECT 1
+                            FROM transactions.invoice_entity iex
+                            JOIN client_subscription_billing.subscription_instance six
+                                ON six.subscription_instance_id = iex.subscription_instance_id
+                            JOIN client_subscription_billing.subscription_plan spx
+                                ON spx.subscription_plan_id = six.subscription_plan_id AND COALESCE(spx.is_active, true) = true
+                            JOIN client_agreements.client_agreement cax
+                                ON cax.client_agreement_id = COALESCE(spx.client_agreement_id, i.client_agreement_id)
+                                AND COALESCE(cax.is_active, true) = true
+                            JOIN clients.client_role crx ON crx.client_role_id = COALESCE(cax.client_role_id, i.client_role_id)
+                            WHERE iex.invoice_id = i.invoice_id
+                              AND iex.subscription_instance_id IS NOT NULL
+                              AND COALESCE(iex.is_active, true) = true
+                              AND crx.location_id = ?::uuid
+                         )
+                        """);
+                params.add(locationId.toString());
+            }
+        }
     }
 
     private int countByBillingRunIdFromHistory(
