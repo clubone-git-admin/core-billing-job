@@ -1,6 +1,7 @@
 package io.clubone.billing.api.dto.billingprofile;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
@@ -20,6 +21,7 @@ public record BillingProfileLevelOverrideDto(
         UUID billingAlignmentId,
         UUID prorationStrategyId,
         Integer accountCycleDay,
+        @JsonProperty("billing_charge_day_of_month") Integer billingChargeDayOfMonth,
         LocalDate effectiveFrom,
         LocalDate effectiveTo,
         Boolean isActive,

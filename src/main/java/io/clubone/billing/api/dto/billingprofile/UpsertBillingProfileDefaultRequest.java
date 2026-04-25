@@ -3,6 +3,7 @@ package io.clubone.billing.api.dto.billingprofile;
 import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.UUID;
 
@@ -24,6 +25,9 @@ public record UpsertBillingProfileDefaultRequest(
         UUID defaultBillingAlignmentId,
         UUID defaultProrationStrategyId,
         Integer defaultAccountCycleDay,
+        @JsonProperty("billing_charge_day_of_month")
+        @JsonAlias("default_billing_charge_day_of_month")
+        Integer billingChargeDayOfMonth,
         Boolean isActive
 ) {
 }

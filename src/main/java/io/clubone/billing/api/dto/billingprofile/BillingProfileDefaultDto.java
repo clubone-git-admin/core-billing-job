@@ -1,6 +1,7 @@
 package io.clubone.billing.api.dto.billingprofile;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -18,6 +19,12 @@ public record BillingProfileDefaultDto(
         UUID defaultBillingAlignmentId,
         UUID defaultProrationStrategyId,
         Integer defaultAccountCycleDay,
+        /**
+         * Day of month (1–31) for fixed calendar billing; persisted as {@code default_billing_charge_day_of_month}.
+         * Null when not applicable.
+         */
+        @JsonProperty("billing_charge_day_of_month")
+        Integer billingChargeDayOfMonth,
         Boolean isActive,
         OffsetDateTime createdOn,
         UUID createdBy,
@@ -36,6 +43,7 @@ public record BillingProfileDefaultDto(
                 null,
                 null,
                 1,
+                null,
                 null,
                 null,
                 null,

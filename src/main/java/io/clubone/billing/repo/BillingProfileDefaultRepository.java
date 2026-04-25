@@ -37,6 +37,7 @@ public class BillingProfileDefaultRepository {
                 rs.getObject("default_billing_alignment_id", UUID.class),
                 rs.getObject("default_proration_strategy_id", UUID.class),
                 rs.getObject("default_account_cycle_day", Integer.class),
+                rs.getObject("default_billing_charge_day_of_month", Integer.class),
                 rs.getObject("is_active") != null && rs.getBoolean("is_active"),
                 rs.getObject("created_on", OffsetDateTime.class),
                 rs.getObject("created_by", UUID.class),
@@ -58,6 +59,7 @@ public class BillingProfileDefaultRepository {
                            default_billing_alignment_id,
                            default_proration_strategy_id,
                            default_account_cycle_day,
+                           default_billing_charge_day_of_month,
                            is_active,
                            created_on,
                            created_by,
@@ -90,10 +92,11 @@ public class BillingProfileDefaultRepository {
                     default_billing_alignment_id,
                     default_proration_strategy_id,
                     default_account_cycle_day,
+                    default_billing_charge_day_of_month,
                     is_active,
                     created_on,
                     created_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?)
                 """,
                 id,
                 applicationId,
@@ -106,6 +109,7 @@ public class BillingProfileDefaultRepository {
                 req.defaultBillingAlignmentId(),
                 req.defaultProrationStrategyId(),
                 req.defaultAccountCycleDay(),
+                req.billingChargeDayOfMonth(),
                 active,
                 actorId);
         return findByApplicationId(applicationId);
@@ -128,6 +132,7 @@ public class BillingProfileDefaultRepository {
                     default_billing_alignment_id = ?,
                     default_proration_strategy_id = ?,
                     default_account_cycle_day = ?,
+                    default_billing_charge_day_of_month = ?,
                     is_active = ?,
                     modified_on = now(),
                     modified_by = ?
@@ -143,6 +148,7 @@ public class BillingProfileDefaultRepository {
                 req.defaultBillingAlignmentId(),
                 req.defaultProrationStrategyId(),
                 req.defaultAccountCycleDay(),
+                req.billingChargeDayOfMonth(),
                 active,
                 actorId,
                 billingProfileDefaultId,

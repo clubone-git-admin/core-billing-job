@@ -63,6 +63,7 @@ public class BillingProfileSettingsService {
         }
         validateInterval(req.defaultIntervalCount());
         validateCycleDay(req.defaultAccountCycleDay());
+        validateBillingChargeDayOfMonth(req.billingChargeDayOfMonth());
         BillingProfileDefaultDto existing = billingProfileDefaultRepository.findByApplicationId(applicationId);
         if (existing == null) {
             return billingProfileDefaultRepository.insert(applicationId, req, actorId);
@@ -107,6 +108,7 @@ public class BillingProfileSettingsService {
         }
         validateInterval(req.intervalCount());
         validateCycleDay(req.accountCycleDay());
+        validateBillingChargeDayOfMonth(req.billingChargeDayOfMonth());
         validateEffectiveDates(req.effectiveFrom(), req.effectiveTo());
         return billingProfileLevelOverrideRepository.insert(applicationId, req, actorId);
     }
@@ -131,6 +133,7 @@ public class BillingProfileSettingsService {
         }
         validateInterval(req.intervalCount());
         validateCycleDay(req.accountCycleDay());
+        validateBillingChargeDayOfMonth(req.billingChargeDayOfMonth());
         validateEffectiveDates(req.effectiveFrom(), req.effectiveTo());
         return billingProfileLevelOverrideRepository.update(billingProfileLevelOverrideId, applicationId, req, actorId);
     }
@@ -150,6 +153,13 @@ public class BillingProfileSettingsService {
     private static void validateCycleDay(Integer day) {
         if (day != null && (day < 1 || day > 31)) {
             throw new IllegalArgumentException("account cycle day must be between 1 and 31 when provided");
+        }
+    }
+
+    /** {@code default_billing_charge_day_of_month} / {@code billing_charge_day_of_month} (1–31); null when not used. */
+    private static void validateBillingChargeDayOfMonth(Integer day) {
+        if (day != null && (day < 1 || day > 31)) {
+            throw new IllegalArgumentException("billing_charge_day_of_month must be between 1 and 31 when provided");
         }
     }
 
