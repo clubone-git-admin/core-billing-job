@@ -29,11 +29,14 @@ public class DuePreviewRepository {
      * Pricing is read directly from schedule columns; adjustments are applied from
      * {@code subscription_billing_schedule_adjustment} (active rows only).
      *
-     * @param dueDate    The due date to filter by
-     * @param locationId Optional location ID filter
+     * @param dueDate     The due date to filter by
+     * @param locationIds If null or empty, no location filter. Otherwise only rows where
+     *                    {@code client_agreement.purchased_level_id} is set and
+     *                    {@code locations.levels.reference_entity_id} for that level is one of the
+     *                    allowed physical sites (e.g. {@code billing_run_location}).
      * @return List of schedule-backed preview rows with calculated amounts
      */
-    public List<Map<String, Object>> getDueInvoicesForPreview(LocalDate dueDate, UUID locationId) {
+    public List<Map<String, Object>> getDueInvoicesForPreview(LocalDate dueDate, List<UUID> locationIds) {
             StringBuilder sql = new StringBuilder("""
             SELECT
         sbs.billing_schedule_id,
@@ -71,7 +74,7 @@ public class DuePreviewRepository {
         cr.role_id AS role_id,
         lcas.name AS client_agreement_status,
         a.agreement_name,
-        loc.name AS location_name,
+        COALESCE(loc_purchased.name, loc.name) AS location_name,
         pt.method_type_name AS payment_method_name,
         pt.method_type_name AS payment_type_name,
         cpm.card_last4,
@@ -106,6 +109,10 @@ public class DuePreviewRepository {
         ON lcas.client_agreement_status_id = ca.client_agreement_status_id
     LEFT JOIN agreements.agreement a ON a.agreement_id = ca.agreement_id
     LEFT JOIN clients.client_role cr ON cr.client_role_id = ca.client_role_id
+    LEFT JOIN locations.levels pl_purchased ON pl_purchased.level_id = ca.purchased_level_id
+    LEFT JOIN locations.location loc_purchased
+        ON loc_purchased.location_id = pl_purchased.reference_entity_id
+        AND loc_purchased.application_id = pl_purchased.application_id
     LEFT JOIN locations.location loc ON loc.location_id = cr.location_id
     LEFT JOIN client_payments.client_payment_method cpm ON cpm.client_payment_method_id = sp.client_payment_method_id
     LEFT JOIN payment_gateway.payment_gateway_supported_method pgsm
@@ -140,21 +147,19 @@ public class DuePreviewRepository {
         List<Object> params = new ArrayList<>();
         params.add(dueDate);
 
-        if (locationId != null) {
-            sql.append(" AND EXISTS (")
-                    .append("  SELECT 1 FROM locations.location locf")
-                    .append("  WHERE locf.location_id = ?::uuid")
-                    .append("    AND (")
-                    .append("      locf.location_id = cr.location_id")
-                    .append("      OR EXISTS (")
-                    .append("        SELECT 1 FROM client_agreements.client_agreement ca2")
-                    .append("        JOIN clients.client_role cr2 ON cr2.client_role_id = ca2.client_role_id")
-                    .append("        WHERE ca2.client_agreement_id = sp.client_agreement_id")
-                    .append("          AND cr2.location_id = locf.location_id")
-                    .append("      )")
-                    .append("    )")
-                    .append(")");
-            params.add(locationId);
+        if (locationIds != null && !locationIds.isEmpty()) {
+            int n = locationIds.size();
+            String placeholders = String.join(",", Collections.nCopies(n, "?::uuid"));
+            sql.append(" AND ca.purchased_level_id IS NOT NULL ")
+                    .append("AND EXISTS (")
+                    .append("SELECT 1 FROM locations.levels pl_scope ")
+                    .append("WHERE pl_scope.level_id = ca.purchased_level_id ")
+                    .append("  AND pl_scope.reference_entity_id IN (")
+                    .append(placeholders)
+                    .append("))");
+            for (UUID id : locationIds) {
+                params.add(id != null ? id.toString() : null);
+            }
         }
 
         sql.append(" ORDER BY sbs.billing_date ASC, sbs.subscription_instance_id ASC, sbs.cycle_number ASC");

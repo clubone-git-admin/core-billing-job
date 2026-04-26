@@ -11,32 +11,23 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Request DTO for creating a billing run.
- * Use {@code inclusion_scopes} for multiple hierarchy roots, or the legacy
- * {@code locationLevelId} + {@code includeChildLocations} pair.
+ * Pre-create scope: included / excluded for a given due date.
+ * Use {@code inclusion_scopes} for multiple roots, or the legacy single {@code locationLevelId} pair.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
-public record CreateBillingRunRequest(
+public record ScopePreviewRequest(
     @NotNull LocalDate dueDate,
-    @JsonAlias("location_id")
-    UUID locationId,
-    UUID locationLevelId,
-    @JsonAlias("include_child_locations")
-    Boolean includeChildLocations,
-    @JsonAlias("excluded_location_ids")
-    List<UUID> excludedLocationIds,
-    @JsonAlias("application_id")
-    UUID applicationId,
-    @JsonAlias("created_by")
-    UUID createdBy,
-    @JsonAlias("idempotency_key")
-    String idempotencyKey,
     @Valid
     @JsonProperty("inclusionScopes")
     @JsonAlias("inclusion_scopes")
-    List<@Valid InclusionScopeDto> inclusionScopes
+    List<@Valid InclusionScopeDto> inclusionScopes,
+    UUID locationLevelId,
+    @JsonAlias("include_child_locations")
+    Boolean includeChildLocations,
+    /** When {@code inclusionScopes} is not used, required if {@code locationLevelId} is null. */
+    UUID applicationId
 ) {
-    public boolean isUseInclusionScopes() {
+    public boolean isUseInclusion() {
         return inclusionScopes != null && !inclusionScopes.isEmpty();
     }
 

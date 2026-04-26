@@ -2,7 +2,6 @@ package io.clubone.billing.service;
 
 import io.clubone.billing.repo.SchedulingRepository;
 import io.clubone.billing.api.dto.CreateBillingRunRequest;
-import io.clubone.billing.service.BillingRunService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -88,8 +87,12 @@ public class SchedulingService {
         CreateBillingRunRequest createRequest = new CreateBillingRunRequest(
                 dueDate,
                 schedule.get("location_id") != null ? UUID.fromString(schedule.get("location_id").toString()) : null,
-               // LocalDate.now(),
+                null,
+                null,
+                null,
+                null,
                 request.get("triggered_by") != null ? UUID.fromString(request.get("triggered_by").toString()) : null,
+                null,
                 null
         );
 

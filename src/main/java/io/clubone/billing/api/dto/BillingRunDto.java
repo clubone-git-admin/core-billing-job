@@ -1,5 +1,6 @@
 package io.clubone.billing.api.dto;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
@@ -14,6 +15,8 @@ import java.util.UUID;
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record BillingRunDto(
+    @JsonProperty("billingRunId")
+    @JsonAlias("billing_run_id")
     UUID billingRunId,
     String billingRunCode,
     LocalDate dueDate,
@@ -33,6 +36,14 @@ public record BillingRunDto(
     UUID approvedBy,
     OffsetDateTime approvedOn,
     String approvalNotes,
+    @JsonProperty("locationLevelId")
+    @JsonAlias("location_level_id")
+    UUID locationLevelId,
+    @JsonProperty("includeChildLocations")
+    @JsonAlias("include_child_locations")
+    Boolean includeChildLocations,
+    @JsonProperty("scopeSummary")
+    BillingScopeSummaryDto scopeSummary,
     @JsonProperty("stage_history")
     List<StageRunDto> stageHistory,
     List<ApprovalDto> approvals

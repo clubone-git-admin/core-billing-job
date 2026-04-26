@@ -130,14 +130,15 @@ public class InvoiceGenerationJobRunner {
                     merged.put("job_level_error", ex.getMessage());
                     jobLevelIssue = true;
                 } else {
-                    UUID locationId = billingRun.locationId();
+                    List<UUID> locationFilter = billingRunRepository.resolveLocationFilterForDuePreviewOrInvoice(
+                            billingRunId, billingRun.locationId());
                     try {
-                        candidates = duePreviewRepository.getDueInvoicesForPreview(dueDate, locationId);
+                        candidates = duePreviewRepository.getDueInvoicesForPreview(dueDate, locationFilter);
                         log.info(
-                                "Invoice generation: due subscription rows for billingRunId={} dueDate={} locationId={} count={}",
+                                "Invoice generation: due subscription rows for billingRunId={} dueDate={} locationFilterSize={} count={}",
                                 billingRunId,
                                 dueDate,
-                                locationId,
+                                locationFilter != null ? locationFilter.size() : 0,
                                 candidates.size());
                     } catch (Exception ex) {
                         log.error("Invoice generation: due-preview query failed billingRunId={}", billingRunId, ex);

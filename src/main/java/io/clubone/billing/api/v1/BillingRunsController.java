@@ -2,6 +2,7 @@ package io.clubone.billing.api.v1;
 
 import io.clubone.billing.api.dto.*;
 import io.clubone.billing.service.BillingRunService;
+import java.util.Map;
 import io.clubone.billing.service.DLQService;
 import io.clubone.billing.service.InvoiceGenerationService;
 import io.clubone.billing.service.MockChargeService;
@@ -234,7 +235,7 @@ public class BillingRunsController {
             @ApiResponse(responseCode = "409", description = "Billing run already exists with this idempotency key")
     })
     @PostMapping
-    public ResponseEntity<BillingRunDto> createBillingRun(
+    public ResponseEntity<?> createBillingRun(
             @Parameter(description = "Billing run creation request", required = true)
             @Valid @RequestBody CreateBillingRunRequest request) {
         
@@ -246,11 +247,33 @@ public class BillingRunsController {
             return ResponseEntity.status(HttpStatus.CREATED).body(billingRun);
         } catch (IllegalStateException e) {
             // Duplicate idempotency key
-            if (e.getMessage().contains("already exists")) {
-                return ResponseEntity.status(HttpStatus.CONFLICT)
-                        .body(billingRunService.getBillingRunByKey(request.idempotencyKey()));
+            if (e.getMessage() != null && e.getMessage().contains("already exists")
+                    && request.idempotencyKey() != null) {
+                BillingRunDto existing = billingRunService.getBillingRunByKey(request.idempotencyKey());
+                if (existing != null) {
+                    return ResponseEntity.status(HttpStatus.CONFLICT)
+                            .body(
+                                    new BillingRunConflictResponse(
+                                            "Run already exists for selected due date and scope.",
+                                            existing.billingRunId()));
+                }
             }
             throw e;
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    /**
+     * Pre-create scope: included and excluded child locations (run conflicts for same due date).
+     * Permissions: {@code billing.run.create.by_location_level} (enforced in auth layer when configured).
+     */
+    @PostMapping("/scope-preview")
+    public ResponseEntity<?> scopePreview(@Valid @RequestBody ScopePreviewRequest request) {
+        try {
+            return ResponseEntity.ok(billingRunService.scopePreview(request));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         }
     }
 

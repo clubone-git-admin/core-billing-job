@@ -2,6 +2,7 @@ package io.clubone.billing.service;
 
 import io.clubone.billing.api.dto.*;
 import io.clubone.billing.repo.BillingRunRepository;
+import io.clubone.billing.repo.LocationLevelRepository.LocationRow;
 import io.clubone.billing.repo.StageRunRepository;
 import io.clubone.billing.repo.ApprovalRepository;
 import org.slf4j.Logger;
@@ -24,16 +25,19 @@ public class BillingRunService {
     private final StageRunRepository stageRunRepository;
     private final ApprovalRepository approvalRepository;
     private final DuePreviewService duePreviewService;
+    private final BillingRunScopeService billingRunScopeService;
 
     public BillingRunService(
             BillingRunRepository billingRunRepository,
             StageRunRepository stageRunRepository,
             ApprovalRepository approvalRepository,
-            DuePreviewService duePreviewService) {
+            DuePreviewService duePreviewService,
+            BillingRunScopeService billingRunScopeService) {
         this.billingRunRepository = billingRunRepository;
         this.stageRunRepository = stageRunRepository;
         this.approvalRepository = approvalRepository;
         this.duePreviewService = duePreviewService;
+        this.billingRunScopeService = billingRunScopeService;
     }
 
     public PageResponse<BillingRunDto> listBillingRuns(
@@ -69,13 +73,16 @@ public class BillingRunService {
                 billingRun.startedOn(), billingRun.endedOn(), billingRun.summaryJson(),
                 billingRun.createdBy(), billingRun.createdOn(), billingRun.modifiedOn(),
                 billingRun.sourceRunId(), billingRun.sourceRunCode(), billingRun.approvedBy(),
-                billingRun.approvedOn(), billingRun.approvalNotes(), stageHistory, approvals
+                billingRun.approvedOn(), billingRun.approvalNotes(),
+                billingRun.locationLevelId(), billingRun.includeChildLocations(),
+                billingRun.scopeSummary(),
+                stageHistory, approvals
         );
     }
 
     @Transactional
     public BillingRunDto createBillingRun(CreateBillingRunRequest request) {
-        // Check for duplicate idempotency key
+        validateCreateBillingRunRequest(request);
         if (request.idempotencyKey() != null) {
             BillingRunDto existing = billingRunRepository.findByIdempotencyKey(request.idempotencyKey());
             if (existing != null) {
@@ -83,12 +90,69 @@ public class BillingRunService {
             }
         }
 
-        UUID billingRunId = billingRunRepository.createBillingRun(
-                request.dueDate(), request.locationId(),
-                request.createdBy(), request.idempotencyKey());
+        BillingRunScopeService.ScopeResolutionResult scope =
+                billingRunScopeService.resolveForCreate(request);
+        if (scope.included().isEmpty()) {
+            throw new IllegalArgumentException(
+                    "No locations left in scope after exclusions and in-flight run checks");
+        }
+        List<UUID> includeIds =
+                scope.included().stream().map(LocationRow::locationId).toList();
+
+        UUID primary =
+                request.locationId() != null
+                        ? request.locationId()
+                        : scope.included().get(0).locationId();
+
+        UUID levelId;
+        Boolean includeChild;
+        if (request.isUseInclusionScopes()) {
+            levelId = null;
+            includeChild = false;
+        } else {
+            levelId = request.locationLevelId();
+            includeChild = request.includeChildLocations();
+        }
+
+        UUID billingRunId =
+                billingRunRepository.createBillingRun(
+                        request.dueDate(),
+                        primary,
+                        levelId,
+                        includeChild,
+                        request.createdBy(),
+                        request.idempotencyKey(),
+                        includeIds,
+                        scope.scopeSummary());
 
         return getBillingRun(billingRunId);
     }
+
+    public ScopePreviewResponse scopePreview(ScopePreviewRequest request) {
+        validateScopePreviewRequest(request);
+        return billingRunScopeService.scopePreview(request);
+    }
+
+    private static void validateScopePreviewRequest(ScopePreviewRequest request) {
+        if (request.inclusionScopes() != null) {
+            if (request.inclusionScopes().isEmpty()) {
+                throw new IllegalArgumentException("inclusionScopes must not be empty when provided");
+            }
+            return;
+        }
+        if (request.locationLevelId() == null && request.applicationId() == null) {
+            throw new IllegalArgumentException("Either inclusionScopes, locationLevelId, or applicationId is required");
+        }
+    }
+
+    private static void validateCreateBillingRunRequest(CreateBillingRunRequest request) {
+        if (request.inclusionScopes() != null) {
+            if (request.inclusionScopes().isEmpty()) {
+                throw new IllegalArgumentException("inclusionScopes must not be empty when provided");
+            }
+        }
+    }
+
 
     @Transactional
     public BillingRunDto updateBillingRun(UUID billingRunId, UpdateBillingRunRequest request) {

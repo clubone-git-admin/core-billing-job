@@ -62,6 +62,15 @@ public class DuePreviewService {
     }
 
     /**
+     * Null = no location filter. If {@code billing_run_location} has rows, only those ids are used
+     * (not {@code br.location_id} or request body). Otherwise legacy scope, then request id.
+     */
+    private List<UUID> resolveLocationFilterForDuePreview(UUID billingRunId, UUID requestLocationId) {
+        return billingRunRepository.resolveLocationFilterForDuePreviewOrInvoice(
+                billingRunId, requestLocationId);
+    }
+
+    /**
      * List due preview run history with pagination.
      *
      * @param billingRunId if non-null, restrict to due preview stage runs for this parent billing run
@@ -639,7 +648,7 @@ public class DuePreviewService {
      */
     @Transactional
     public Map<String, Object> generateDuePreview(DuePreviewRequest request) {
-        log.info("Generating due preview: billRunId={}, dueDate={}, locationId={}, createdBy={}",
+        log.info("Generating due preview: billRunId={}, dueDate={}, requestLocationId={}, createdBy={}",
                 request.billRunId(), request.dueDate(), request.locationId(), request.createdBy());
 
         UUID billingRunId = request.billRunId();
@@ -665,9 +674,15 @@ public class DuePreviewService {
         stageRunRepository.startStageRun(stageRunId);
         log.info("Created and started DUE_PREVIEW stage run: stageRunId={}", stageRunId);
 
-        // Get due invoices
+        // Match subscriptions on any location in the run's persisted scope (junction + primary), not only request.locationId
+        List<UUID> locationFilter = resolveLocationFilterForDuePreview(billingRunId, request.locationId());
+        if (locationFilter == null) {
+            log.info("Due preview: no location filter (global / no anchor)");
+        } else {
+            log.info("Due preview: location filter size={} (from billing run scope or request)", locationFilter.size());
+        }
         List<Map<String, Object>> dueInvoices = duePreviewRepository.getDueInvoicesForPreview(
-                request.dueDate(), request.locationId());
+                request.dueDate(), locationFilter);
 
         log.info("Found {} due subscription instances for preview", dueInvoices.size());
 
