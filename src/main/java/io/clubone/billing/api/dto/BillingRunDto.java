@@ -46,7 +46,14 @@ public record BillingRunDto(
     BillingScopeSummaryDto scopeSummary,
     @JsonProperty("stage_history")
     List<StageRunDto> stageHistory,
-    List<ApprovalDto> approvals
+    List<ApprovalDto> approvals,
+    @JsonProperty("inclusionLocationNames")
+    @JsonAlias("inclusion_location_names")
+    List<String> inclusionLocationNames,
+    @JsonProperty("exclusionLocationNames")
+    @JsonAlias("exclusion_location_names")
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    List<String> exclusionLocationNames
 ) {
     @JsonProperty("status")
     public String status() {

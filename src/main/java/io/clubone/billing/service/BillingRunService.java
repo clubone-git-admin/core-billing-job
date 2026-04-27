@@ -76,7 +76,9 @@ public class BillingRunService {
                 billingRun.approvedOn(), billingRun.approvalNotes(),
                 billingRun.locationLevelId(), billingRun.includeChildLocations(),
                 billingRun.scopeSummary(),
-                stageHistory, approvals
+                stageHistory, approvals,
+                billingRun.inclusionLocationNames(),
+                billingRun.exclusionLocationNames()
         );
     }
 

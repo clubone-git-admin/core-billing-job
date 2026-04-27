@@ -92,7 +92,139 @@ public class BillingRunRepository {
         params.add(limit);
         params.add(offset);
 
-        return jdbc.query(sql.toString(), params.toArray(), (rs, rowNum) -> mapBillingRunRow(rs, true));
+        List<BillingRunDto> list =
+                jdbc.query(sql.toString(), params.toArray(), (rs, rowNum) -> mapBillingRunRow(rs, true));
+        if (list.isEmpty()) {
+            return list;
+        }
+        Map<UUID, List<String>> byRun = findInclusionLocationNamesByRunIds(
+                list.stream().map(BillingRunDto::billingRunId).toList());
+        return list.stream()
+                .map(d -> withInclusionLocationNames(
+                        d, byRun.getOrDefault(d.billingRunId(), List.of())))
+                .toList();
+    }
+
+    /**
+     * Display names of locations in {@code billing_run_location} (ordered by name). When there are
+     * no junction rows for a run but the run has a primary {@code location_id}, that location's
+     * name is used (aligns with due-preview/invoice location resolution).
+     */
+    public Map<UUID, List<String>> findInclusionLocationNamesByRunIds(List<UUID> runIds) {
+        if (runIds == null || runIds.isEmpty()) {
+            return Map.of();
+        }
+        List<UUID> unique = new ArrayList<>(new LinkedHashSet<>(runIds));
+        Map<UUID, List<String>> byRun = new LinkedHashMap<>();
+        for (UUID id : unique) {
+            byRun.put(id, new ArrayList<>());
+        }
+        String placeholders = String.join(",", Collections.nCopies(unique.size(), "?::uuid"));
+        List<Object> params = new ArrayList<>();
+        for (UUID u : unique) {
+            params.add(u.toString());
+        }
+
+        String sqlJunction =
+                """
+                SELECT j.billing_run_id, COALESCE(l.display_name, l.name) AS loc_name
+                FROM client_subscription_billing.billing_run_location j
+                JOIN locations.location l ON l.location_id = j.location_id
+                WHERE j.billing_run_id IN ("""
+                        + placeholders
+                        + """
+                )
+                ORDER BY j.billing_run_id, loc_name
+                """;
+        jdbc.query(
+                sqlJunction,
+                params.toArray(),
+                rs -> {
+                    UUID rid = (UUID) rs.getObject("billing_run_id");
+                    String nm = rs.getString("loc_name");
+                    if (rid != null && nm != null && !nm.isBlank()) {
+                        byRun.get(rid).add(nm);
+                    }
+                });
+
+        String sqlPrimary =
+                """
+                SELECT br.billing_run_id, COALESCE(l.display_name, l.name) AS loc_name
+                FROM client_subscription_billing.billing_run br
+                JOIN locations.location l ON l.location_id = br.location_id
+                WHERE br.billing_run_id IN ("""
+                        + placeholders
+                        + """
+                )
+                  AND br.location_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM client_subscription_billing.billing_run_location j
+                      WHERE j.billing_run_id = br.billing_run_id
+                  )
+                """;
+        jdbc.query(
+                sqlPrimary,
+                params.toArray(),
+                rs -> {
+                    UUID rid = (UUID) rs.getObject("billing_run_id");
+                    String nm = rs.getString("loc_name");
+                    if (rid == null || nm == null || nm.isBlank()) {
+                        return;
+                    }
+                    List<String> acc = byRun.get(rid);
+                    if (acc != null && acc.isEmpty()) {
+                        acc.add(nm);
+                    }
+                });
+
+        return byRun;
+    }
+
+    private static BillingRunDto withInclusionLocationNames(BillingRunDto d, List<String> inclusion) {
+        List<String> inc = inclusion == null || inclusion.isEmpty() ? List.of() : List.copyOf(inclusion);
+        return new BillingRunDto(
+                d.billingRunId(), d.billingRunCode(), d.dueDate(), d.locationId(), d.locationName(),
+                d.billingRunStatus(), d.currentStage(), d.approvalStatus(),
+                d.startedOn(), d.endedOn(), d.summaryJson(), d.createdBy(), d.createdOn(), d.modifiedOn(),
+                d.sourceRunId(), d.sourceRunCode(), d.approvedBy(), d.approvedOn(), d.approvalNotes(),
+                d.locationLevelId(), d.includeChildLocations(), d.scopeSummary(),
+                d.stageHistory(), d.approvals(), inc, d.exclusionLocationNames());
+    }
+
+    private static List<String> parseExclusionLocationNamesFromSummary(Map<String, Object> summaryJson) {
+        if (summaryJson == null) {
+            return null;
+        }
+        Object scope = summaryJson.get("scopeSummary");
+        if (scope == null) {
+            scope = summaryJson.get("scope_summary");
+        }
+        if (!(scope instanceof Map<?, ?> sm)) {
+            return null;
+        }
+        Object ex = sm.get("excludedLocations");
+        if (ex == null) {
+            ex = sm.get("excluded_locations");
+        }
+        if (!(ex instanceof List<?> list)) {
+            return null;
+        }
+        List<String> out = new ArrayList<>();
+        for (Object o : list) {
+            if (o instanceof Map<?, ?> m) {
+                Object n = m.get("locationName");
+                if (n == null) {
+                    n = m.get("location_name");
+                }
+                if (n != null) {
+                    String s = String.valueOf(n);
+                    if (!s.isBlank()) {
+                        out.add(s);
+                    }
+                }
+            }
+        }
+        return out.isEmpty() ? null : out;
     }
 
     private BillingRunDto mapBillingRunRow(java.sql.ResultSet rs, boolean forList) throws java.sql.SQLException {
@@ -163,13 +295,15 @@ public class BillingRunRepository {
             String approvalNotes = rs.getString("approval_notes");
 
             BillingScopeSummaryDto scopeFromJson = forList ? null : extractScopeSummary(summaryJson);
+            List<String> exclusionNames = parseExclusionLocationNamesFromSummary(summaryJson);
             return new BillingRunDto(
                     billingRunId, billingRunCode, dueDate, locationIdResult, locationName,
                     billingRunStatus, currentStage, approvalStatus,
                     startedOn, endedOn, summaryJson, createdBy, createdOn, modifiedOn,
                     sourceRunId, sourceRunCode, approvedBy, approvedOn, approvalNotes,
                     locationLevelIdCol, includeChildCol, scopeFromJson,
-                    null, null // stages and approvals loaded separately
+                    null, null, // stages and approvals loaded separately
+                    null, exclusionNames // inclusion filled in findById / findBillingRuns
             );
     }
 
@@ -260,7 +394,13 @@ public class BillingRunRepository {
         List<BillingRunDto> results = jdbc.query(
                 sql, new Object[]{billingRunId.toString()}, (rs, rowNum) -> mapBillingRunRow(rs, false));
 
-        return results.isEmpty() ? null : results.get(0);
+        if (results.isEmpty()) {
+            return null;
+        }
+        BillingRunDto dto = results.get(0);
+        Map<UUID, List<String>> inc =
+                findInclusionLocationNamesByRunIds(List.of(billingRunId));
+        return withInclusionLocationNames(dto, inc.getOrDefault(billingRunId, List.of()));
     }
 
     /**
