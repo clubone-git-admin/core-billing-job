@@ -128,6 +128,22 @@ public class LocationLevelRepository {
         }
     }
 
+    /**
+     * Flat level rows for building a hierarchy tree (same app). Used by billing location filter UI.
+     */
+    public List<Map<String, Object>> listLevelsByApplicationId(UUID applicationId) {
+        if (applicationId == null) {
+            return List.of();
+        }
+        return jdbc.queryForList(
+                """
+                SELECT level_id, parent_level_id, "name"::text AS name
+                FROM locations.levels
+                WHERE application_id = ?::uuid
+                """,
+                applicationId.toString());
+    }
+
     public List<LocationRow> findLocationsByIds(Collection<UUID> locationIds) {
         if (locationIds == null || locationIds.isEmpty()) {
             return List.of();
