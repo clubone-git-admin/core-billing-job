@@ -1225,7 +1225,7 @@ public class BillingReportingService {
 
         List<UUID> locs = locFilterOrEmpty(appId, levelId, includeChildLocations);
         if (locs != null && locs.isEmpty()) {
-            return metricsBody(safeMetric, safeGroupBy, from, to, List.of(), 0);
+            return metricsBody(List.of(), 0);
         }
         List<Map<String, Object>> raw =
                 reportingRepository.metricsSeries(safeMetric, safeGroupBy, from, to, locs);
@@ -1234,29 +1234,18 @@ public class BillingReportingService {
             normalized.add(normalizeMetricsPoint(r, safeMetric));
         }
         if (poff >= normalized.size()) {
-            return metricsBody(safeMetric, safeGroupBy, from, to, List.of(), normalized.size());
+            return metricsBody(List.of(), normalized.size());
         }
         int end = Math.min(normalized.size(), poff + lim);
         List<Map<String, Object>> page = new ArrayList<>(normalized.subList(poff, end));
-        return metricsBody(safeMetric, safeGroupBy, from, to, page, normalized.size());
+        return metricsBody(page, normalized.size());
     }
 
-    private static Map<String, Object> metricsBody(
-            String safeMetric,
-            String safeGroupBy,
-            LocalDate from,
-            LocalDate to,
-            List<Map<String, Object>> page,
-            int fullSize) {
+    private static Map<String, Object> metricsBody(List<Map<String, Object>> page, int fullSize) {
         Map<String, Object> m = new LinkedHashMap<>();
-        m.put("metric", safeMetric);
-        m.put("groupBy", safeGroupBy);
-        m.put("period", Map.of("from", from, "to", to));
         m.put("rows", page);
         m.put("data", page);
         m.put("total", fullSize);
-        m.put("rowCount", fullSize);
-        m.put("count", fullSize);
         return m;
     }
 
@@ -1269,11 +1258,24 @@ public class BillingReportingService {
         if (ps != null) {
             LocalDate d = toSeriesDate(ps);
             if (d != null) {
-                o.put("date", d.toString());
+                String ds = d.toString();
+                o.put("date", ds);
+                o.putIfAbsent("bucket", ds);
+                o.putIfAbsent("day", ds);
             }
         }
         if ("collection_rate".equals(safeMetric) && o.containsKey("value2")) {
             o.putIfAbsent("label", "billed vs collected");
+        }
+        if ("revenue".equals(safeMetric)) {
+            Object v = o.get("value");
+            Object v2 = o.get("value2");
+            if (v != null) {
+                o.putIfAbsent("billed", v);
+            }
+            if (v2 != null) {
+                o.putIfAbsent("collected", v2);
+            }
         }
         return o;
     }

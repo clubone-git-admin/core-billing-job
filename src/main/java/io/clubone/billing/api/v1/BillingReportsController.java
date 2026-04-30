@@ -172,8 +172,8 @@ public class BillingReportsController {
     }
 
     /**
-     * Time-series metrics; aligns with report filters. Default {@code limit} 60 for max points
-     * (per Flutter client); whitelisted {@code metric} and {@code groupBy} in service.
+     * Time-series metrics; aligns with report filters. Default {@code limit} 200 for dashboard
+     * series; whitelisted {@code metric} and {@code groupBy} in service.
      */
     @GetMapping("/metrics/series")
     public ResponseEntity<Map<String, Object>> metricsSeries(
@@ -184,7 +184,7 @@ public class BillingReportsController {
             @RequestParam(required = false) UUID applicationId,
             @RequestParam(required = false) UUID locationLevelId,
             @RequestParam(required = false, defaultValue = "true") boolean includeChildLocations,
-            @RequestParam(required = false, defaultValue = "60") int limit,
+            @RequestParam(required = false, defaultValue = "200") int limit,
             @RequestParam(required = false, defaultValue = "0") int offset) {
         LocalDate from = dueDateFrom != null ? dueDateFrom : defaultDueDateFrom();
         LocalDate to = dueDateTo != null ? dueDateTo : defaultDueDateTo();

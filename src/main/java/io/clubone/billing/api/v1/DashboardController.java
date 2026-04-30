@@ -5,11 +5,11 @@ import io.clubone.billing.service.DashboardService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -59,5 +59,56 @@ public class DashboardController {
         
         Map<String, Object> trends = dashboardService.getTrends(metric, period, groupBy, locationId);
         return ResponseEntity.ok(trends);
+    }
+
+    /**
+     * GET /api/v1/billing/dashboard/overview
+     * Single payload overview for billing dashboard.
+     */
+    @GetMapping("/overview")
+    public ResponseEntity<?> getOverview(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dueDateFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dueDateTo,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate asOfFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate asOfTo,
+            @RequestParam(required = false) String locationId,
+            @RequestParam(required = false, defaultValue = "true") boolean includeChildLocations,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String currentStage,
+            @RequestParam(required = false, defaultValue = "10") int limitRuns,
+            @RequestParam(required = false, defaultValue = "0") int offsetRuns,
+            @RequestParam(required = false, defaultValue = "200") int limitPlans,
+            @RequestParam(required = false, defaultValue = "0") int offsetPlans) {
+        try {
+            return ResponseEntity.ok(
+                    dashboardService.getOverview(
+                            dueDateFrom,
+                            dueDateTo,
+                            asOfFrom,
+                            asOfTo,
+                            locationId,
+                            includeChildLocations,
+                            status,
+                            currentStage,
+                            Math.max(1, limitRuns),
+                            Math.max(0, offsetRuns),
+                            Math.max(1, limitPlans),
+                            Math.max(0, offsetPlans)));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(Map.of(
+                            "message", e.getMessage(),
+                            "code", "BILLING_DASHBOARD_OVERVIEW_FAILED",
+                            "details", Map.of()));
+        } catch (Exception e) {
+            log.error("dashboard overview failed", e);
+            return ResponseEntity.internalServerError()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(Map.of(
+                            "message", "Failed to load billing dashboard overview",
+                            "code", "BILLING_DASHBOARD_OVERVIEW_FAILED",
+                            "details", Map.of()));
+        }
     }
 }

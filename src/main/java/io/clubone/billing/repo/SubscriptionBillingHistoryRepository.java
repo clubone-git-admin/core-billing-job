@@ -345,7 +345,13 @@ public class SubscriptionBillingHistoryRepository {
                 COALESCE(h.invoice_sub_total, i.sub_total) AS invoice_sub_total,
                 COALESCE(h.invoice_tax_amount, i.tax_amount) AS invoice_tax_amount,
                 COALESCE(h.invoice_discount_amount, i.discount_amount) AS invoice_discount_amount,
-                COALESCE(h.invoice_total_amount, i.total_amount) AS invoice_total_amount,
+                CASE
+                    WHEN COALESCE(h.invoice_total_amount, 0) <> 0 THEN h.invoice_total_amount
+                    WHEN COALESCE(i.total_amount, 0) <> 0 THEN i.total_amount
+                    ELSE COALESCE(h.invoice_sub_total, i.sub_total, 0)
+                         + COALESCE(h.invoice_tax_amount, i.tax_amount, 0)
+                         - COALESCE(h.invoice_discount_amount, i.discount_amount, 0)
+                END AS invoice_total_amount,
                 h.mock_charge_status,
                 h.mock_charge_failure_code,
                 h.mock_charge_details,
@@ -531,7 +537,13 @@ public class SubscriptionBillingHistoryRepository {
                 COALESCE(h.invoice_sub_total, i.sub_total) AS invoice_sub_total,
                 COALESCE(h.invoice_tax_amount, i.tax_amount) AS invoice_tax_amount,
                 COALESCE(h.invoice_discount_amount, i.discount_amount) AS invoice_discount_amount,
-                COALESCE(h.invoice_total_amount, i.total_amount) AS invoice_total_amount,
+                CASE
+                    WHEN COALESCE(h.invoice_total_amount, 0) <> 0 THEN h.invoice_total_amount
+                    WHEN COALESCE(i.total_amount, 0) <> 0 THEN i.total_amount
+                    ELSE COALESCE(h.invoice_sub_total, i.sub_total, 0)
+                         + COALESCE(h.invoice_tax_amount, i.tax_amount, 0)
+                         - COALESCE(h.invoice_discount_amount, i.discount_amount, 0)
+                END AS invoice_total_amount,
                 h.mock_charge_status,
                 h.mock_charge_failure_code,
                 h.mock_charge_details,

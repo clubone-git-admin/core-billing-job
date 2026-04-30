@@ -106,6 +106,115 @@ public class BillingRunRepository {
     }
 
     /**
+     * Dashboard overview recent runs: same row shape as {@link #findBillingRuns}, with filters
+     * aligned to {@link DashboardRepository#countOverviewRecentRuns} (multi-location, as-of window,
+     * status/stage prefix match).
+     */
+    public List<BillingRunDto> findBillingRunsForDashboardOverview(
+            LocalDate dueDateFrom,
+            LocalDate dueDateTo,
+            LocalDate asOfFrom,
+            LocalDate asOfTo,
+            List<UUID> locationIds,
+            String status,
+            String currentStage,
+            int limit,
+            int offset) {
+        StringBuilder sql = new StringBuilder("""
+            SELECT br.billing_run_id, br.billing_run_code, br.due_date, br.location_id,
+                   br.location_level_id, br.include_child_locations,
+                   br.started_on, br.ended_on, br.summary_json,
+                   br.created_by, br.created_on, br.modified_on, br.modified_by,
+                   br.source_run_id, br.approved_by, br.approved_on, br.approval_notes,
+                   brs.status_code AS run_status_code, brs.display_name AS run_status_display,
+                   brs.description AS run_status_description,
+                   bsc.stage_code AS stage_code, bsc.display_name AS stage_display_name,
+                   bsc.stage_sequence, bsc.description AS stage_description,
+                   bsc.is_optional AS stage_is_optional,
+                   ap.status_code AS approval_status_code, ap.display_name AS approval_status_display,
+                   COALESCE(lv_scope."name", l.name) AS location_name,
+                   src.billing_run_code AS source_run_code
+            FROM client_subscription_billing.billing_run br
+            LEFT JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
+            LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
+            LEFT JOIN billing_config.approval_status ap ON ap.approval_status_id = br.approval_status_id
+            LEFT JOIN locations.levels lv_scope ON lv_scope.level_id = br.location_level_id
+            LEFT JOIN locations.location l ON l.location_id = br.location_id
+            LEFT JOIN client_subscription_billing.billing_run src ON src.billing_run_id = br.source_run_id
+            WHERE 1=1
+            """);
+        List<Object> params = new ArrayList<>();
+        appendDashboardRunScopeFilters(sql, params, dueDateFrom, dueDateTo, asOfFrom, asOfTo, locationIds, status, currentStage);
+        sql.append(" ORDER BY COALESCE(br.modified_on, br.ended_on, br.created_on) DESC NULLS LAST ");
+        sql.append(" LIMIT ? OFFSET ?");
+        params.add(Math.max(1, limit));
+        params.add(Math.max(0, offset));
+        List<BillingRunDto> list =
+                jdbc.query(sql.toString(), params.toArray(), (rs, rowNum) -> mapBillingRunRow(rs, true));
+        if (list.isEmpty()) {
+            return list;
+        }
+        Map<UUID, List<String>> byRun =
+                findInclusionLocationNamesByRunIds(list.stream().map(BillingRunDto::billingRunId).toList());
+        return list.stream()
+                .map(d -> withInclusionLocationNames(d, byRun.getOrDefault(d.billingRunId(), List.of())))
+                .toList();
+    }
+
+    private static void appendDashboardRunScopeFilters(
+            StringBuilder w,
+            List<Object> params,
+            LocalDate dueDateFrom,
+            LocalDate dueDateTo,
+            LocalDate asOfFrom,
+            LocalDate asOfTo,
+            List<UUID> locationIds,
+            String status,
+            String currentStage) {
+        if (dueDateFrom != null) {
+            w.append(" AND br.due_date >= ?::date ");
+            params.add(dueDateFrom);
+        }
+        if (dueDateTo != null) {
+            w.append(" AND br.due_date <= ?::date ");
+            params.add(dueDateTo);
+        }
+        if (asOfFrom != null) {
+            w.append(" AND DATE(br.created_on) >= ?::date ");
+            params.add(asOfFrom);
+        }
+        if (asOfTo != null) {
+            w.append(" AND DATE(br.created_on) <= ?::date ");
+            params.add(asOfTo);
+        }
+        if (status != null && !status.isBlank()) {
+            w.append(" AND COALESCE(brs.status_code,'') ILIKE ? ");
+            params.add(status + "%");
+        }
+        if (currentStage != null && !currentStage.isBlank()) {
+            w.append(" AND COALESCE(bsc.stage_code,'') ILIKE ? ");
+            params.add(currentStage + "%");
+        }
+        if (locationIds != null && !locationIds.isEmpty()) {
+            String in = String.join(",", Collections.nCopies(locationIds.size(), "?::uuid"));
+            w.append(" AND (")
+                    .append("br.location_id IN (")
+                    .append(in)
+                    .append(") ")
+                    .append("OR EXISTS (SELECT 1 FROM client_subscription_billing.billing_run_location j ")
+                    .append("WHERE j.billing_run_id = br.billing_run_id ")
+                    .append("AND j.location_id IN (")
+                    .append(in)
+                    .append("))) ");
+            for (int pass = 0; pass < 2; pass++) {
+                for (UUID u : locationIds) {
+                    params.add(u.toString());
+                }
+            }
+        }
+    }
+
+    /**
      * Display names of locations in {@code billing_run_location} (ordered by name). When there are
      * no junction rows for a run but the run has a primary {@code location_id}, that location's
      * name is used (aligns with due-preview/invoice location resolution).

@@ -65,6 +65,13 @@ public record BillingRunDto(
         return currentStage != null ? currentStage.stageCode() : null;
     }
 
+    /** Aligns with dashboard / run list clients that expect {@code asOfDate} alongside {@code dueDate}. */
+    @JsonProperty("asOfDate")
+    @JsonAlias("as_of_date")
+    public LocalDate asOfDate() {
+        return dueDate;
+    }
+
     @JsonProperty("completedOn")
     public OffsetDateTime completedOn() {
         return endedOn;

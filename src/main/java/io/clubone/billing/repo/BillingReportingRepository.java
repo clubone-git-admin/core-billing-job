@@ -1698,10 +1698,12 @@ public class BillingReportingRepository {
         }
         return jdbc.queryForList(
                 "SELECT date_trunc(?, br.due_date::timestamp) AS period_start, "
-                        + "COALESCE(SUM(sbh.invoice_total_amount),0) AS value "
+                        + "COALESCE(SUM(sbh.invoice_total_amount),0) AS value, "
+                        + "COALESCE(SUM(CASE WHEN s.is_success = true THEN sbh.invoice_total_amount ELSE 0 END),0) AS value2 "
                         + "FROM client_subscription_billing.billing_run br "
                         + "LEFT JOIN client_subscription_billing.subscription_billing_history sbh "
                         + "  ON sbh.billing_run_id = br.billing_run_id "
+                        + "LEFT JOIN billing_config.billing_status s ON s.billing_status_id = sbh.billing_status_id "
                         + "LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id "
                         + "LEFT JOIN client_agreements.client_agreement ca "
                         + "  ON ca.client_agreement_id = i.client_agreement_id AND COALESCE(ca.is_active, true) = true "
