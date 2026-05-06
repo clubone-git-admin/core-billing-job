@@ -202,6 +202,8 @@ public class BillingRunsController {
     @GetMapping("/{billingRunId}/dlq")
     public ResponseEntity<PageResponse<DLQItemDto>> listDlqForBillingRun(
             @PathVariable UUID billingRunId,
+            @RequestParam(required = false) UUID locationLevelId,
+            @RequestParam(required = false, defaultValue = "true") Boolean includeChildLocations,
             @RequestParam(required = false) UUID invoiceGenerationRunId,
             @RequestParam(required = false) UUID actualChargeRunId,
             @RequestParam(name = "actual_charge_run_id", required = false) UUID actualChargeRunIdSnake,
@@ -214,9 +216,19 @@ public class BillingRunsController {
             @RequestParam(defaultValue = "desc") String sortOrder) {
 
         UUID stageRunFilter = firstNonNull(invoiceGenerationRunId, actualChargeRunId, actualChargeRunIdSnake);
-        PageResponse<DLQItemDto> response = dlqService.listDLQItems(
-                billingRunId, stageRunFilter, failureTypeCode, errorType, resolved,
-                limit, offset, sortBy, sortOrder);
+        PageResponse<DLQItemDto> response =
+                dlqService.listDLQItems(
+                        billingRunId,
+                        locationLevelId,
+                        includeChildLocations,
+                        stageRunFilter,
+                        failureTypeCode,
+                        errorType,
+                        resolved,
+                        limit,
+                        offset,
+                        sortBy,
+                        sortOrder);
         return ResponseEntity.ok(response);
     }
 
