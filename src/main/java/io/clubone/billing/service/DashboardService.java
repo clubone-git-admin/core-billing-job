@@ -4,6 +4,7 @@ import io.clubone.billing.api.dto.BillingRunDto;
 import io.clubone.billing.api.dto.DashboardKPIDto;
 import io.clubone.billing.dashboard.DashboardApiConstants;
 import io.clubone.billing.repo.BillingRunRepository;
+import io.clubone.billing.repo.CrmDashboardRepository;
 import io.clubone.billing.repo.DashboardRepository;
 import io.clubone.billing.repo.LocationLevelRepository;
 import org.springframework.stereotype.Service;
@@ -22,14 +23,18 @@ public class DashboardService {
     private final DashboardRepository dashboardRepository;
     private final LocationLevelRepository locationLevelRepository;
     private final BillingRunRepository billingRunRepository;
+    private final CrmDashboardRepository crmDashboardRepository;
+    private static final Set<String> ALLOWED_SEGMENTS = Set.of("7D", "30D", "MTD", "YTD");
 
     public DashboardService(
             DashboardRepository dashboardRepository,
             LocationLevelRepository locationLevelRepository,
-            BillingRunRepository billingRunRepository) {
+            BillingRunRepository billingRunRepository,
+            CrmDashboardRepository crmDashboardRepository) {
         this.dashboardRepository = dashboardRepository;
         this.locationLevelRepository = locationLevelRepository;
         this.billingRunRepository = billingRunRepository;
+        this.crmDashboardRepository = crmDashboardRepository;
     }
 
     public DashboardKPIDto getKPIs(UUID locationId, String dateRange) {
@@ -165,6 +170,7 @@ public class DashboardService {
             LocalDate asOfFrom,
             LocalDate asOfTo,
             String locationId,
+            UUID locationLevelId,
             boolean includeChildLocations,
             String status,
             String currentStage,
@@ -177,7 +183,7 @@ public class DashboardService {
         YearMonth nextYm = currentYm.plusMonths(1);
         LocalDate from = dueDateFrom != null ? dueDateFrom : prevYm.atDay(1);
         LocalDate to = dueDateTo != null ? dueDateTo : nextYm.atEndOfMonth();
-        List<UUID> locs = resolveLocations(locationId, includeChildLocations);
+        List<UUID> locs = resolveLocations(locationId, locationLevelId, includeChildLocations);
         Map<String, Object> summaryRaw = dashboardRepository.getOverviewSummary(from, to, asOfFrom, asOfTo, locs, status, currentStage);
         Map<String, Object> forecast = dashboardRepository.getOverviewForecast(locs);
 
@@ -359,7 +365,14 @@ public class DashboardService {
         return alerts;
     }
 
-    private List<UUID> resolveLocations(String locationId, boolean includeChildLocations) {
+    private List<UUID> resolveLocations(String locationId, UUID locationLevelId, boolean includeChildLocations) {
+        if (locationLevelId != null) {
+            return locationLevelRepository
+                    .resolveLocationsForLevel(locationLevelId, includeChildLocations)
+                    .stream()
+                    .map(LocationLevelRepository.LocationRow::locationId)
+                    .toList();
+        }
         if (locationId == null || locationId.isBlank()) {
             return List.of();
         }
@@ -456,6 +469,197 @@ public class DashboardService {
 
     private static List<Map<String, Object>> safeList(List<Map<String, Object>> rows) {
         return rows == null ? List.of() : rows;
+    }
+
+    public Map<String, Object> getDashboardOverviewContract(
+            LocalDate fromDate,
+            LocalDate toDate,
+            String segment,
+            String locationLevelIdRaw,
+            boolean includeChildLocations) {
+        if (fromDate == null || toDate == null) {
+            throw new IllegalArgumentException("fromDate and toDate are required");
+        }
+        if (fromDate.isAfter(toDate)) {
+            throw new IllegalArgumentException("fromDate cannot be after toDate");
+        }
+        long days = java.time.temporal.ChronoUnit.DAYS.between(fromDate, toDate) + 1;
+        if (days > 366) {
+            throw new IllegalStateException("DATE_SPAN_TOO_LARGE");
+        }
+        String seg = segment == null || segment.isBlank() ? "7D" : segment.trim().toUpperCase(Locale.ROOT);
+        if (!ALLOWED_SEGMENTS.contains(seg)) {
+            throw new IllegalArgumentException("segment must be one of 7D, 30D, MTD, YTD");
+        }
+
+        UUID locationLevelId = null;
+        String locationLabel = null;
+        if (locationLevelIdRaw != null && !locationLevelIdRaw.isBlank()) {
+            try {
+                locationLevelId = UUID.fromString(locationLevelIdRaw.trim());
+            } catch (Exception e) {
+                throw new NoSuchElementException("INVALID_LOCATION_LEVEL");
+            }
+            locationLabel = locationLevelRepository.findLevelName(locationLevelId).orElse(null);
+            if (locationLabel == null) {
+                throw new NoSuchElementException("INVALID_LOCATION_LEVEL");
+            }
+        }
+
+        Map<String, Object> base = getOverview(
+                fromDate, toDate, fromDate, toDate, null, locationLevelId, includeChildLocations,
+                null, null, 10, 0, 200, 0);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> summary = base.get("summary") instanceof Map<?, ?> m ? (Map<String, Object>) (Map<?, ?>) m : Map.of();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> trends = base.get("trends") instanceof Map<?, ?> m ? (Map<String, Object>) (Map<?, ?>) m : Map.of();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> charts = base.get("charts") instanceof Map<?, ?> m ? (Map<String, Object>) (Map<?, ?>) m : Map.of();
+
+        List<Map<String, Object>> billedCollected = asMapList(trends.get("billed_collected"));
+        // Align with the requested date range: DB only returns days that have billing runs, so we
+        // densify to one point per day (zeros when no run / no amounts).
+        Map<String, double[]> billedCollectedByDay = new HashMap<>();
+        for (Map<String, Object> p : billedCollected) {
+            String d = p.get("date") == null ? null : String.valueOf(p.get("date"));
+            if (d == null || d.isBlank()) {
+                continue;
+            }
+            billedCollectedByDay.put(
+                    d,
+                    new double[] {
+                        num(p.get("billed")).doubleValue(), num(p.get("collected")).doubleValue()
+                    });
+        }
+        List<Number> billed = new ArrayList<>();
+        List<Number> collected = new ArrayList<>();
+        List<String> labels = new ArrayList<>();
+        for (LocalDate d = fromDate; !d.isAfter(toDate); d = d.plusDays(1)) {
+            String k = d.toString();
+            labels.add(k);
+            double[] v = billedCollectedByDay.getOrDefault(k, new double[] {0.0, 0.0});
+            billed.add(v[0]);
+            collected.add(v[1]);
+        }
+
+        List<UUID> crmLocs = resolveLocations(null, locationLevelId, includeChildLocations);
+        Map<String, Object> memberCounts = crmDashboardRepository.getMemberCounts(crmLocs);
+        long totalMembers = num(memberCounts.get("total_members")).longValue();
+        long activeMemberships = num(memberCounts.get("active_members")).longValue();
+        LocalDate monthStart = toDate.withDayOfMonth(1);
+        long checkinsMtd = crmDashboardRepository.getCheckinsMtd(crmLocs, monthStart, toDate).longValue();
+
+        List<Map<String, Object>> checkinDaily =
+                crmDashboardRepository.getCheckinTrendDaily(crmLocs, fromDate, toDate);
+        Map<String, Long> checkinsByDay = new HashMap<>();
+        for (Map<String, Object> row : checkinDaily) {
+            Object day = row.get("day");
+            String key =
+                    day instanceof java.sql.Date sd
+                            ? sd.toLocalDate().toString()
+                            : String.valueOf(day);
+            checkinsByDay.put(key, num(row.get("cnt")).longValue());
+        }
+        List<String> checkinLabels = new ArrayList<>();
+        List<Number> checkinValues = new ArrayList<>();
+        for (LocalDate d = fromDate; !d.isAfter(toDate); d = d.plusDays(1)) {
+            String k = d.toString();
+            checkinLabels.add(k);
+            checkinValues.add(checkinsByDay.getOrDefault(k, 0L));
+        }
+
+        Map<String, Long> gender = crmDashboardRepository.getGenderBuckets(crmLocs);
+
+        List<Map<String, Object>> topPlanRows =
+                crmDashboardRepository.getTopPlansByAgreement(crmLocs, 10);
+        long planMemberSum = topPlanRows.stream().mapToLong(r -> num(r.get("members")).longValue()).sum();
+        List<Map<String, Object>> topPlans = new ArrayList<>();
+        for (Map<String, Object> row : topPlanRows) {
+            long m = num(row.get("members")).longValue();
+            double share = planMemberSum > 0 ? (m * 1.0 / planMemberSum) : 0.0;
+            topPlans.add(
+                    Map.of(
+                            "name",
+                            String.valueOf(row.getOrDefault("name", "Unknown")),
+                            "members",
+                            m,
+                            "share",
+                            share));
+        }
+
+        List<Map<String, Object>> recentRows = crmDashboardRepository.getRecentRegistrations(crmLocs, 10);
+        List<Map<String, Object>> recentRegistrations = new ArrayList<>();
+        for (Map<String, Object> row : recentRows) {
+            Map<String, Object> rr = new LinkedHashMap<>();
+            rr.put("clientRoleId", row.get("client_role_id"));
+            rr.put("roleExternalId", row.get("role_external_id"));
+            rr.put("name", row.get("name") != null ? String.valueOf(row.get("name")) : "");
+            rr.put("registeredOn", row.get("created_on"));
+            rr.put("planName", row.get("plan_name") != null ? String.valueOf(row.get("plan_name")) : "");
+            recentRegistrations.add(rr);
+        }
+
+        List<Map<String, Object>> membershipStatus = new ArrayList<>();
+        for (Map<String, Object> r : crmDashboardRepository.getMembershipStatusBuckets(crmLocs)) {
+            membershipStatus.add(
+                    Map.of(
+                            "name",
+                            String.valueOf(r.get("name")),
+                            "value",
+                            num(r.get("value")).longValue()));
+        }
+
+        List<Map<String, Object>> alertsIn = asMapList(charts.get("alerts"));
+        List<Map<String, Object>> alerts = alertsIn.stream().map(a -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("type", String.valueOf(a.getOrDefault("title", "INFO")).toUpperCase(Locale.ROOT).replace(' ', '_'));
+            m.put("title", String.valueOf(a.getOrDefault("title", "Info")));
+            m.put("message", String.valueOf(a.getOrDefault("name", a.getOrDefault("title", "Info"))));
+            m.put("ageText", "now");
+            return m;
+        }).toList();
+
+        Map<String, Object> filters = new LinkedHashMap<>();
+        filters.put("fromDate", fromDate.toString());
+        filters.put("toDate", toDate.toString());
+        filters.put("segment", seg);
+        // Map.of forbids nulls; optional query params may be absent.
+        filters.put("locationLevelId", locationLevelIdRaw != null ? locationLevelIdRaw : "");
+        filters.put("locationLabel", locationLabel != null ? locationLabel : "");
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("filters", filters);
+        out.put("kpis", Map.of(
+                "totalMembers", Map.of("value", totalMembers, "deltaPct", 0),
+                "activeMemberships", Map.of("value", activeMemberships, "deltaPct", 0),
+                "checkinsMtd", Map.of("value", checkinsMtd, "deltaPct", 0),
+                "revenueMtd", Map.of("value", num(summary.get("total_invoiced")), "deltaPct", 0),
+                "outstandingAr", Map.of("value", num(summary.get("outstanding_amount")), "deltaPct", 0)));
+        out.put("revenueOverview", Map.of("billed", billed, "collected", collected, "labels", labels));
+        out.put("membershipStatus", membershipStatus);
+        out.put("checkinTrend", Map.of("labels", checkinLabels, "values", checkinValues));
+        out.put(
+                "genderDistribution",
+                Map.of(
+                        "maleCount",
+                        gender.getOrDefault("maleCount", 0L),
+                        "femaleCount",
+                        gender.getOrDefault("femaleCount", 0L),
+                        "otherGenderCount",
+                        gender.getOrDefault("otherGenderCount", 0L)));
+        out.put("topPlans", topPlans);
+        out.put("recentRegistrations", recentRegistrations);
+        out.put("alerts", alerts);
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> asMapList(Object o) {
+        if (!(o instanceof List<?> l)) return List.of();
+        if (l.isEmpty()) return List.of();
+        if (!(l.get(0) instanceof Map<?, ?>)) return List.of();
+        return (List<Map<String, Object>>) (List<?>) l;
     }
 
     private List<Map<String, Object>> buildFixedFunnelStages(

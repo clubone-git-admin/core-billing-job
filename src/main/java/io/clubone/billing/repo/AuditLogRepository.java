@@ -49,7 +49,7 @@ public class AuditLogRepository {
      * Find audit log entries with filtering.
      */
     public List<Map<String, Object>> findAuditLogs(
-            String entityType, UUID entityId, OffsetDateTime fromTs,
+            String entityType, UUID entityId, List<UUID> locationIds, OffsetDateTime fromTs,
             OffsetDateTime toTs, Integer limit, Integer offset) {
         
         StringBuilder sql = new StringBuilder("""
@@ -66,6 +66,8 @@ public class AuditLogRepository {
                 bal.ip_address,
                 bal.user_agent
             FROM client_subscription_billing.billing_audit_log bal
+            LEFT JOIN client_subscription_billing.billing_run br
+              ON br.billing_run_id = bal.entity_id::uuid
             WHERE 1=1
             """);
 
@@ -89,6 +91,19 @@ public class AuditLogRepository {
         if (toTs != null) {
             sql.append(" AND bal.created_on <= ?");
             params.add(toTs);
+        }
+        if (locationIds != null && !locationIds.isEmpty()) {
+            String in = inClausePlaceholders(locationIds.size());
+            sql.append(" AND (")
+                    .append("br.location_id IN (").append(in).append(") ")
+                    .append("OR EXISTS (SELECT 1 FROM client_subscription_billing.billing_run_location j ")
+                    .append("WHERE j.billing_run_id = br.billing_run_id ")
+                    .append("AND j.location_id IN (").append(in).append("))) ");
+            for (int pass = 0; pass < 2; pass++) {
+                for (UUID u : locationIds) {
+                    params.add(u.toString());
+                }
+            }
         }
 
         sql.append(" ORDER BY bal.created_on DESC LIMIT ? OFFSET ?");
@@ -102,11 +117,13 @@ public class AuditLogRepository {
      * Count audit log entries.
      */
     public Integer countAuditLogs(
-            String entityType, UUID entityId, OffsetDateTime fromTs, OffsetDateTime toTs) {
+            String entityType, UUID entityId, List<UUID> locationIds, OffsetDateTime fromTs, OffsetDateTime toTs) {
         
         StringBuilder sql = new StringBuilder("""
             SELECT COUNT(1)
             FROM client_subscription_billing.billing_audit_log bal
+            LEFT JOIN client_subscription_billing.billing_run br
+              ON br.billing_run_id = bal.entity_id::uuid
             WHERE 1=1
             """);
 
@@ -131,6 +148,19 @@ public class AuditLogRepository {
             sql.append(" AND bal.created_on <= ?");
             params.add(toTs);
         }
+        if (locationIds != null && !locationIds.isEmpty()) {
+            String in = inClausePlaceholders(locationIds.size());
+            sql.append(" AND (")
+                    .append("br.location_id IN (").append(in).append(") ")
+                    .append("OR EXISTS (SELECT 1 FROM client_subscription_billing.billing_run_location j ")
+                    .append("WHERE j.billing_run_id = br.billing_run_id ")
+                    .append("AND j.location_id IN (").append(in).append("))) ");
+            for (int pass = 0; pass < 2; pass++) {
+                for (UUID u : locationIds) {
+                    params.add(u.toString());
+                }
+            }
+        }
 
         return jdbc.queryForObject(sql.toString(), params.toArray(), Integer.class);
     }
@@ -139,7 +169,7 @@ public class AuditLogRepository {
      * Export audit logs to CSV format.
      */
     public String exportAuditLogsCSV(
-            String entityType, OffsetDateTime fromTs, OffsetDateTime toTs) {
+            String entityType, List<UUID> locationIds, OffsetDateTime fromTs, OffsetDateTime toTs) {
         
         StringBuilder sql = new StringBuilder("""
             SELECT 
@@ -153,6 +183,8 @@ public class AuditLogRepository {
                 bal.created_on,
                 bal.ip_address
             FROM client_subscription_billing.billing_audit_log bal
+            LEFT JOIN client_subscription_billing.billing_run br
+              ON br.billing_run_id = bal.entity_id::uuid
             WHERE 1=1
             """);
 
@@ -171,6 +203,19 @@ public class AuditLogRepository {
         if (toTs != null) {
             sql.append(" AND bal.created_on <= ?");
             params.add(toTs);
+        }
+        if (locationIds != null && !locationIds.isEmpty()) {
+            String in = inClausePlaceholders(locationIds.size());
+            sql.append(" AND (")
+                    .append("br.location_id IN (").append(in).append(") ")
+                    .append("OR EXISTS (SELECT 1 FROM client_subscription_billing.billing_run_location j ")
+                    .append("WHERE j.billing_run_id = br.billing_run_id ")
+                    .append("AND j.location_id IN (").append(in).append("))) ");
+            for (int pass = 0; pass < 2; pass++) {
+                for (UUID u : locationIds) {
+                    params.add(u.toString());
+                }
+            }
         }
 
         sql.append(" ORDER BY bal.created_on DESC");
@@ -205,5 +250,9 @@ public class AuditLogRepository {
             return "\"" + str.replace("\"", "\"\"") + "\"";
         }
         return str;
+    }
+
+    private String inClausePlaceholders(int n) {
+        return String.join(",", Collections.nCopies(n, "?::uuid"));
     }
 }

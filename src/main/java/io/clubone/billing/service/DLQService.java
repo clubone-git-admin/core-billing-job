@@ -3,6 +3,7 @@ package io.clubone.billing.service;
 import io.clubone.billing.api.dto.DLQItemDto;
 import io.clubone.billing.api.dto.PageResponse;
 import io.clubone.billing.repo.DLQRepository;
+import io.clubone.billing.repo.LocationLevelRepository;
 import io.clubone.billing.service.invoicegen.InvoiceGenerationStageDlqSummaryService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,25 +21,49 @@ public class DLQService {
     private static final Logger log = LoggerFactory.getLogger(DLQService.class);
 
     private final DLQRepository dlqRepository;
+    private final LocationLevelRepository locationLevelRepository;
     private final InvoiceGenerationStageDlqSummaryService invoiceGenerationStageDlqSummaryService;
 
     public DLQService(
             DLQRepository dlqRepository,
+            LocationLevelRepository locationLevelRepository,
             InvoiceGenerationStageDlqSummaryService invoiceGenerationStageDlqSummaryService) {
         this.dlqRepository = dlqRepository;
+        this.locationLevelRepository = locationLevelRepository;
         this.invoiceGenerationStageDlqSummaryService = invoiceGenerationStageDlqSummaryService;
     }
 
     public PageResponse<DLQItemDto> listDLQItems(
-            UUID billingRunId, UUID stageRunId, String failureTypeCode, String errorType, Boolean resolved,
+            UUID billingRunId,
+            UUID locationLevelId,
+            Boolean includeChildLocations,
+            UUID stageRunId,
+            String failureTypeCode,
+            String errorType,
+            Boolean resolved,
             Integer limit, Integer offset, String sortBy, String sortOrder) {
+        List<UUID> locationIds = resolveLocationIds(locationLevelId, includeChildLocations);
 
         List<DLQItemDto> items = dlqRepository.findDLQItems(
-                billingRunId, stageRunId, failureTypeCode, errorType, resolved, limit, offset, sortBy, sortOrder);
+                billingRunId, stageRunId, locationIds, failureTypeCode, errorType, resolved, limit, offset, sortBy, sortOrder);
 
-        Integer total = dlqRepository.countDLQItems(billingRunId, stageRunId, failureTypeCode, errorType, resolved);
+        Integer total =
+                dlqRepository.countDLQItems(
+                        billingRunId, stageRunId, locationIds, failureTypeCode, errorType, resolved);
 
         return PageResponse.of(items, total, limit, offset);
+    }
+
+    private List<UUID> resolveLocationIds(UUID locationLevelId, Boolean includeChildLocations) {
+        if (locationLevelId == null) {
+            return List.of();
+        }
+        boolean includeChildren = includeChildLocations == null || includeChildLocations;
+        return locationLevelRepository
+                .resolveLocationsForLevel(locationLevelId, includeChildren)
+                .stream()
+                .map(LocationLevelRepository.LocationRow::locationId)
+                .toList();
     }
 
     public DLQItemDto getDLQItem(UUID dlqId) {

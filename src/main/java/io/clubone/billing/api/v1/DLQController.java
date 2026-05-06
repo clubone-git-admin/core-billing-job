@@ -8,7 +8,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -34,6 +33,8 @@ public class DLQController {
     @GetMapping
     public ResponseEntity<PageResponse<DLQItemDto>> listDLQItems(
             @RequestParam(required = false) UUID billingRunId,
+            @RequestParam(required = false) UUID locationLevelId,
+            @RequestParam(required = false, defaultValue = "true") Boolean includeChildLocations,
             @RequestParam(required = false) UUID invoiceGenerationRunId,
             @RequestParam(required = false) UUID actualChargeRunId,
             @RequestParam(name = "actual_charge_run_id", required = false) UUID actualChargeRunIdSnake,
@@ -48,14 +49,25 @@ public class DLQController {
         UUID stageRunFilter = firstNonNull(invoiceGenerationRunId, actualChargeRunId, actualChargeRunIdSnake);
 
         log.debug(
-                "Listing DLQ items: billingRunId={}, stageRunId={}, failureTypeCode={}, resolved={}",
+                "Listing DLQ items: billingRunId={}, locationLevelId={}, stageRunId={}, failureTypeCode={}, resolved={}",
                 billingRunId,
+                locationLevelId,
                 stageRunFilter,
                 failureTypeCode,
                 resolved);
 
         PageResponse<DLQItemDto> response = dlqService.listDLQItems(
-                billingRunId, stageRunFilter, failureTypeCode, errorType, resolved, limit, offset, sortBy, sortOrder);
+                billingRunId,
+                locationLevelId,
+                includeChildLocations,
+                stageRunFilter,
+                failureTypeCode,
+                errorType,
+                resolved,
+                limit,
+                offset,
+                sortBy,
+                sortOrder);
 
         return ResponseEntity.ok(response);
     }

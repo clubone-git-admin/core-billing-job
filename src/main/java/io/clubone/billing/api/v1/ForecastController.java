@@ -37,16 +37,23 @@ public class ForecastController {
     public ResponseEntity<?> getForecast(
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
+            @RequestParam(required = false) UUID locationLevelId,
+            @RequestParam(required = false, defaultValue = "true") Boolean includeChildLocations,
             @RequestParam(required = false, defaultValue = "true") Boolean aggregate,
             @RequestParam(required = false, defaultValue = "day") String groupBy) {
         
-        log.debug("Getting forecast: from={}, to={}, aggregate={}, groupBy={}", from, to, aggregate, groupBy);
+        log.debug(
+                "Getting forecast: from={}, to={}, locationLevelId={}, includeChildLocations={}, aggregate={}, groupBy={}",
+                from, to, locationLevelId, includeChildLocations, aggregate, groupBy);
         
         if (aggregate) {
-            List<Map<String, Object>> data = forecastService.getForecastAggregated(from, to, groupBy);
+            List<Map<String, Object>> data =
+                    forecastService.getForecastAggregated(
+                            from, to, groupBy, locationLevelId, includeChildLocations);
             return ResponseEntity.ok(Map.of("data", data));
         } else {
-            PageResponse<ForecastItemDto> response = forecastService.getForecast(from, to);
+            PageResponse<ForecastItemDto> response =
+                    forecastService.getForecast(from, to, locationLevelId, includeChildLocations);
             return ResponseEntity.ok(response);
         }
     }

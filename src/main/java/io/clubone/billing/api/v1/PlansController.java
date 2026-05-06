@@ -32,12 +32,18 @@ public class PlansController {
     public ResponseEntity<Map<String, Object>> listPlans(
             @RequestParam(required = false) Boolean isActive,
             @RequestParam(required = false) UUID clientAgreementId,
+            @RequestParam(required = false) UUID locationLevelId,
+            @RequestParam(required = false, defaultValue = "true") Boolean includeChildLocations,
             @RequestParam(defaultValue = "50") Integer limit,
             @RequestParam(defaultValue = "0") Integer offset) {
         
-        log.debug("Listing plans: isActive={}, clientAgreementId={}", isActive, clientAgreementId);
+        log.debug(
+                "Listing plans: isActive={}, clientAgreementId={}, locationLevelId={}, includeChildLocations={}",
+                isActive, clientAgreementId, locationLevelId, includeChildLocations);
         
-        Map<String, Object> response = plansService.listPlans(isActive, clientAgreementId, limit, offset);
+        Map<String, Object> response =
+                plansService.listPlans(
+                        isActive, clientAgreementId, locationLevelId, includeChildLocations, limit, offset);
         return ResponseEntity.ok(response);
     }
 

@@ -61,7 +61,7 @@ public class ExportService {
 
     public byte[] exportDLQ(Boolean resolved, String failureTypeCode, String format) {
         List<io.clubone.billing.api.dto.DLQItemDto> items = dlqRepository.findDLQItems(
-                null, null, failureTypeCode, null, resolved, 10000, 0, "created_on", "desc");
+                null, null, List.of(), failureTypeCode, null, resolved, 10000, 0, "created_on", "desc");
 
         if ("csv".equalsIgnoreCase(format)) {
             return exportDLQToCSV(items);
@@ -71,7 +71,8 @@ public class ExportService {
     }
 
     public byte[] exportForecast(LocalDate date, String format) {
-        List<Map<String, Object>> items = forecastRepository.getForecastAggregated(date, date, "day");
+        List<Map<String, Object>> items =
+                forecastRepository.getForecastAggregated(date, date, "day", List.of());
 
         if ("csv".equalsIgnoreCase(format)) {
             return exportForecastToCSV(items);

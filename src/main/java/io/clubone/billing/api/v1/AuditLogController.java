@@ -34,15 +34,19 @@ public class AuditLogController {
     public ResponseEntity<Map<String, Object>> listAuditLogs(
             @RequestParam(required = false) String entityType,
             @RequestParam(required = false) UUID entityId,
+            @RequestParam(required = false) UUID locationLevelId,
+            @RequestParam(required = false, defaultValue = "true") Boolean includeChildLocations,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime fromTs,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime toTs,
             @RequestParam(defaultValue = "100") Integer limit,
             @RequestParam(defaultValue = "0") Integer offset) {
         
-        log.debug("Listing audit logs: entityType={}, entityId={}", entityType, entityId);
+        log.debug(
+                "Listing audit logs: entityType={}, entityId={}, locationLevelId={}, includeChildLocations={}",
+                entityType, entityId, locationLevelId, includeChildLocations);
         
         Map<String, Object> response = auditLogService.listAuditLogs(
-                entityType, entityId, fromTs, toTs, limit, offset);
+                entityType, entityId, locationLevelId, includeChildLocations, fromTs, toTs, limit, offset);
         
         return ResponseEntity.ok(response);
     }
@@ -54,13 +58,19 @@ public class AuditLogController {
     @GetMapping("/export")
     public ResponseEntity<byte[]> exportAuditLogs(
             @RequestParam(required = false) String entityType,
+            @RequestParam(required = false) UUID locationLevelId,
+            @RequestParam(required = false, defaultValue = "true") Boolean includeChildLocations,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime fromTs,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime toTs,
             @RequestParam(required = false, defaultValue = "csv") String format) {
         
-        log.debug("Exporting audit logs: entityType={}, format={}", entityType, format);
+        log.debug(
+                "Exporting audit logs: entityType={}, locationLevelId={}, includeChildLocations={}, format={}",
+                entityType, locationLevelId, includeChildLocations, format);
         
-        byte[] exportData = auditLogService.exportAuditLogs(entityType, fromTs, toTs, format);
+        byte[] exportData =
+                auditLogService.exportAuditLogs(
+                        entityType, locationLevelId, includeChildLocations, fromTs, toTs, format);
         if (exportData == null) {
             return ResponseEntity.notFound().build();
         }

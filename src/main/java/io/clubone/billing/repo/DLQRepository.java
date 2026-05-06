@@ -31,7 +31,7 @@ public class DLQRepository {
      * @param errorType optional exact match on {@code dlq.error_type} (e.g. {@code INVOICE_GENERATION_DRAFT})
      */
     public List<DLQItemDto> findDLQItems(
-            UUID billingRunId, UUID stageRunId, String failureTypeCode, String errorType, Boolean resolved,
+            UUID billingRunId, UUID stageRunId, List<UUID> locationIds, String failureTypeCode, String errorType, Boolean resolved,
             Integer limit, Integer offset, String sortBy, String sortOrder) {
 
         StringBuilder sql = new StringBuilder("""
@@ -74,6 +74,19 @@ public class DLQRepository {
             sql.append(" AND dlq.resolved = ?");
             params.add(resolved);
         }
+        if (locationIds != null && !locationIds.isEmpty()) {
+            String in = inClausePlaceholders(locationIds.size());
+            sql.append(" AND (")
+                    .append("br.location_id IN (").append(in).append(") ")
+                    .append("OR EXISTS (SELECT 1 FROM client_subscription_billing.billing_run_location j ")
+                    .append("WHERE j.billing_run_id = br.billing_run_id ")
+                    .append("AND j.location_id IN (").append(in).append("))) ");
+            for (int pass = 0; pass < 2; pass++) {
+                for (UUID u : locationIds) {
+                    params.add(u.toString());
+                }
+            }
+        }
 
         String validSortBy = validateSortBy(sortBy);
         String validSortOrder = "desc".equalsIgnoreCase(sortOrder) ? "DESC" : "ASC";
@@ -89,10 +102,12 @@ public class DLQRepository {
     /**
      * Count total DLQ items matching filters.
      */
-    public Integer countDLQItems(UUID billingRunId, UUID stageRunId, String failureTypeCode, String errorType, Boolean resolved) {
+    public Integer countDLQItems(
+            UUID billingRunId, UUID stageRunId, List<UUID> locationIds, String failureTypeCode, String errorType, Boolean resolved) {
         StringBuilder sql = new StringBuilder("""
             SELECT COUNT(1)
             FROM client_subscription_billing.billing_dead_letter_queue dlq
+            LEFT JOIN client_subscription_billing.billing_run br ON br.billing_run_id = dlq.billing_run_id
             LEFT JOIN billing_config.failure_type ft ON ft.failure_type_id = dlq.failure_type_id
             WHERE 1=1
             """);
@@ -118,6 +133,19 @@ public class DLQRepository {
         if (resolved != null) {
             sql.append(" AND dlq.resolved = ?");
             params.add(resolved);
+        }
+        if (locationIds != null && !locationIds.isEmpty()) {
+            String in = inClausePlaceholders(locationIds.size());
+            sql.append(" AND (")
+                    .append("br.location_id IN (").append(in).append(") ")
+                    .append("OR EXISTS (SELECT 1 FROM client_subscription_billing.billing_run_location j ")
+                    .append("WHERE j.billing_run_id = br.billing_run_id ")
+                    .append("AND j.location_id IN (").append(in).append("))) ");
+            for (int pass = 0; pass < 2; pass++) {
+                for (UUID u : locationIds) {
+                    params.add(u.toString());
+                }
+            }
         }
 
         return jdbc.queryForObject(sql.toString(), params.toArray(), Integer.class);
@@ -338,5 +366,9 @@ public class DLQRepository {
     private String validateSortBy(String sortBy) {
         Set<String> validColumns = Set.of("created_on", "retry_count", "last_retry_on", "resolved_on");
         return validColumns.contains(sortBy) ? sortBy : "created_on";
+    }
+
+    private String inClausePlaceholders(int n) {
+        return String.join(",", Collections.nCopies(n, "?::uuid"));
     }
 }

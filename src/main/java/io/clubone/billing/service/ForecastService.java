@@ -4,6 +4,7 @@ import io.clubone.billing.api.dto.ForecastItemDto;
 import io.clubone.billing.api.dto.PageResponse;
 import io.clubone.billing.api.dto.StatusDto;
 import io.clubone.billing.repo.ForecastRepository;
+import io.clubone.billing.repo.LocationLevelRepository;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -17,13 +18,24 @@ import java.util.stream.Collectors;
 public class ForecastService {
 
     private final ForecastRepository forecastRepository;
+    private final LocationLevelRepository locationLevelRepository;
 
-    public ForecastService(ForecastRepository forecastRepository) {
+    public ForecastService(
+            ForecastRepository forecastRepository,
+            LocationLevelRepository locationLevelRepository) {
         this.forecastRepository = forecastRepository;
+        this.locationLevelRepository = locationLevelRepository;
     }
 
-    public List<Map<String, Object>> getForecastAggregated(LocalDate from, LocalDate to, String groupBy) {
-        List<Map<String, Object>> items = forecastRepository.getForecastAggregated(from, to, groupBy);
+    public List<Map<String, Object>> getForecastAggregated(
+            LocalDate from,
+            LocalDate to,
+            String groupBy,
+            UUID locationLevelId,
+            Boolean includeChildLocations) {
+        List<UUID> locationIds = resolveLocationIds(locationLevelId, includeChildLocations);
+        List<Map<String, Object>> items =
+                forecastRepository.getForecastAggregated(from, to, groupBy, locationIds);
         
         return items.stream()
                 .map(item -> Map.of(
@@ -34,9 +46,12 @@ public class ForecastService {
                 .collect(Collectors.toList());
     }
 
-    public PageResponse<ForecastItemDto> getForecast(LocalDate from, LocalDate to) {
-        List<Map<String, Object>> items = forecastRepository.getForecastItems(from, to, 100, 0);
-        Integer total = forecastRepository.countForecastItems(from, to);
+    public PageResponse<ForecastItemDto> getForecast(
+            LocalDate from, LocalDate to, UUID locationLevelId, Boolean includeChildLocations) {
+        List<UUID> locationIds = resolveLocationIds(locationLevelId, includeChildLocations);
+        List<Map<String, Object>> items =
+                forecastRepository.getForecastItems(from, to, 100, 0, locationIds);
+        Integer total = forecastRepository.countForecastItems(from, to, locationIds);
 
         List<ForecastItemDto> forecastItems = items.stream()
                 .map(this::mapToForecastItemDto)
@@ -77,7 +92,7 @@ public class ForecastService {
                 .collect(Collectors.toList());
 
         // Count total (simplified - in production, should count with same filters)
-        Integer total = forecastRepository.countForecastItems(date, date);
+        Integer total = forecastRepository.countForecastItems(date, date, null);
 
         return PageResponse.of(forecastItems, total, limit, offset);
     }
@@ -145,6 +160,18 @@ public class ForecastService {
                 Collections.emptyList(), // warnings
                 Collections.emptyList() // validation_errors
         );
+    }
+
+    private List<UUID> resolveLocationIds(UUID locationLevelId, Boolean includeChildLocations) {
+        if (locationLevelId == null) {
+            return List.of();
+        }
+        boolean includeChildren = includeChildLocations == null || includeChildLocations;
+        return locationLevelRepository
+                .resolveLocationsForLevel(locationLevelId, includeChildren)
+                .stream()
+                .map(LocationLevelRepository.LocationRow::locationId)
+                .toList();
     }
 }
 

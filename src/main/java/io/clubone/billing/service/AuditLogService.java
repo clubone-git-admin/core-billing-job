@@ -11,6 +11,7 @@ import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 
 import io.clubone.billing.repo.AuditLogRepository;
+import io.clubone.billing.repo.LocationLevelRepository;
 
 /**
  * Service for audit log operations.
@@ -19,20 +20,25 @@ import io.clubone.billing.repo.AuditLogRepository;
 public class AuditLogService {
 
     private final AuditLogRepository auditLogRepository;
+    private final LocationLevelRepository locationLevelRepository;
 
-    public AuditLogService(AuditLogRepository auditLogRepository) {
+    public AuditLogService(
+            AuditLogRepository auditLogRepository,
+            LocationLevelRepository locationLevelRepository) {
         this.auditLogRepository = auditLogRepository;
+        this.locationLevelRepository = locationLevelRepository;
     }
 
     public Map<String, Object> listAuditLogs(
-            String entityType, UUID entityId, OffsetDateTime fromTs,
+            String entityType, UUID entityId, UUID locationLevelId, Boolean includeChildLocations, OffsetDateTime fromTs,
             OffsetDateTime toTs, Integer limit, Integer offset) {
+        List<UUID> locationIds = resolveLocationIds(locationLevelId, includeChildLocations);
         
         List<Map<String, Object>> logs = auditLogRepository.findAuditLogs(
-                entityType, entityId, fromTs, toTs, limit, offset);
+                entityType, entityId, locationIds, fromTs, toTs, limit, offset);
         
         Integer total = auditLogRepository.countAuditLogs(
-                entityType, entityId, fromTs, toTs);
+                entityType, entityId, locationIds, fromTs, toTs);
 
         List<Map<String, Object>> logList = logs.stream()
                 .map(this::formatAuditLog)
@@ -46,13 +52,29 @@ public class AuditLogService {
         );
     }
 
-    public byte[] exportAuditLogs(String entityType, OffsetDateTime fromTs, OffsetDateTime toTs, String format) {
+    public byte[] exportAuditLogs(
+            String entityType,
+            UUID locationLevelId,
+            Boolean includeChildLocations,
+            OffsetDateTime fromTs,
+            OffsetDateTime toTs,
+            String format) {
+        List<UUID> locationIds = resolveLocationIds(locationLevelId, includeChildLocations);
         if ("csv".equalsIgnoreCase(format)) {
-            String csv = auditLogRepository.exportAuditLogsCSV(entityType, fromTs, toTs);
+            String csv = auditLogRepository.exportAuditLogsCSV(entityType, locationIds, fromTs, toTs);
             return csv.getBytes(StandardCharsets.UTF_8);
         } else {
             // For JSON format, return JSON bytes
-            Map<String, Object> data = listAuditLogs(entityType, null, fromTs, toTs, 10000, 0);
+            Map<String, Object> data =
+                    listAuditLogs(
+                            entityType,
+                            null,
+                            locationLevelId,
+                            includeChildLocations,
+                            fromTs,
+                            toTs,
+                            10000,
+                            0);
             try {
                 com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
                 return mapper.writeValueAsBytes(data);
@@ -111,6 +133,18 @@ public class AuditLogService {
         result.put("ip_address", log.getOrDefault("ip_address", ""));
         result.put("user_agent", log.getOrDefault("user_agent", ""));
         return result;
+    }
+
+    private List<UUID> resolveLocationIds(UUID locationLevelId, Boolean includeChildLocations) {
+        if (locationLevelId == null) {
+            return List.of();
+        }
+        boolean includeChildren = includeChildLocations == null || includeChildLocations;
+        return locationLevelRepository
+                .resolveLocationsForLevel(locationLevelId, includeChildren)
+                .stream()
+                .map(LocationLevelRepository.LocationRow::locationId)
+                .toList();
     }
 }
 
