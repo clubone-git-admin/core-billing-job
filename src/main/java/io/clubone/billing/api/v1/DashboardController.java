@@ -69,8 +69,6 @@ public class DashboardController {
     public ResponseEntity<?> getOverview(
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dueDateFrom,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dueDateTo,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate asOfFrom,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate asOfTo,
             @RequestParam(required = false) String locationId,
             @RequestParam(required = false) UUID locationLevelId,
             @RequestParam(required = false, defaultValue = "true") boolean includeChildLocations,
@@ -85,8 +83,8 @@ public class DashboardController {
                     dashboardService.getOverview(
                             dueDateFrom,
                             dueDateTo,
-                            asOfFrom,
-                            asOfTo,
+                            null,
+                            null,
                             locationId,
                             locationLevelId,
                             includeChildLocations,
