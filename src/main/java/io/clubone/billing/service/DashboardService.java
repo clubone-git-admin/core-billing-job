@@ -506,8 +506,11 @@ public class DashboardService {
             }
         }
 
+        // Do not pass fromDate/toDate as as-of: that filters on DATE(br.created_on) and excludes runs
+        // whose due_date is in range but were created earlier/later — while KPI total_invoiced can
+        // still be non-zero (e.g. resolveInvoicedTotals uses run_health, which is due-date only).
         Map<String, Object> base = getOverview(
-                fromDate, toDate, fromDate, toDate, null, locationLevelId, includeChildLocations,
+                fromDate, toDate, null, null, null, locationLevelId, includeChildLocations,
                 null, null, 10, 0, 200, 0);
 
         @SuppressWarnings("unchecked")
