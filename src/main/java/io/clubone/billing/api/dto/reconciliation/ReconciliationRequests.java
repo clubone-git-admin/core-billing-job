@@ -6,6 +6,7 @@ import jakarta.validation.constraints.NotNull;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 
 public final class ReconciliationRequests {
 
@@ -99,6 +100,47 @@ public final class ReconciliationRequests {
 
     public record ConfigUpdateRequest(
             @NotNull Object config
+    ) {
+    }
+
+    /** Publish a frozen enterprise config bundle (see {@code reconciliation.reco_config_publish}). */
+    public record PublishRecoConfigRequest(
+            @NotBlank String versionLabel,
+            Object snapshot,
+            String publishedBy,
+            String notes
+    ) {
+    }
+
+    /** Attach a published config bundle to a run ({@code reconciliation_run.reco_config_publish_id}). */
+    public record AttachRunConfigPublishRequest(
+            @NotBlank String recoConfigPublishId
+    ) {
+    }
+
+    /** Create or replace matching rule graph (header + criteria + optional scope/outcome rows). */
+    public record EnterpriseMatchingRuleWriteRequest(
+            @NotNull Map<String, Object> matchingRule,
+            @NotNull @NotEmpty List<Map<String, Object>> criteria,
+            List<Map<String, Object>> scopes,
+            List<Map<String, Object>> outcomes
+    ) {
+    }
+
+    public record MatchingRuleActivePatchRequest(
+            @NotNull Boolean active
+    ) {
+    }
+
+    /** Single-row upsert body for GL mapping or schedule (camelCase keys aligned with list/detail APIs). */
+    public record EnterpriseConfigRowRequest(
+            @NotNull Map<String, Object> row
+    ) {
+    }
+
+    /** Optional sample payload for rule test stub. */
+    public record MatchingRuleTestRequest(
+            Map<String, Object> samplePayload
     ) {
     }
 }

@@ -10,6 +10,7 @@ import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -516,6 +517,41 @@ public class ReconciliationModuleRepository {
     }
 
     public Map<String, Object> createReconciliationRun(String runType, String triggerMode, String requestedBy, String tenantId, Object filters) {
+        return createReconciliationRun(runType, triggerMode, requestedBy, tenantId, filters, false, null);
+    }
+
+    /**
+     * @param deferExceptionLifecycle when {@code true}, skips {@link #syncExceptionsWithMismatchSnapshots} so callers
+     *                                  (e.g. resync) can run lifecycle once with a source run id.
+     * @param priorRunVersionForSequence when non-null (e.g. resync), the new run's {@code filters_json.runVersion} is
+     *                                     {@code max(existing max for tenant + financial period, prior) + 1} so the
+     *                                     sequence stays monotonic and strictly after the source run.
+     */
+    public Map<String, Object> createReconciliationRun(
+            String runType,
+            String triggerMode,
+            String requestedBy,
+            String tenantId,
+            Object filters,
+            boolean deferExceptionLifecycle,
+            Integer priorRunVersionForSequence
+    ) {
+        return createReconciliationRunInternal(runType, triggerMode, requestedBy, tenantId, filters, deferExceptionLifecycle, priorRunVersionForSequence);
+    }
+
+    public Map<String, Object> createReconciliationRun(String runType, String triggerMode, String requestedBy, String tenantId, Object filters, boolean deferExceptionLifecycle) {
+        return createReconciliationRunInternal(runType, triggerMode, requestedBy, tenantId, filters, deferExceptionLifecycle, null);
+    }
+
+    private Map<String, Object> createReconciliationRunInternal(
+            String runType,
+            String triggerMode,
+            String requestedBy,
+            String tenantId,
+            Object filters,
+            boolean deferExceptionLifecycle,
+            Integer priorRunVersionForSequence
+    ) {
         Map<String, Object> filterMap = normalizeFiltersObject(filters);
         filterMap.remove("recoRunId");
         enrichRunCatalogFields(filterMap);
@@ -523,6 +559,8 @@ public class ReconciliationModuleRepository {
         UUID locationId = firstLocationIdFromFilters(filterMap);
         UUID tenantUuid = parseOptionalUuid(tenantId);
         UUID requestedByUuid = parseOptionalUuid(requestedBy);
+        int runVersion = computeNextRunVersion(tenantUuid, financialPeriodId, priorRunVersionForSequence);
+        filterMap.put("runVersion", runVersion);
         String refCode = "RR-" + Math.abs(UUID.randomUUID().hashCode());
         jdbc.update("""
                 INSERT INTO reconciliation.reconciliation_run
@@ -560,10 +598,515 @@ public class ReconciliationModuleRepository {
             out.put("reconciliationRunId", refCode);
             out.put("status", "COMPLETED");
             out.put("snapshotRowsInserted", inserted);
+            out.put("runVersion", runVersion);
+            if (!deferExceptionLifecycle) {
+                out.putAll(syncExceptionsWithMismatchSnapshots(runUuid, refCode, tenantUuid, null, null));
+            }
             return out;
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("Failed to persist run summary", e);
         }
+    }
+
+    /**
+     * Re-sync from an existing run: loads {@code filters_json} + {@code run_type} + trigger mode from the source run,
+     * then runs the same pipeline as {@link #createReconciliationRun} so a new {@code run_reference_code}
+     * is issued, live source data is queried for that scope, new mismatch snapshots are written for the new run, and
+     * the new run is marked completed. Source run rows are unchanged.
+     */
+    public Map<String, Object> resyncReconciliationRun(String sourceRecoRunId, String requestedBy, String tenantId) {
+        if (sourceRecoRunId == null || sourceRecoRunId.isBlank()) {
+            return Map.of("reconciliationRunId", "", "status", "INVALID", "message", "reconciliationRunId required");
+        }
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT
+                    rr.run_type AS "runType",
+                    tm.code AS "triggerMode",
+                    rr.filters_json::text AS "filtersJsonText"
+                FROM reconciliation.reconciliation_run rr
+                JOIN reconciliation.lu_reconciliation_trigger_mode tm ON tm.reconciliation_trigger_mode_id = rr.reconciliation_trigger_mode_id
+                WHERE rr.run_reference_code = ?
+                """, sourceRecoRunId);
+        if (rows.isEmpty()) {
+            return Map.of("reconciliationRunId", sourceRecoRunId, "status", "NOT_FOUND", "message", "Run not found");
+        }
+        Map<String, Object> row0 = rows.get(0);
+        Map<String, Object> filterMap = new HashMap<>(parseRunFiltersJson(row0.get("filtersJsonText")));
+        filterMap.remove("recoRunId");
+        int sourceRunVersion = parseStoredRunVersion(filterMap);
+        filterMap.put("clonedFromReconciliationRunId", sourceRecoRunId);
+        String runType = row0.get("runType") != null ? String.valueOf(row0.get("runType")).trim() : "FULL";
+        if (runType.isEmpty()) {
+            runType = "FULL";
+        }
+        String triggerMode = row0.get("triggerMode") != null ? String.valueOf(row0.get("triggerMode")).trim() : "MANUAL";
+        if (triggerMode.isEmpty()) {
+            triggerMode = "MANUAL";
+        }
+        Map<String, Object> created = createReconciliationRun(runType, triggerMode, requestedBy, tenantId, filterMap, true, sourceRunVersion);
+        Map<String, Object> out = new HashMap<>(created);
+        out.put("sourceReconciliationRunId", sourceRecoRunId);
+        out.put("sourceRunVersion", sourceRunVersion);
+        String newRef = Objects.toString(created.get("reconciliationRunId"), null);
+        if (newRef != null && !newRef.isBlank() && "COMPLETED".equals(created.get("status"))) {
+            UUID sourceRunUuid = getRunInternalIdByReferenceCode(sourceRecoRunId);
+            UUID newRunUuid = getRunInternalIdByReferenceCode(newRef);
+            UUID tenantUuid = parseOptionalUuid(tenantId);
+            Map<String, Object> lifecycle = syncExceptionsWithMismatchSnapshots(
+                    newRunUuid, newRef, tenantUuid, sourceRunUuid, sourceRecoRunId);
+            out.putAll(lifecycle);
+        }
+        return out;
+    }
+
+    /**
+     * Aligns operational exceptions with mismatch snapshots for a run (plain create or after resync persistence).
+     * Supersedes duplicate open rows for the same key, carries forward ongoing issues, auto-resolves cleared mismatches
+     * (when {@code sourceRunUuid} is set), links globally matching opens on plain create, inserts new opens, and
+     * appends {@code reconciliation.audit_log} rows (plus existing {@code exception_note} where applicable).
+     */
+    private Map<String, Object> syncExceptionsWithMismatchSnapshots(
+            UUID runUuid,
+            String runRefCode,
+            UUID tenantUuid,
+            UUID sourceRunUuid,
+            String sourceRefCode
+    ) {
+        int carried = 0;
+        int autoResolved = 0;
+        int created = 0;
+        int superseded = 0;
+        final boolean isResync = sourceRunUuid != null;
+        final String srcRef = sourceRefCode != null ? sourceRefCode : "";
+
+        List<Map<String, Object>> newSnapshots = jdbc.queryForList("""
+                SELECT
+                    s.reconciliation_run_snapshot_id AS "snapshotId",
+                    s.entity_id AS "entityId",
+                    s.reconciliation_stage_id AS "stageId",
+                    s.expected_amount AS "expectedAmount",
+                    s.actual_amount AS "actualAmount",
+                    s.mismatch_reference_code AS "mismatchRef",
+                    s.entity_reference_code AS "entityRef",
+                    COALESCE(s.attributes_json->>'reconciliationType', '') AS "recoType",
+                    s.severity_id AS "severityId",
+                    s.reason_code AS "reasonCode",
+                    s.reason_text AS "reasonText"
+                FROM reconciliation.reconciliation_run_snapshot s
+                WHERE s.reconciliation_run_id = ?
+                """, runUuid);
+
+        Map<String, Map<String, Object>> keyToNewSnap = new LinkedHashMap<>();
+        Map<String, List<Map<String, Object>>> looseEntityStageToNewSnaps = new LinkedHashMap<>();
+        for (Map<String, Object> snap : newSnapshots) {
+            UUID entityId = toUuid(snap.get("entityId"));
+            UUID stageId = toUuid(snap.get("stageId"));
+            if (entityId == null || stageId == null) {
+                continue;
+            }
+            String key = exceptionMatchKey(entityId, stageId, Objects.toString(snap.get("recoType"), ""));
+            keyToNewSnap.putIfAbsent(key, snap);
+            String loose = entityId + "|" + stageId;
+            looseEntityStageToNewSnaps.computeIfAbsent(loose, k -> new ArrayList<>()).add(snap);
+        }
+
+        List<Map<String, Object>> oldPrimaries = new ArrayList<>();
+        if (isResync) {
+            List<Map<String, Object>> oldActive = jdbc.queryForList("""
+                    SELECT
+                        re.reconciliation_exception_id AS "exceptionPk",
+                        re.exception_reference_code AS "exceptionRef",
+                        re.entity_id AS "entityId",
+                        re.reconciliation_stage_id AS "stageId",
+                        COALESCE(
+                            NULLIF(TRIM(re.reconciliation_type), ''),
+                            NULLIF(TRIM(s.attributes_json->>'reconciliationType'), ''),
+                            ''
+                        ) AS "recoType",
+                        s.expected_amount AS "prevExpected",
+                        s.actual_amount AS "prevActual",
+                        re.created_on AS "createdOn"
+                    FROM reconciliation.reconciliation_exception re
+                    JOIN reconciliation.lu_exception_status es ON es.exception_status_id = re.exception_status_id
+                    LEFT JOIN reconciliation.reconciliation_run_snapshot s ON s.reconciliation_run_snapshot_id = re.reconciliation_run_snapshot_id
+                    WHERE re.reconciliation_run_id = ?
+                      AND es.code IN ('OPEN', 'IN_PROGRESS', 'ESCALATED')
+                    ORDER BY re.created_on ASC
+                    """, sourceRunUuid);
+            Map<String, List<Map<String, Object>>> oldByKey = new LinkedHashMap<>();
+            for (Map<String, Object> ex : oldActive) {
+                UUID eid = toUuid(ex.get("entityId"));
+                UUID sid = toUuid(ex.get("stageId"));
+                if (eid == null || sid == null) {
+                    continue;
+                }
+                String k = exceptionMatchKey(eid, sid, Objects.toString(ex.get("recoType"), ""));
+                oldByKey.computeIfAbsent(k, x -> new ArrayList<>()).add(ex);
+            }
+            for (List<Map<String, Object>> group : oldByKey.values()) {
+                if (group.isEmpty()) {
+                    continue;
+                }
+                if (group.size() == 1) {
+                    oldPrimaries.add(group.get(0));
+                    continue;
+                }
+                group.sort(Comparator.comparing(ReconciliationModuleRepository::createdOnMillis));
+                Map<String, Object> primary = group.get(0);
+                UUID canonPk = toUuid(primary.get("exceptionPk"));
+                String canonRef = Objects.toString(primary.get("exceptionRef"), "");
+                oldPrimaries.add(primary);
+                for (int i = 1; i < group.size(); i++) {
+                    Map<String, Object> dup = group.get(i);
+                    UUID dupPk = toUuid(dup.get("exceptionPk"));
+                    String dupRef = Objects.toString(dup.get("exceptionRef"), "");
+                    if (dupPk == null || dupRef.isBlank() || canonPk == null || canonRef.isBlank()) {
+                        continue;
+                    }
+                    superseded += supersedeDuplicateOpenException(
+                            dupPk,
+                            dupRef,
+                            canonPk,
+                            canonRef,
+                            "Consolidated duplicate open rows on source run " + srcRef + ".",
+                            tenantUuid);
+                }
+            }
+        }
+
+        Set<String> newSnapshotKeysMatched = new LinkedHashSet<>();
+
+        for (Map<String, Object> ex : oldPrimaries) {
+            UUID entityId = toUuid(ex.get("entityId"));
+            UUID stageId = toUuid(ex.get("stageId"));
+            if (entityId == null || stageId == null) {
+                continue;
+            }
+            String key = exceptionMatchKey(entityId, stageId, Objects.toString(ex.get("recoType"), ""));
+            Map<String, Object> newSnap = keyToNewSnap.get(key);
+            if (newSnap == null && Objects.toString(ex.get("recoType"), "").isBlank()) {
+                String loose = entityId + "|" + stageId;
+                List<Map<String, Object>> cands = looseEntityStageToNewSnaps.get(loose);
+                if (cands != null && cands.size() == 1) {
+                    newSnap = cands.get(0);
+                }
+            }
+            UUID exPk = toUuid(ex.get("exceptionPk"));
+            String exRef = Objects.toString(ex.get("exceptionRef"), null);
+            if (exPk == null || exRef == null) {
+                continue;
+            }
+            if (newSnap != null) {
+                UUID newSnapPk = toUuid(newSnap.get("snapshotId"));
+                if (newSnapPk == null) {
+                    continue;
+                }
+                String newRecoType = Objects.toString(newSnap.get("recoType"), "").trim();
+                jdbc.update("""
+                        UPDATE reconciliation.reconciliation_exception
+                        SET latest_reconciliation_run_id = ?,
+                            reconciliation_run_id = ?,
+                            reconciliation_run_snapshot_id = ?,
+                            occurrence_count = COALESCE(occurrence_count, 1) + 1,
+                            last_seen_at = now(),
+                            origin_reconciliation_run_id = COALESCE(origin_reconciliation_run_id, reconciliation_run_id),
+                            reconciliation_type = COALESCE(NULLIF(TRIM(?), ''), reconciliation_type),
+                            modified_on = now()
+                        WHERE reconciliation_exception_id = ?
+                        """,
+                        runUuid,
+                        runUuid,
+                        newSnapPk,
+                        newRecoType.isEmpty() ? "" : newRecoType,
+                        exPk);
+                double prevVar = varianceFromAmounts(ex.get("prevExpected"), ex.get("prevActual"));
+                double newVar = varianceFromAmounts(newSnap.get("expectedAmount"), newSnap.get("actualAmount"));
+                if (!nearlyEqual(prevVar, newVar)) {
+                    String note = "Variance changed (%s): previous delta %.2f → now %.2f."
+                            .formatted(isResync ? ("resync " + srcRef + " → " + runRefCode) : ("run " + runRefCode), prevVar, newVar);
+                    addExceptionNote(exRef, note);
+                    writeLifecycleAuditLog(tenantUuid, "EXCEPTION_VARIANCE_CHANGED", exRef, Map.of(
+                            "previousVariance", prevVar,
+                            "newVariance", newVar,
+                            "runReferenceCode", runRefCode,
+                            "isResync", isResync));
+                }
+                writeLifecycleAuditLog(tenantUuid, "EXCEPTION_CARRIED_FORWARD", exRef, Map.of(
+                        "runReferenceCode", runRefCode,
+                        "isResync", isResync));
+                String matchedKey = exceptionMatchKey(
+                        entityId,
+                        stageId,
+                        Objects.toString(newSnap.get("recoType"), ""));
+                newSnapshotKeysMatched.add(matchedKey);
+                carried++;
+            } else {
+                if (!isResync) {
+                    continue;
+                }
+                String autoMsg = "Auto-resolved: invoice mismatch no longer present after resync (new run " + runRefCode + ").";
+                jdbc.update("""
+                        UPDATE reconciliation.reconciliation_exception
+                        SET exception_status_id = (SELECT exception_status_id FROM reconciliation.lu_exception_status WHERE code = 'AUTO_RESOLVED'),
+                            is_auto_resolved = true,
+                            resolved_at = now(),
+                            latest_reconciliation_run_id = ?,
+                            resolution_note = CASE
+                                WHEN resolution_note IS NULL OR LENGTH(TRIM(resolution_note)) = 0 THEN ?
+                                ELSE resolution_note || E'\n' || ?
+                            END,
+                            modified_on = now()
+                        WHERE reconciliation_exception_id = ?
+                        """,
+                        runUuid,
+                        autoMsg,
+                        autoMsg,
+                        exPk);
+                addExceptionNote(exRef, "System: mismatch cleared after resync (source run " + srcRef + " → " + runRefCode + ").");
+                writeLifecycleAuditLog(tenantUuid, "EXCEPTION_AUTO_RESOLVED", exRef, Map.of(
+                        "sourceRunReferenceCode", srcRef,
+                        "newRunReferenceCode", runRefCode));
+                autoResolved++;
+            }
+        }
+
+        for (Map.Entry<String, Map<String, Object>> e : keyToNewSnap.entrySet()) {
+            if (newSnapshotKeysMatched.contains(e.getKey())) {
+                continue;
+            }
+            Map<String, Object> snap = e.getValue();
+            UUID newSnapPk = toUuid(snap.get("snapshotId"));
+            UUID entityId = toUuid(snap.get("entityId"));
+            UUID stageId = toUuid(snap.get("stageId"));
+            if (newSnapPk == null || entityId == null || stageId == null) {
+                continue;
+            }
+            String snapReco = Objects.toString(snap.get("recoType"), "");
+            List<Map<String, Object>> global = findTenantActiveExceptionsForEntityAndStage(entityId, stageId, tenantUuid);
+            List<Map<String, Object>> matching = global.stream()
+                    .filter(row -> exceptionRowMatchesSnapshotReco(row, entityId, stageId, snapReco))
+                    .collect(Collectors.toList());
+            if (matching.size() > 1) {
+                matching.sort(Comparator.comparing(ReconciliationModuleRepository::createdOnMillis));
+                Map<String, Object> canon = matching.get(0);
+                UUID canonPk = toUuid(canon.get("exceptionPk"));
+                String canonRef = Objects.toString(canon.get("exceptionRef"), "");
+                for (int i = 1; i < matching.size(); i++) {
+                    Map<String, Object> dup = matching.get(i);
+                    UUID dupPk = toUuid(dup.get("exceptionPk"));
+                    String dupRef = Objects.toString(dup.get("exceptionRef"), "");
+                    if (dupPk == null || dupRef.isBlank() || canonPk == null || canonRef.isBlank()) {
+                        continue;
+                    }
+                    superseded += supersedeDuplicateOpenException(
+                            dupPk,
+                            dupRef,
+                            canonPk,
+                            canonRef,
+                            "Consolidated duplicate open rows before attaching to run " + runRefCode + ".",
+                            tenantUuid);
+                }
+            }
+            if (!matching.isEmpty()) {
+                Map<String, Object> primary = matching.get(0);
+                UUID exPk = toUuid(primary.get("exceptionPk"));
+                String exRef = Objects.toString(primary.get("exceptionRef"), null);
+                if (exPk == null || exRef == null) {
+                    continue;
+                }
+                String newRecoType = snapReco.trim();
+                jdbc.update("""
+                        UPDATE reconciliation.reconciliation_exception
+                        SET latest_reconciliation_run_id = ?,
+                            reconciliation_run_id = ?,
+                            reconciliation_run_snapshot_id = ?,
+                            occurrence_count = COALESCE(occurrence_count, 1) + 1,
+                            last_seen_at = now(),
+                            origin_reconciliation_run_id = COALESCE(origin_reconciliation_run_id, reconciliation_run_id),
+                            reconciliation_type = COALESCE(NULLIF(TRIM(?), ''), reconciliation_type),
+                            modified_on = now()
+                        WHERE reconciliation_exception_id = ?
+                        """,
+                        runUuid,
+                        runUuid,
+                        newSnapPk,
+                        newRecoType.isEmpty() ? "" : newRecoType,
+                        exPk);
+                double prevVar = varianceFromAmounts(primary.get("prevExpected"), primary.get("prevActual"));
+                double newVar = varianceFromAmounts(snap.get("expectedAmount"), snap.get("actualAmount"));
+                if (!nearlyEqual(prevVar, newVar)) {
+                    String note = "Variance changed (%s): previous delta %.2f → now %.2f."
+                            .formatted(isResync ? ("resync " + srcRef + " → " + runRefCode) : ("run " + runRefCode), prevVar, newVar);
+                    addExceptionNote(exRef, note);
+                    writeLifecycleAuditLog(tenantUuid, "EXCEPTION_VARIANCE_CHANGED", exRef, Map.of(
+                            "previousVariance", prevVar,
+                            "newVariance", newVar,
+                            "runReferenceCode", runRefCode,
+                            "isResync", isResync));
+                }
+                writeLifecycleAuditLog(tenantUuid, "EXCEPTION_CARRIED_FORWARD", exRef, Map.of(
+                        "runReferenceCode", runRefCode,
+                        "isResync", isResync));
+                newSnapshotKeysMatched.add(e.getKey());
+                carried++;
+                continue;
+            }
+            String exceptionCode = "EX-" + Math.abs(UUID.randomUUID().hashCode());
+            String entityRef = snap.get("entityRef") != null ? String.valueOf(snap.get("entityRef")) : String.valueOf(entityId);
+            String desc = Objects.toString(snap.get("reasonText"), "Invoice amount vs captured transaction");
+            String recoType = snapReco.trim();
+            jdbc.update("""
+                            INSERT INTO reconciliation.reconciliation_exception (
+                                exception_reference_code,
+                                reconciliation_run_id,
+                                reconciliation_run_snapshot_id,
+                                mismatch_reference_code,
+                                entity_type, entity_id, entity_reference_code, title, description,
+                                reconciliation_stage_id, severity_id, exception_status_id, tags_json, tenant_id,
+                                origin_reconciliation_run_id, latest_reconciliation_run_id,
+                                first_detected_at, last_seen_at, occurrence_count,
+                                reconciliation_type, created_on, modified_on
+                            ) VALUES (
+                                ?, ?, ?, ?,
+                                'INVOICE', ?::uuid, ?, 'Invoice reconciliation mismatch', ?,
+                                ?, ?, (SELECT exception_status_id FROM reconciliation.lu_exception_status WHERE code = 'OPEN'),
+                                '[]'::jsonb, ?,
+                                ?, ?, now(), now(), 1, NULLIF(TRIM(?), ''), now(), now()
+                            )
+                            """,
+                    exceptionCode,
+                    runUuid,
+                    newSnapPk,
+                    snap.get("mismatchRef"),
+                    entityId,
+                    entityRef,
+                    desc,
+                    stageId,
+                    snap.get("severityId"),
+                    tenantUuid,
+                    runUuid,
+                    runUuid,
+                    recoType.isEmpty() ? null : recoType);
+            String openNote = isResync
+                    ? ("Opened from resync run " + runRefCode + " (new mismatch vs prior run " + srcRef + ").")
+                    : ("Opened from reconciliation run " + runRefCode + ".");
+            addExceptionNote(exceptionCode, openNote);
+            writeLifecycleAuditLog(tenantUuid, "EXCEPTION_OPENED_FROM_RUN", exceptionCode, Map.of(
+                    "runReferenceCode", runRefCode,
+                    "isResync", isResync));
+            created++;
+        }
+
+        return Map.of(
+                "exceptionLifecycleCarriedForward", carried,
+                "exceptionLifecycleAutoResolved", autoResolved,
+                "exceptionLifecycleCreated", created,
+                "exceptionLifecycleSuperseded", superseded
+        );
+    }
+
+    private void writeLifecycleAuditLog(UUID tenantUuid, String actionCode, String exceptionReferenceCode, Map<String, Object> details) {
+        try {
+            jdbc.update("""
+                    INSERT INTO reconciliation.audit_log (tenant_id, action_code, entity_type, entity_reference_code, details_json)
+                    VALUES (?, ?, 'RECONCILIATION_EXCEPTION', ?, ?::jsonb)
+                    """,
+                    tenantUuid,
+                    actionCode,
+                    exceptionReferenceCode,
+                    objectMapper.writeValueAsString(details == null ? Map.of() : details));
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Failed to serialize lifecycle audit details", e);
+        }
+    }
+
+    private int supersedeDuplicateOpenException(
+            UUID duplicatePk,
+            String duplicateRef,
+            UUID canonicalPk,
+            String canonicalRef,
+            String suffix,
+            UUID tenantUuid
+    ) {
+        String note = "Superseded: consolidated to " + canonicalRef + ". " + suffix;
+        jdbc.update("""
+                UPDATE reconciliation.reconciliation_exception
+                SET exception_status_id = (SELECT exception_status_id FROM reconciliation.lu_exception_status WHERE code = 'SUPERSEDED'),
+                    superseded_by_exception_id = ?,
+                    resolved_at = now(),
+                    resolution_note = CASE
+                        WHEN resolution_note IS NULL OR LENGTH(TRIM(resolution_note)) = 0 THEN ?
+                        ELSE resolution_note || E'\n' || ?
+                    END,
+                    modified_on = now()
+                WHERE reconciliation_exception_id = ?
+                """,
+                canonicalPk,
+                note,
+                note,
+                duplicatePk);
+        addExceptionNote(duplicateRef, note);
+        writeLifecycleAuditLog(tenantUuid, "EXCEPTION_SUPERSEDED", duplicateRef, Map.of(
+                "canonicalExceptionReference", canonicalRef,
+                "canonicalExceptionId", canonicalPk.toString()));
+        return 1;
+    }
+
+    private static long createdOnMillis(Map<String, Object> row) {
+        Object c = row.get("createdOn");
+        if (c instanceof Timestamp t) {
+            return t.getTime();
+        }
+        if (c instanceof java.util.Date d) {
+            return d.getTime();
+        }
+        return 0L;
+    }
+
+    private List<Map<String, Object>> findTenantActiveExceptionsForEntityAndStage(UUID entityId, UUID stageId, UUID tenantUuid) {
+        return jdbc.queryForList("""
+                SELECT
+                    re.reconciliation_exception_id AS "exceptionPk",
+                    re.exception_reference_code AS "exceptionRef",
+                    re.entity_id AS "entityId",
+                    re.reconciliation_stage_id AS "stageId",
+                    COALESCE(
+                        NULLIF(TRIM(re.reconciliation_type), ''),
+                        NULLIF(TRIM(s.attributes_json->>'reconciliationType'), ''),
+                        ''
+                    ) AS "recoType",
+                    re.created_on AS "createdOn",
+                    s.expected_amount AS "prevExpected",
+                    s.actual_amount AS "prevActual"
+                FROM reconciliation.reconciliation_exception re
+                JOIN reconciliation.lu_exception_status es ON es.exception_status_id = re.exception_status_id
+                LEFT JOIN reconciliation.reconciliation_run_snapshot s ON s.reconciliation_run_snapshot_id = re.reconciliation_run_snapshot_id
+                WHERE re.entity_id = ?
+                  AND re.reconciliation_stage_id = ?
+                  AND es.code IN ('OPEN', 'IN_PROGRESS', 'ESCALATED')
+                  AND (re.tenant_id IS NOT DISTINCT FROM ?)
+                ORDER BY re.created_on ASC
+                """, entityId, stageId, tenantUuid);
+    }
+
+    private static boolean exceptionRowMatchesSnapshotReco(Map<String, Object> exRow, UUID entityId, UUID stageId, String snapReco) {
+        String sr = snapReco == null ? "" : snapReco.trim();
+        String er = Objects.toString(exRow.get("recoType"), "").trim();
+        if (!er.isEmpty() && !sr.isEmpty()) {
+            return exceptionMatchKey(entityId, stageId, er).equals(exceptionMatchKey(entityId, stageId, sr));
+        }
+        if (er.isEmpty()) {
+            return true;
+        }
+        return exceptionMatchKey(entityId, stageId, er).equals(exceptionMatchKey(entityId, stageId, sr));
+    }
+
+    private static String exceptionMatchKey(UUID entityId, UUID stageId, String recoType) {
+        return entityId + "|" + stageId + "|" + (recoType == null ? "" : recoType.trim());
+    }
+
+    private static double varianceFromAmounts(Object expected, Object actual) {
+        return num(expected) - num(actual);
     }
 
     @SuppressWarnings("unchecked")
@@ -591,6 +1134,23 @@ public class ReconciliationModuleRepository {
             EXISTS (
                 SELECT 1 FROM client_subscription_billing.subscription_billing_schedule sbs
                 WHERE sbs.invoice_id = i.invoice_id
+            )""";
+
+    /**
+     * CASH + SUBSCRIPTION reconciliation scope: only invoices whose {@code transactions.lu_invoice_status.status_name}
+     * is one of the collectible / issued lifecycle states (excludes e.g. {@code PENDING} drafts and {@code VOID}).
+     */
+    private static final String SQL_INVOICE_STATUS_IN_RECONCILIATION_SCOPE = """
+            EXISTS (
+                SELECT 1 FROM transactions.lu_invoice_status inv_scope
+                WHERE inv_scope.invoice_status_id = i.invoice_status_id
+                  AND UPPER(TRIM(COALESCE(inv_scope.status_name, ''))) IN (
+                      'ISSUED',
+                      'PARTIALLY_PAID',
+                      'PARTIALLY PAID',
+                      'PAID',
+                      'DUE'
+                  )
             )""";
 
     /**
@@ -651,7 +1211,8 @@ public class ReconciliationModuleRepository {
                 "dashboardLayoutSpecVersion", "1.0",
                 "varianceDriverLimit", driverLimit,
                 "includeVarianceChart", includeChart,
-                "subscriptionCashClassification", "SUBSCRIPTION = invoice_id in client_subscription_billing.subscription_billing_schedule; else CASH"
+                "subscriptionCashClassification", "SUBSCRIPTION = invoice_id in client_subscription_billing.subscription_billing_schedule; else CASH",
+                "invoiceStatusScope", List.of("ISSUED", "PARTIALLY_PAID", "PAID", "DUE")
         ));
         return summary;
     }
@@ -1101,11 +1662,15 @@ public class ReconciliationModuleRepository {
                     rr.modified_on AS "updatedAt",
                     COALESCE((rr.filters_json->>'runVersion')::int, 1) AS "version",
                     rr.filters_json->>'failureStage' AS "failureStage",
-                    rr.filters_json->>'failureMessage' AS "failureMessage"
+                    rr.filters_json->>'failureMessage' AS "failureMessage",
+                    CAST(rr.reco_config_publish_id AS text) AS "recoConfigPublishId",
+                    cp.version_label AS "recoConfigVersionLabel",
+                    cp.published_at AS "recoConfigPublishedAt"
                 FROM reconciliation.reconciliation_run rr
                 JOIN reconciliation.lu_reconciliation_run_status st ON st.reconciliation_run_status_id = rr.reconciliation_run_status_id
                 JOIN reconciliation.lu_reconciliation_trigger_mode tm ON tm.reconciliation_trigger_mode_id = rr.reconciliation_trigger_mode_id
                 LEFT JOIN reconciliation.financial_period fp ON fp.financial_period_id = rr.financial_period_id
+                LEFT JOIN reconciliation.reco_config_publish cp ON cp.reco_config_publish_id = rr.reco_config_publish_id
                 WHERE rr.run_reference_code = ?
                 """, runId);
         if (rows.isEmpty()) {
@@ -1198,11 +1763,17 @@ public class ReconciliationModuleRepository {
             args.add(financialPeriod.trim());
             args.add(financialPeriod.trim());
         }
-        if (fromDate != null && !fromDate.isBlank()) {
+        /*
+         * When financialPeriod is set, do not also constrain rr.created_on by fromDate/toDate: the UI passes the
+         * accounting month's calendar bounds while runs may be created earlier/later but still belong to that period
+         * via financial_period_id / filters_json. Without financialPeriod, fromDate/toDate mean "runs created in range".
+         */
+        boolean scopeByCreatedOnOnly = financialPeriod == null || financialPeriod.isBlank();
+        if (scopeByCreatedOnOnly && fromDate != null && !fromDate.isBlank()) {
             where.append(" AND rr.created_on::date >= ?::date ");
             args.add(fromDate.trim());
         }
-        if (toDate != null && !toDate.isBlank()) {
+        if (scopeByCreatedOnOnly && toDate != null && !toDate.isBlank()) {
             where.append(" AND rr.created_on::date <= ?::date ");
             args.add(toDate.trim());
         }
@@ -1246,12 +1817,49 @@ public class ReconciliationModuleRepository {
     }
 
     private void enrichRunCatalogFields(Map<String, Object> filterMap) {
-        filterMap.putIfAbsent("runVersion", 1);
         Object cur = filterMap.get("currency");
         if (cur instanceof String s && !s.isBlank()) {
             filterMap.put("currency", s.trim().toUpperCase());
         }
         inferFinancialPeriodFromDateFilters(filterMap);
+    }
+
+    /**
+     * Next {@code filters_json.runVersion} for a new run: strictly greater than any existing run for the same
+     * {@code tenant_id} + {@code financial_period_id} and strictly greater than {@code priorRunVersionForSequence}
+     * when provided (resync parent).
+     */
+    private int computeNextRunVersion(UUID tenantUuid, UUID financialPeriodId, Integer priorRunVersionForSequence) {
+        Integer maxExisting = jdbc.queryForObject("""
+                SELECT COALESCE(MAX(
+                    CASE
+                        WHEN rr.filters_json ? 'runVersion'
+                             AND (rr.filters_json->>'runVersion') ~ '^[0-9]+$'
+                        THEN (rr.filters_json->>'runVersion')::int
+                    END
+                ), 0)
+                FROM reconciliation.reconciliation_run rr
+                WHERE (rr.tenant_id IS NOT DISTINCT FROM ?)
+                  AND (rr.financial_period_id IS NOT DISTINCT FROM ?)
+                """, Integer.class, tenantUuid, financialPeriodId);
+        int max = maxExisting == null ? 0 : maxExisting;
+        int prior = priorRunVersionForSequence == null ? 0 : Math.max(0, priorRunVersionForSequence);
+        return Math.max(max, prior) + 1;
+    }
+
+    private static int parseStoredRunVersion(Map<String, Object> filterMap) {
+        Object v = filterMap.get("runVersion");
+        if (v instanceof Number n) {
+            return Math.max(1, n.intValue());
+        }
+        if (v == null) {
+            return 1;
+        }
+        try {
+            return Math.max(1, Integer.parseInt(String.valueOf(v).trim()));
+        } catch (NumberFormatException e) {
+            return 1;
+        }
     }
 
     /**
@@ -1457,7 +2065,16 @@ public class ReconciliationModuleRepository {
                     es.code AS "status",
                     CAST(re.assignee_user_id AS text) AS "assigneeId",
                     re.created_on AS "createdAt",
-                    re.modified_on AS "updatedAt"
+                    re.modified_on AS "updatedAt",
+                    (SELECT rr_o.run_reference_code FROM reconciliation.reconciliation_run rr_o
+                     WHERE rr_o.reconciliation_run_id = re.origin_reconciliation_run_id) AS "originRunId",
+                    (SELECT rr_l.run_reference_code FROM reconciliation.reconciliation_run rr_l
+                     WHERE rr_l.reconciliation_run_id = re.latest_reconciliation_run_id) AS "latestRunId",
+                    re.occurrence_count AS "occurrenceCount",
+                    re.is_auto_resolved AS "isAutoResolved",
+                    re.reconciliation_type AS "reconciliationType",
+                    re.first_detected_at AS "firstDetectedAt",
+                    re.last_seen_at AS "lastSeenAt"
                 FROM reconciliation.reconciliation_exception re
                 JOIN reconciliation.lu_severity sev ON sev.severity_id = re.severity_id
                 JOIN reconciliation.lu_reconciliation_stage stg ON stg.reconciliation_stage_id = re.reconciliation_stage_id
@@ -1467,8 +2084,14 @@ public class ReconciliationModuleRepository {
         String recoRunId = asString(filters.get("recoRunId"));
         if (recoRunId != null && !recoRunId.isBlank()) {
             sql.append("""
-                     AND re.reconciliation_run_id = (
-                        SELECT reconciliation_run_id FROM reconciliation.reconciliation_run WHERE run_reference_code = ?
+                     AND EXISTS (
+                        SELECT 1 FROM reconciliation.reconciliation_run rr2
+                        WHERE rr2.run_reference_code = ?
+                          AND (
+                              re.reconciliation_run_id = rr2.reconciliation_run_id
+                              OR re.origin_reconciliation_run_id = rr2.reconciliation_run_id
+                              OR re.latest_reconciliation_run_id = rr2.reconciliation_run_id
+                          )
                     )
                     """);
             args.add(recoRunId);
@@ -1506,15 +2129,17 @@ public class ReconciliationModuleRepository {
     }
 
     public void updateExceptionStatus(String exceptionId, String status, String reason) {
+        String st = status.toUpperCase();
         jdbc.update("""
                 UPDATE reconciliation.reconciliation_exception
                 SET exception_status_id = (SELECT exception_status_id FROM reconciliation.lu_exception_status WHERE code=?),
                     resolution_note = ?,
-                    resolved_at = CASE WHEN ? IN ('RESOLVED','CLOSED') THEN now() ELSE resolved_at END,
+                    resolved_at = CASE WHEN ? IN ('RESOLVED','CLOSED','AUTO_RESOLVED','SUPERSEDED') THEN now() ELSE resolved_at END,
                     closed_at = CASE WHEN ? = 'CLOSED' THEN now() ELSE closed_at END,
+                    is_auto_resolved = CASE WHEN ? = 'AUTO_RESOLVED' THEN true ELSE is_auto_resolved END,
                     modified_on = now()
                 WHERE exception_reference_code = ?
-                """, status.toUpperCase(), reason, status.toUpperCase(), status.toUpperCase(), exceptionId);
+                """, st, reason, st, st, st, exceptionId);
     }
 
     public int bulkExceptionAction(ReconciliationRequests.BulkActionRequest request) {
@@ -1784,20 +2409,35 @@ public class ReconciliationModuleRepository {
         return rows.isEmpty() ? Map.of("exportId", exportId, "status", "NOT_FOUND") : rows.get(0);
     }
 
-    public List<Map<String, Object>> listAudit() {
-        return jdbc.queryForList("""
+    public List<Map<String, Object>> listAudit(String entityType, String entityId, Integer limit) {
+        int lim = limit == null || limit < 1 ? 500 : Math.min(limit, 2000);
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("""
                 SELECT
                     CAST(audit_log_id AS text) AS "auditId",
                     entity_type AS "entityType",
-                    COALESCE(entity_reference_code, CAST(entity_id AS text)) AS "entityId",
+                    CAST(entity_id AS text) AS "entityId",
+                    COALESCE(entity_reference_code, CAST(entity_id AS text)) AS "entityRef",
                     action_code AS "action",
                     CAST(actor_user_id AS text) AS "actor",
                     details_json AS "details",
+                    event_at AS "eventAt",
                     created_on AS "createdAt"
                 FROM reconciliation.audit_log
-                ORDER BY event_at DESC
-                LIMIT 500
+                WHERE 1=1
                 """);
+        if (entityType != null && !entityType.isBlank()) {
+            sql.append(" AND entity_type = ? ");
+            args.add(entityType.trim());
+        }
+        if (entityId != null && !entityId.isBlank()) {
+            sql.append(" AND (entity_reference_code = ? OR CAST(entity_id AS text) = ?) ");
+            args.add(entityId.trim());
+            args.add(entityId.trim());
+        }
+        sql.append(" ORDER BY event_at DESC LIMIT ? ");
+        args.add(lim);
+        return jdbc.queryForList(sql.toString(), args.toArray());
     }
 
     public Object getConfig(String type) {
@@ -2597,6 +3237,7 @@ public class ReconciliationModuleRepository {
             sb.append(") ");
             args.addAll(gatewayIds);
         }
+        sb.append(" AND ").append(SQL_INVOICE_STATUS_IN_RECONCILIATION_SCOPE);
         return sb.toString();
     }
 

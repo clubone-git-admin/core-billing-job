@@ -1,6 +1,7 @@
 package io.clubone.billing.service;
 
 import io.clubone.billing.api.dto.reconciliation.ReconciliationRequests;
+import io.clubone.billing.repo.ReconciliationEnterpriseConfigRepository;
 import io.clubone.billing.repo.ReconciliationModuleRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,10 +21,16 @@ import java.util.function.Supplier;
 public class ReconciliationModuleService {
 
     private final ReconciliationModuleRepository repository;
+    private final ReconciliationEnterpriseConfigRepository enterpriseConfigRepository;
     private final ObjectMapper objectMapper;
 
-    public ReconciliationModuleService(ReconciliationModuleRepository repository, ObjectMapper objectMapper) {
+    public ReconciliationModuleService(
+            ReconciliationModuleRepository repository,
+            ReconciliationEnterpriseConfigRepository enterpriseConfigRepository,
+            ObjectMapper objectMapper
+    ) {
         this.repository = repository;
+        this.enterpriseConfigRepository = enterpriseConfigRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -125,6 +132,13 @@ public class ReconciliationModuleService {
         payload.put("requestedBy", requestedBy);
         payload.put("filters", filters != null ? filters : Map.of());
         return executeIdempotent(tenantId, idempotencyKey, "POST", "/reconciliation/v1/runs", payload, () -> createReconciliationRun(runType, triggerMode, requestedBy, tenantId, filters));
+    }
+
+    @Transactional
+    public Map<String, Object> idempotentResyncRun(String tenantId, String idempotencyKey, String reconciliationRunId, String requestedBy) {
+        Map<String, Object> payload = Map.of("reconciliationRunId", reconciliationRunId);
+        String path = "/reconciliation/v1/runs/" + reconciliationRunId + "/resync";
+        return executeIdempotent(tenantId, idempotencyKey, "POST", path, payload, () -> repository.resyncReconciliationRun(reconciliationRunId, requestedBy, tenantId));
     }
 
     @Transactional
@@ -251,8 +265,8 @@ public class ReconciliationModuleService {
         return repository.reportExportStatus(exportId);
     }
 
-    public Map<String, Object> listAudit() {
-        return Map.of("items", repository.listAudit());
+    public Map<String, Object> listAudit(String entityType, String entityId, Integer limit) {
+        return Map.of("items", repository.listAudit(entityType, entityId, limit));
     }
 
     public Map<String, Object> auditExport() {
@@ -267,6 +281,155 @@ public class ReconciliationModuleService {
     public Map<String, Object> updateConfig(String type, ReconciliationRequests.ConfigUpdateRequest request) {
         repository.updateConfig(type, request.config());
         return Map.of("configType", type, "updated", true);
+    }
+
+    public Map<String, Object> getEnterpriseConfigLookups() {
+        return enterpriseConfigRepository.getEnterpriseConfigLookups();
+    }
+
+    public Map<String, Object> listEnterpriseMatchingRules(
+            String tenantId,
+            String recoDomain,
+            String stage,
+            Boolean activeOnly,
+            String search,
+            String locationId,
+            int page,
+            int pageSize
+    ) {
+        return enterpriseConfigRepository.listEnterpriseMatchingRules(tenantId, recoDomain, stage, activeOnly, search, locationId, page, pageSize);
+    }
+
+    public Map<String, Object> getEnterpriseMatchingRuleDetail(String matchingRuleId) {
+        return enterpriseConfigRepository.getEnterpriseMatchingRuleDetail(matchingRuleId);
+    }
+
+    public Map<String, Object> listEnterpriseGlMappingRules(
+            String tenantId, Boolean activeOnly, String search, String locationId, int page, int pageSize
+    ) {
+        return enterpriseConfigRepository.listEnterpriseGlMappingRules(tenantId, activeOnly, search, locationId, page, pageSize);
+    }
+
+    public Map<String, Object> listEnterpriseSchedules(
+            String tenantId, Boolean activeOnly, String search, String locationId, int page, int pageSize
+    ) {
+        return enterpriseConfigRepository.listEnterpriseSchedules(tenantId, activeOnly, search, locationId, page, pageSize);
+    }
+
+    public Map<String, Object> listEnterpriseConfigPublishes(String tenantId, int page, int pageSize) {
+        return enterpriseConfigRepository.listEnterpriseConfigPublishes(tenantId, page, pageSize);
+    }
+
+    @Transactional
+    public Map<String, Object> publishEnterpriseConfig(String tenantId, ReconciliationRequests.PublishRecoConfigRequest request) {
+        return enterpriseConfigRepository.publishEnterpriseConfig(
+                tenantId,
+                request.versionLabel(),
+                request.snapshot(),
+                request.publishedBy(),
+                request.notes()
+        );
+    }
+
+    @Transactional
+    public Map<String, Object> publishEnterpriseConfigIdempotent(
+            String tenantId,
+            String idempotencyKey,
+            ReconciliationRequests.PublishRecoConfigRequest request
+    ) {
+        return executeIdempotent(
+                tenantId,
+                idempotencyKey,
+                "POST",
+                "/reconciliation/v1/config/enterprise/publishes",
+                request,
+                () -> publishEnterpriseConfig(tenantId, request)
+        );
+    }
+
+    @Transactional
+    public Map<String, Object> attachRunConfigPublish(String reconciliationRunId, ReconciliationRequests.AttachRunConfigPublishRequest request) {
+        return enterpriseConfigRepository.attachConfigPublishToRun(reconciliationRunId, request.recoConfigPublishId());
+    }
+
+    @Transactional
+    public Map<String, Object> createEnterpriseMatchingRule(String tenantId, ReconciliationRequests.EnterpriseMatchingRuleWriteRequest request, String actorUserId) {
+        return enterpriseConfigRepository.createEnterpriseMatchingRule(tenantId, request, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> updateEnterpriseMatchingRule(String tenantId, String matchingRuleId, ReconciliationRequests.EnterpriseMatchingRuleWriteRequest request, String actorUserId) {
+        return enterpriseConfigRepository.updateEnterpriseMatchingRule(tenantId, matchingRuleId, request, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> patchMatchingRuleActive(String tenantId, String matchingRuleId, ReconciliationRequests.MatchingRuleActivePatchRequest request) {
+        return enterpriseConfigRepository.patchMatchingRuleActive(tenantId, matchingRuleId, request.active());
+    }
+
+    @Transactional
+    public Map<String, Object> deleteEnterpriseMatchingRule(String tenantId, String matchingRuleId) {
+        return enterpriseConfigRepository.softDeleteMatchingRule(tenantId, matchingRuleId);
+    }
+
+    @Transactional
+    public Map<String, Object> upsertGlMappingRule(String tenantId, ReconciliationRequests.EnterpriseConfigRowRequest body, String idOrNull, String actorUserId) {
+        return enterpriseConfigRepository.upsertGlMappingRule(tenantId, body.row(), idOrNull, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> patchGlMappingActive(String tenantId, String id, ReconciliationRequests.MatchingRuleActivePatchRequest request) {
+        return enterpriseConfigRepository.patchGlMappingActive(tenantId, id, request.active());
+    }
+
+    @Transactional
+    public Map<String, Object> deleteGlMappingRule(String tenantId, String id) {
+        return enterpriseConfigRepository.softDeleteGlMappingRule(tenantId, id);
+    }
+
+    @Transactional
+    public Map<String, Object> upsertSchedule(String tenantId, ReconciliationRequests.EnterpriseConfigRowRequest body, String idOrNull, String actorUserId) {
+        return enterpriseConfigRepository.upsertSchedule(tenantId, body.row(), idOrNull, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> patchScheduleActive(String tenantId, String id, ReconciliationRequests.MatchingRuleActivePatchRequest request) {
+        return enterpriseConfigRepository.patchScheduleActive(tenantId, id, request.active());
+    }
+
+    @Transactional
+    public Map<String, Object> deleteSchedule(String tenantId, String id) {
+        return enterpriseConfigRepository.softDeleteSchedule(tenantId, id);
+    }
+
+    public Map<String, Object> getEnterpriseThresholdsBundle(String tenantId) {
+        return enterpriseConfigRepository.getEnterpriseThresholdsBundle(tenantId);
+    }
+
+    public Map<String, Object> getEnterpriseConfigDraftSummary(String tenantId) {
+        return enterpriseConfigRepository.getEnterpriseConfigDraftSummary(tenantId);
+    }
+
+    public Map<String, Object> compareEnterprisePublishes(String aId, String bId) {
+        return enterpriseConfigRepository.compareEnterprisePublishes(aId, bId);
+    }
+
+    @Transactional
+    public Map<String, Object> rollbackEnterprisePublish(String tenantId, String fromPublishId) {
+        return enterpriseConfigRepository.rollbackEnterprisePublish(tenantId, fromPublishId);
+    }
+
+    public Map<String, Object> testMatchingRulePreview(String matchingRuleId, ReconciliationRequests.MatchingRuleTestRequest request) {
+        Map<String, Object> sample = (request == null || request.samplePayload() == null) ? Map.of() : request.samplePayload();
+        return enterpriseConfigRepository.testMatchingRulePreview(matchingRuleId, sample);
+    }
+
+    public Map<String, Object> listEnterpriseRoles(String tenantId) {
+        return Map.of("items", enterpriseConfigRepository.listEnterpriseRoles(tenantId));
+    }
+
+    public Map<String, Object> listEnterpriseNotificationRules(String tenantId) {
+        return Map.of("items", enterpriseConfigRepository.listEnterpriseNotificationRules(tenantId));
     }
 
     private Map<String, Object> executeIdempotent(
@@ -319,6 +482,7 @@ public class ReconciliationModuleService {
         if (response.containsKey("exceptionId")) return String.valueOf(response.get("exceptionId"));
         if (response.containsKey("jobId")) return String.valueOf(response.get("jobId"));
         if (response.containsKey("exportId")) return String.valueOf(response.get("exportId"));
+        if (response.containsKey("recoConfigPublishId")) return String.valueOf(response.get("recoConfigPublishId"));
         return null;
     }
 }
