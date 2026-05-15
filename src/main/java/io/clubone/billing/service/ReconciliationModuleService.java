@@ -2,6 +2,10 @@ package io.clubone.billing.service;
 
 import io.clubone.billing.api.dto.reconciliation.ReconciliationRequests;
 import io.clubone.billing.repo.ReconciliationEnterpriseConfigRepository;
+import io.clubone.billing.repo.ReconciliationEnterpriseAccessControlRepository;
+import io.clubone.billing.repo.ReconciliationEnterprisePublishRepository;
+import io.clubone.billing.repo.ReconciliationEnterpriseNotificationRepository;
+import io.clubone.billing.repo.ReconciliationEnterpriseScheduleRepository;
 import io.clubone.billing.repo.ReconciliationModuleRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,15 +26,27 @@ public class ReconciliationModuleService {
 
     private final ReconciliationModuleRepository repository;
     private final ReconciliationEnterpriseConfigRepository enterpriseConfigRepository;
+    private final ReconciliationEnterpriseScheduleRepository scheduleRepository;
+    private final ReconciliationEnterpriseNotificationRepository notificationRepository;
+    private final ReconciliationEnterpriseAccessControlRepository accessControlRepository;
+    private final ReconciliationEnterprisePublishRepository publishRepository;
     private final ObjectMapper objectMapper;
 
     public ReconciliationModuleService(
             ReconciliationModuleRepository repository,
             ReconciliationEnterpriseConfigRepository enterpriseConfigRepository,
+            ReconciliationEnterpriseScheduleRepository scheduleRepository,
+            ReconciliationEnterpriseNotificationRepository notificationRepository,
+            ReconciliationEnterpriseAccessControlRepository accessControlRepository,
+            ReconciliationEnterprisePublishRepository publishRepository,
             ObjectMapper objectMapper
     ) {
         this.repository = repository;
         this.enterpriseConfigRepository = enterpriseConfigRepository;
+        this.scheduleRepository = scheduleRepository;
+        this.notificationRepository = notificationRepository;
+        this.accessControlRepository = accessControlRepository;
+        this.publishRepository = publishRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -186,7 +202,7 @@ public class ReconciliationModuleService {
 
     @Transactional
     public Map<String, Object> addExceptionNote(String exceptionId, ReconciliationRequests.AddNoteRequest request) {
-        repository.addExceptionNote(exceptionId, request.note());
+        repository.addExceptionNote(exceptionId, request.note(), request.noteTypeCode());
         return Map.of("exceptionId", exceptionId, "noteAdded", true);
     }
 
@@ -265,8 +281,8 @@ public class ReconciliationModuleService {
         return repository.reportExportStatus(exportId);
     }
 
-    public Map<String, Object> listAudit(String entityType, String entityId, Integer limit) {
-        return Map.of("items", repository.listAudit(entityType, entityId, limit));
+    public Map<String, Object> listAudit(String entityType, String entityId, Integer limit, Integer page, Integer pageSize) {
+        return Map.of("items", repository.listAudit(entityType, entityId, limit, page, pageSize));
     }
 
     public Map<String, Object> auditExport() {
@@ -283,8 +299,16 @@ public class ReconciliationModuleService {
         return Map.of("configType", type, "updated", true);
     }
 
-    public Map<String, Object> getEnterpriseConfigLookups() {
-        return enterpriseConfigRepository.getEnterpriseConfigLookups();
+    public Map<String, Object> getEnterpriseConfigLookups(String tenantId) {
+        Map<String, Object> lookups = new HashMap<>(enterpriseConfigRepository.getEnterpriseConfigLookups(tenantId));
+        List<Map<String, Object>> perms = accessControlRepository.listRecoPermissionsForLookups(parseOptionalUuidForService(tenantId));
+        lookups.put("recoPermissions", perms);
+        lookups.put("accessPermissions", perms);
+        return lookups;
+    }
+
+    public Map<String, Object> getGlMappingRuleLookupsBundle(String tenantId) {
+        return enterpriseConfigRepository.getGlMappingRuleLookupsBundle(tenantId);
     }
 
     public Map<String, Object> listEnterpriseMatchingRules(
@@ -305,15 +329,172 @@ public class ReconciliationModuleService {
     }
 
     public Map<String, Object> listEnterpriseGlMappingRules(
-            String tenantId, Boolean activeOnly, String search, String locationId, int page, int pageSize
+            String tenantId,
+            Boolean activeOnly,
+            String search,
+            String locationId,
+            String sourceType,
+            String transactionType,
+            String lineOfBusiness,
+            String journalType,
+            String itemCategory,
+            String paymentMethodCode,
+            String currencyCode,
+            String status,
+            String effectiveFrom,
+            String effectiveTo,
+            String refundType,
+            int page,
+            int pageSize
     ) {
-        return enterpriseConfigRepository.listEnterpriseGlMappingRules(tenantId, activeOnly, search, locationId, page, pageSize);
+        return enterpriseConfigRepository.listEnterpriseGlMappingRules(
+                tenantId, activeOnly, search, locationId,
+                sourceType, transactionType, lineOfBusiness, journalType, itemCategory,
+                paymentMethodCode, currencyCode, status, effectiveFrom, effectiveTo, refundType,
+                page, pageSize);
+    }
+
+    public Map<String, Object> getEnterpriseGlMappingRuleDetail(String tenantId, String glMappingRuleId) {
+        return enterpriseConfigRepository.getEnterpriseGlMappingRuleDetail(tenantId, glMappingRuleId);
+    }
+
+    @Transactional
+    public Map<String, Object> cloneGlMappingRule(String tenantId, String glMappingRuleId, String actorUserId) {
+        return enterpriseConfigRepository.cloneGlMappingRule(tenantId, glMappingRuleId, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> deactivateGlMappingRule(String tenantId, String glMappingRuleId, String actorUserId) {
+        return enterpriseConfigRepository.deactivateGlMappingRule(tenantId, glMappingRuleId, actorUserId);
+    }
+
+    public Map<String, Object> glMappingRuleUsage(String glMappingRuleId, Integer limit) {
+        int lim = limit == null ? 50 : limit;
+        return Map.of("items", enterpriseConfigRepository.glMappingRuleUsage(glMappingRuleId, lim));
+    }
+
+    public Map<String, Object> exportGlMappingRules(String tenantId) {
+        return Map.of("items", enterpriseConfigRepository.exportGlMappingRules(tenantId));
+    }
+
+    @Transactional
+    public Map<String, Object> importGlMappingRules(String tenantId, ReconciliationRequests.GlMappingImportRequest request, String actorUserId) {
+        return enterpriseConfigRepository.importGlMappingRules(tenantId, request.items(), actorUserId);
+    }
+
+    public Map<String, Object> previewGlMappingJournal(String tenantId, ReconciliationRequests.GlMappingJournalTestRequest request) {
+        Map<String, Object> sample = request == null || request.sample() == null ? Map.of() : request.sample();
+        return enterpriseConfigRepository.previewGlMappingJournal(tenantId, sample);
     }
 
     public Map<String, Object> listEnterpriseSchedules(
-            String tenantId, Boolean activeOnly, String search, String locationId, int page, int pageSize
+            String tenantId,
+            String view,
+            Boolean activeOnly,
+            String search,
+            int page,
+            int pageSize,
+            String recoDomain,
+            String stage,
+            String level,
+            String gatewayCode,
+            String currencyCode,
+            String paymentMethodCode,
+            String sourceSystem,
+            String frequency,
+            String status,
+            String from,
+            String to,
+            String locationId
     ) {
-        return enterpriseConfigRepository.listEnterpriseSchedules(tenantId, activeOnly, search, locationId, page, pageSize);
+        return scheduleRepository.listEnterpriseSchedules(
+                tenantId, view, activeOnly, search, page, pageSize,
+                recoDomain, stage, level, gatewayCode, currencyCode, paymentMethodCode,
+                sourceSystem, frequency, status, from, to, locationId);
+    }
+
+    public Map<String, Object> getEnterpriseScheduleDetail(String tenantId, String scheduleId) {
+        return scheduleRepository.getEnterpriseScheduleDetail(tenantId, scheduleId);
+    }
+
+    public Map<String, Object> previewEnterpriseSchedule(String tenantId, Map<String, Object> body) {
+        return scheduleRepository.previewSchedule(tenantId, body);
+    }
+
+    public Map<String, Object> listEnterpriseScheduleRuns(String scheduleId, int page, int pageSize) {
+        List<Map<String, Object>> items = scheduleRepository.listScheduleRuns(scheduleId, page, pageSize);
+        return Map.of("items", items, "page", page, "pageSize", pageSize);
+    }
+
+    @Transactional
+    public Map<String, Object> runScheduleNow(String tenantId, String scheduleId, String actorUserId) {
+        Map<String, Object> detail = scheduleRepository.getEnterpriseScheduleDetail(tenantId, scheduleId);
+        if (!"OK".equals(detail.get("status"))) {
+            return Map.of("status", "NOT_FOUND", "scheduleId", scheduleId);
+        }
+        Map<String, Object> filters = scheduleRepository.buildScheduleFiltersForRun(scheduleId, tenantId);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> row = (Map<String, Object>) detail.get("row");
+        Object ej = row.get("executionJson");
+        if (ej instanceof Map<?, ?> em) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> exec = (Map<String, Object>) em;
+            if (exec.get("financialPeriodScope") != null) {
+                filters.put("financialPeriod", exec.get("financialPeriodScope"));
+            }
+            if (exec.get("currencyCode") != null) {
+                filters.put("currency", exec.get("currencyCode"));
+            }
+        }
+        String runType = "FULL";
+        return repository.createReconciliationRun(runType, "SCHEDULED", actorUserId, tenantId, filters);
+    }
+
+    @Transactional
+    public Map<String, Object> cloneEnterpriseSchedule(String tenantId, String scheduleId, String actorUserId) {
+        return scheduleRepository.cloneSchedule(tenantId, scheduleId, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> deactivateEnterpriseSchedule(String tenantId, String scheduleId, String actorUserId) {
+        return scheduleRepository.deactivateSchedule(tenantId, scheduleId, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> pauseAllEnterpriseSchedules(String tenantId) {
+        int n = scheduleRepository.pauseAllSchedules(tenantId);
+        return Map.of("updatedCount", n);
+    }
+
+    @Transactional
+    public Map<String, Object> resumeAllEnterpriseSchedules(String tenantId) {
+        int n = scheduleRepository.resumeAllSchedules(tenantId);
+        return Map.of("updatedCount", n);
+    }
+
+    @Transactional
+    public Map<String, Object> cancelScheduleQueuedRun(String runReference) {
+        return scheduleRepository.cancelQueuedRun(runReference);
+    }
+
+    @Transactional
+    public Map<String, Object> forceStartScheduleQueuedRun(String runReference) {
+        return scheduleRepository.forceStartQueuedRun(runReference);
+    }
+
+    @Transactional
+    public Map<String, Object> retryScheduleQueuedRun(String tenantId, String runReference, String actorUserId) {
+        Map<String, Object> loaded = scheduleRepository.loadRunFiltersForRetry(runReference);
+        if (loaded.isEmpty()) {
+            return Map.of("status", "NOT_FOUND", "runReference", runReference);
+        }
+        String runType = loaded.get("runType") == null ? "FULL" : String.valueOf(loaded.get("runType"));
+        return repository.createReconciliationRun(runType, "SCHEDULED", actorUserId, tenantId, loaded.get("filters"));
+    }
+
+    @Transactional
+    public Map<String, Object> patchScheduleQueuePriority(String runReference, String priority) {
+        return scheduleRepository.updateRunQueuePriority(runReference, priority);
     }
 
     public Map<String, Object> listEnterpriseConfigPublishes(String tenantId, int page, int pageSize) {
@@ -322,13 +503,28 @@ public class ReconciliationModuleService {
 
     @Transactional
     public Map<String, Object> publishEnterpriseConfig(String tenantId, ReconciliationRequests.PublishRecoConfigRequest request) {
+        Object snapshot = request.snapshot();
+        if (snapshot == null || (snapshot instanceof Map<?, ?> m && m.isEmpty())) {
+            snapshot = publishRepository.buildLiveSnapshot(parseOptionalUuidForService(tenantId));
+        }
         return enterpriseConfigRepository.publishEnterpriseConfig(
                 tenantId,
                 request.versionLabel(),
-                request.snapshot(),
+                snapshot,
                 request.publishedBy(),
                 request.notes()
         );
+    }
+
+    private static UUID parseOptionalUuidForService(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return UUID.fromString(raw.trim());
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     @Transactional
@@ -389,25 +585,127 @@ public class ReconciliationModuleService {
 
     @Transactional
     public Map<String, Object> upsertSchedule(String tenantId, ReconciliationRequests.EnterpriseConfigRowRequest body, String idOrNull, String actorUserId) {
-        return enterpriseConfigRepository.upsertSchedule(tenantId, body.row(), idOrNull, actorUserId);
+        return scheduleRepository.upsertSchedule(tenantId, body.row(), idOrNull, actorUserId);
     }
 
     @Transactional
     public Map<String, Object> patchScheduleActive(String tenantId, String id, ReconciliationRequests.MatchingRuleActivePatchRequest request) {
-        return enterpriseConfigRepository.patchScheduleActive(tenantId, id, request.active());
+        return scheduleRepository.patchScheduleActive(tenantId, id, request.active());
     }
 
     @Transactional
     public Map<String, Object> deleteSchedule(String tenantId, String id) {
-        return enterpriseConfigRepository.softDeleteSchedule(tenantId, id);
+        return scheduleRepository.softDeleteSchedule(tenantId, id);
     }
 
     public Map<String, Object> getEnterpriseThresholdsBundle(String tenantId) {
         return enterpriseConfigRepository.getEnterpriseThresholdsBundle(tenantId);
     }
 
+    public Map<String, Object> listEnterpriseThresholdsByKind(
+            String kind,
+            String tenantId,
+            Boolean activeOnly,
+            String search,
+            int page,
+            int pageSize,
+            String applicationId,
+            String recoDomain,
+            String stage,
+            String level,
+            String gatewayCode,
+            String currencyCode,
+            String paymentMethodCode,
+            String severity,
+            String status,
+            String effectiveFrom,
+            String effectiveTo
+    ) {
+        return enterpriseConfigRepository.listEnterpriseThresholdsByKind(
+                kind, tenantId, activeOnly, search, page, pageSize, applicationId,
+                recoDomain, stage, level, gatewayCode, currencyCode, paymentMethodCode,
+                severity, status, effectiveFrom, effectiveTo);
+    }
+
+    public Map<String, Object> getEnterpriseThresholdRow(String kind, String tenantId, String id) {
+        return enterpriseConfigRepository.getEnterpriseThresholdRow(kind, tenantId, id);
+    }
+
+    @Transactional
+    public Map<String, Object> upsertEnterpriseThreshold(String kind, String tenantId, ReconciliationRequests.EnterpriseConfigRowRequest body, String idOrNull, String actorUserId) {
+        return enterpriseConfigRepository.upsertEnterpriseThreshold(kind, tenantId, body.row(), idOrNull, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> deactivateEnterpriseThreshold(String kind, String tenantId, String id, String actorUserId) {
+        return enterpriseConfigRepository.deactivateEnterpriseThreshold(kind, tenantId, id, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> cloneEnterpriseThreshold(String kind, String tenantId, String id, String actorUserId) {
+        return enterpriseConfigRepository.cloneEnterpriseThreshold(kind, tenantId, id, actorUserId);
+    }
+
+    public Map<String, Object> testEnterpriseThreshold(String kind, String tenantId, ReconciliationRequests.ThresholdTestRequest request) {
+        Map<String, Object> sample = request == null || request.sample() == null ? Map.of() : request.sample();
+        return enterpriseConfigRepository.testEnterpriseThreshold(kind, tenantId, sample);
+    }
+
+    public Map<String, Object> previewEnterpriseThresholdImpact(ReconciliationRequests.ThresholdPreviewImpactRequest request) {
+        Map<String, Object> body = new HashMap<>();
+        if (request != null) {
+            if (request.kind() != null) {
+                body.put("kind", request.kind());
+            }
+            if (request.filters() != null) {
+                body.put("filters", request.filters());
+            }
+            if (request.search() != null) {
+                body.put("search", request.search());
+            }
+        }
+        return enterpriseConfigRepository.previewEnterpriseThresholdImpact(body);
+    }
+
+    public Map<String, Object> listThresholdAuditEvents(String kind, String id) {
+        return Map.of("items", enterpriseConfigRepository.listThresholdAuditEvents(kind, id));
+    }
+
     public Map<String, Object> getEnterpriseConfigDraftSummary(String tenantId) {
         return enterpriseConfigRepository.getEnterpriseConfigDraftSummary(tenantId);
+    }
+
+    /**
+     * Shell metadata for the Flutter reconciliation control center (navigation and route hints).
+     */
+    public Map<String, Object> getEnterpriseControlCenterShell() {
+        return Map.of(
+                "title", "Reconciliation Control Center",
+                "apiVersion", "v1",
+                "defaultTab", "overview",
+                "tabs", List.of(
+                        Map.of("id", "overview", "label", "Overview", "path", "/reconciliation/v1/config/enterprise/control-center/overview"),
+                        Map.of("id", "matching-rules", "label", "Matching rules", "path", "/reconciliation/v1/config/enterprise/matching-rules"),
+                        Map.of("id", "gl-mapping", "label", "GL mapping", "path", "/reconciliation/v1/config/enterprise/gl-mapping-rules"),
+                        Map.of("id", "schedules", "label", "Schedules", "path", "/reconciliation/v1/config/enterprise/schedules"),
+                        Map.of("id", "publishes", "label", "Publishes", "path", "/reconciliation/v1/config/enterprise/publishes"),
+                        Map.of("id", "audit", "label", "Audit", "path", "/reconciliation/v1/audit")
+                )
+        );
+    }
+
+    /**
+     * Overview metrics for the control center; composes relational draft counts with placeholder KPI slots for FE.
+     */
+    public Map<String, Object> getEnterpriseControlCenterOverview(String tenantId) {
+        Map<String, Object> draft = enterpriseConfigRepository.getEnterpriseConfigDraftSummary(tenantId);
+        Map<String, Object> kpis = new HashMap<>();
+        kpis.put("openExceptionsApprox", 0);
+        kpis.put("lastPublishAt", null);
+        Map<String, Object> body = new HashMap<>();
+        body.put("draftSummary", draft == null ? Map.of() : draft);
+        body.put("kpis", kpis);
+        return body;
     }
 
     public Map<String, Object> compareEnterprisePublishes(String aId, String bId) {
@@ -430,6 +728,246 @@ public class ReconciliationModuleService {
 
     public Map<String, Object> listEnterpriseNotificationRules(String tenantId) {
         return Map.of("items", enterpriseConfigRepository.listEnterpriseNotificationRules(tenantId));
+    }
+
+    public Map<String, Object> listEnterpriseNotifications(
+            String tenantId,
+            String view,
+            Boolean activeOnly,
+            String search,
+            int page,
+            int pageSize,
+            String notificationEvent,
+            String channel,
+            String severity,
+            String recoDomain,
+            String stage,
+            String gatewayCode,
+            String status
+    ) {
+        return notificationRepository.listEnterpriseNotifications(
+                tenantId, view, activeOnly, search, page, pageSize,
+                notificationEvent, channel, severity, recoDomain, stage, gatewayCode, status);
+    }
+
+    public Map<String, Object> getEnterpriseNotificationRule(String tenantId, String id) {
+        return notificationRepository.getNotificationRuleDetail(tenantId, id);
+    }
+
+    @Transactional
+    public Map<String, Object> upsertEnterpriseNotificationRule(
+            String tenantId,
+            ReconciliationRequests.EnterpriseConfigRowRequest body,
+            String idOrNull,
+            String actorUserId
+    ) {
+        return notificationRepository.upsertNotificationRule(tenantId, body.row(), idOrNull, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> deactivateEnterpriseNotificationRule(String tenantId, String id, String actorUserId) {
+        return notificationRepository.deactivateNotificationRule(tenantId, id, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> cloneEnterpriseNotificationRule(String tenantId, String id, String actorUserId) {
+        return notificationRepository.cloneNotificationRule(tenantId, id, actorUserId);
+    }
+
+    public Map<String, Object> testEnterpriseNotification(String tenantId, Map<String, Object> body) {
+        return notificationRepository.testNotification(tenantId, body);
+    }
+
+    public Map<String, Object> previewEnterpriseNotification(String tenantId, Map<String, Object> body) {
+        return notificationRepository.previewNotificationPayload(tenantId, body);
+    }
+
+    public Map<String, Object> previewEnterpriseNotificationRecipients(String tenantId, Map<String, Object> body) {
+        return notificationRepository.previewRecipients(tenantId, body);
+    }
+
+    @Transactional
+    public Map<String, Object> sendEnterpriseTestAlert(String tenantId, Map<String, Object> body, String actorUserId) {
+        return notificationRepository.sendTestAlert(tenantId, body, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> retryFailedEnterpriseNotification(String notificationId) {
+        return notificationRepository.retryFailedNotification(notificationId);
+    }
+
+    @Transactional
+    public Map<String, Object> resendEnterpriseNotificationHistory(String historyId) {
+        return notificationRepository.resendHistoryNotification(historyId);
+    }
+
+    public Map<String, Object> listEnterpriseAccessControl(
+            String tenantId,
+            String view,
+            Boolean activeOnly,
+            String search,
+            int page,
+            int pageSize,
+            String roleId,
+            String userId,
+            String recoDomain,
+            String stage,
+            String level,
+            String permissionCode,
+            String status
+    ) {
+        return accessControlRepository.listEnterpriseAccessControl(
+                tenantId, view, activeOnly, search, page, pageSize,
+                roleId, userId, recoDomain, stage, level, permissionCode, status);
+    }
+
+    public Map<String, Object> getEnterpriseAccessRole(String tenantId, String id) {
+        return accessControlRepository.getRoleDetail(tenantId, id);
+    }
+
+    @Transactional
+    public Map<String, Object> upsertEnterpriseAccessRole(
+            String tenantId,
+            ReconciliationRequests.EnterpriseConfigRowRequest body,
+            String idOrNull,
+            String actorUserId
+    ) {
+        return accessControlRepository.upsertRole(tenantId, body.row(), idOrNull, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> deactivateEnterpriseAccessRole(String tenantId, String id, String actorUserId) {
+        return accessControlRepository.deactivateRole(tenantId, id, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> cloneEnterpriseAccessRole(String tenantId, String id, String actorUserId) {
+        return accessControlRepository.cloneRole(tenantId, id, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> assignEnterpriseAccessUser(
+            String tenantId,
+            ReconciliationRequests.EnterpriseConfigRowRequest body,
+            String actorUserId
+    ) {
+        return accessControlRepository.assignUser(tenantId, body.row(), actorUserId);
+    }
+
+    public Map<String, Object> previewEnterpriseEffectiveAccess(String tenantId, Map<String, Object> body) {
+        return accessControlRepository.previewEffectiveAccess(tenantId, body);
+    }
+
+    public Map<String, Object> previewEnterpriseAccessImpact(String tenantId, Map<String, Object> body) {
+        return accessControlRepository.previewImpact(tenantId, body);
+    }
+
+    public Map<String, Object> exportEnterpriseAccessMatrix(String tenantId) {
+        return accessControlRepository.exportAccessMatrix(tenantId);
+    }
+
+    @Transactional
+    public Map<String, Object> acknowledgeEnterpriseSodViolation(String violationId, String actorUserId) {
+        return accessControlRepository.acknowledgeSodViolation(violationId, actorUserId);
+    }
+
+    public Map<String, Object> listEnterprisePublish(
+            String tenantId,
+            String view,
+            String search,
+            int page,
+            int pageSize,
+            String environment,
+            String version,
+            String publishedBy,
+            String publishStatus,
+            String from,
+            String to,
+            String versionA,
+            String versionB
+    ) {
+        return publishRepository.listEnterprisePublish(
+                tenantId, view, search, page, pageSize, environment, version,
+                publishedBy, publishStatus, from, to, versionA, versionB);
+    }
+
+    @Transactional
+    public Map<String, Object> saveEnterprisePublishDraft(String tenantId, Map<String, Object> body, String actorUserId) {
+        return publishRepository.saveDraft(tenantId, body, actorUserId);
+    }
+
+    public Map<String, Object> previewEnterprisePublishDraft(String tenantId, Map<String, Object> body) {
+        return publishRepository.previewDraft(tenantId, body);
+    }
+
+    public Map<String, Object> validateEnterprisePublish(String tenantId, Map<String, Object> body) {
+        return publishRepository.validatePublish(tenantId, body);
+    }
+
+    public Map<String, Object> previewEnterprisePublishImpact(String tenantId, Map<String, Object> body) {
+        return publishRepository.previewImpact(tenantId, body);
+    }
+
+    @Transactional
+    public Map<String, Object> executeEnterprisePublish(
+            String tenantId, Map<String, Object> body, String actorUserId, String idempotencyKey
+    ) {
+        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            return executeIdempotent(
+                    tenantId,
+                    idempotencyKey,
+                    "POST",
+                    "/reconciliation/v1/config/enterprise/publish/execute",
+                    body,
+                    () -> publishRepository.executePublish(tenantId, body, actorUserId)
+            );
+        }
+        return publishRepository.executePublish(tenantId, body, actorUserId);
+    }
+
+    public boolean isEnterprisePublishFrozen(String tenantId, Map<String, Object> body) {
+        UUID tenantUuid = parseOptionalUuidForService(tenantId);
+        String env = body == null || body.get("environment") == null ? "PROD" : String.valueOf(body.get("environment"));
+        Map<String, Object> check = publishRepository.checkFreezeWindow(tenantUuid, env);
+        return Boolean.TRUE.equals(check.get("frozen"));
+    }
+
+    public Map<String, Object> getEnterprisePublishFreezeWindow(String tenantId, Map<String, Object> body) {
+        UUID tenantUuid = parseOptionalUuidForService(tenantId);
+        String env = body == null || body.get("environment") == null ? "PROD" : String.valueOf(body.get("environment"));
+        return publishRepository.checkFreezeWindow(tenantUuid, env);
+    }
+
+    @Transactional
+    public Map<String, Object> rollbackEnterprisePublishConfig(String tenantId, Map<String, Object> body, String actorUserId) {
+        return publishRepository.rollbackPublish(tenantId, body, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> promoteEnterprisePublish(String tenantId, Map<String, Object> body, String actorUserId) {
+        return publishRepository.promoteEnvironment(tenantId, body, actorUserId);
+    }
+
+    public Map<String, Object> exportEnterprisePublishSnapshot(String tenantId, String version) {
+        return publishRepository.exportSnapshot(tenantId, version);
+    }
+
+    @Transactional
+    public Map<String, Object> approveEnterpriseDraftChange(String draftChangeId, Map<String, Object> body, String actorUserId) {
+        String comment = body == null ? null : body.get("comment") == null ? null : String.valueOf(body.get("comment"));
+        return publishRepository.approveDraftChange(draftChangeId, comment, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> rejectEnterpriseDraftChange(String draftChangeId, Map<String, Object> body, String actorUserId) {
+        String comment = body == null ? null : body.get("comment") == null ? null : String.valueOf(body.get("comment"));
+        return publishRepository.rejectDraftChange(draftChangeId, comment, actorUserId);
+    }
+
+    @Transactional
+    public Map<String, Object> discardEnterpriseDraftChange(String draftChangeId, Map<String, Object> body, String actorUserId) {
+        String comment = body == null ? null : body.get("comment") == null ? null : String.valueOf(body.get("comment"));
+        return publishRepository.discardDraftChange(draftChangeId, comment, actorUserId);
     }
 
     private Map<String, Object> executeIdempotent(

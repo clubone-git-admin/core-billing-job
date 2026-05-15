@@ -400,9 +400,11 @@ public class ReconciliationModuleController {
     public ResponseEntity<Map<String, Object>> listAudit(
             @RequestParam(required = false) String entityType,
             @RequestParam(required = false) String entityId,
-            @RequestParam(required = false) Integer limit
+            @RequestParam(required = false) Integer limit,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer pageSize
     ) {
-        Map<String, Object> payload = service.listAudit(entityType, entityId, limit);
+        Map<String, Object> payload = service.listAudit(entityType, entityId, limit, page, pageSize);
         List<?> items = (List<?>) payload.getOrDefault("items", List.of());
         return ResponseEntity.ok(success(payload, 1, items.size()));
     }
@@ -426,8 +428,10 @@ public class ReconciliationModuleController {
     }
 
     @GetMapping("/config/enterprise/lookups")
-    public ResponseEntity<Map<String, Object>> enterpriseConfigLookups() {
-        return ResponseEntity.ok(success(service.getEnterpriseConfigLookups(), 1, 1));
+    public ResponseEntity<Map<String, Object>> enterpriseConfigLookups(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
+    ) {
+        return ResponseEntity.ok(success(service.getEnterpriseConfigLookups(tenantId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/draft")
@@ -437,11 +441,233 @@ public class ReconciliationModuleController {
         return ResponseEntity.ok(success(service.getEnterpriseConfigDraftSummary(tenantId), 1, 1));
     }
 
+    @GetMapping("/config/enterprise/control-center/shell")
+    public ResponseEntity<Map<String, Object>> enterpriseControlCenterShell() {
+        return ResponseEntity.ok(success(service.getEnterpriseControlCenterShell(), 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/control-center/overview")
+    public ResponseEntity<Map<String, Object>> enterpriseControlCenterOverview(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
+    ) {
+        return ResponseEntity.ok(success(service.getEnterpriseControlCenterOverview(tenantId), 1, 1));
+    }
+
     @GetMapping("/config/enterprise/thresholds")
     public ResponseEntity<Map<String, Object>> enterpriseThresholds(
             @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
         return ResponseEntity.ok(success(service.getEnterpriseThresholdsBundle(tenantId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/thresholds/preview-impact")
+    public ResponseEntity<Map<String, Object>> previewEnterpriseThresholdImpact(
+            @RequestBody(required = false) ReconciliationRequests.ThresholdPreviewImpactRequest request
+    ) {
+        return ResponseEntity.ok(success(service.previewEnterpriseThresholdImpact(request), 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/thresholds/{kind}")
+    public ResponseEntity<Map<String, Object>> listEnterpriseThresholdsByKind(
+            @PathVariable String kind,
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestParam(required = false) Boolean activeOnly,
+            @RequestParam(required = false) String search,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "50") int pageSize,
+            @RequestParam(required = false) String applicationId,
+            @RequestParam(required = false) String recoDomain,
+            @RequestParam(required = false) String stage,
+            @RequestParam(required = false) String level,
+            @RequestParam(required = false) String gatewayCode,
+            @RequestParam(required = false) String currencyCode,
+            @RequestParam(required = false) String paymentMethodCode,
+            @RequestParam(required = false) String severity,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String effectiveFrom,
+            @RequestParam(required = false) String effectiveTo
+    ) {
+        Map<String, Object> data = service.listEnterpriseThresholdsByKind(
+                kind, tenantId, activeOnly, search, page, pageSize, applicationId,
+                recoDomain, stage, level, gatewayCode, currencyCode, paymentMethodCode,
+                severity, status, effectiveFrom, effectiveTo);
+        return ResponseEntity.ok(success(data, 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/thresholds/{kind}/{id}")
+    public ResponseEntity<Map<String, Object>> getEnterpriseThresholdRow(
+            @PathVariable String kind,
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String id
+    ) {
+        return ResponseEntity.ok(success(service.getEnterpriseThresholdRow(kind, tenantId, id), 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/thresholds/{kind}/{id}/audit-events")
+    public ResponseEntity<Map<String, Object>> listThresholdAuditEvents(
+            @PathVariable String kind,
+            @PathVariable String id
+    ) {
+        Map<String, Object> payload = service.listThresholdAuditEvents(kind, id);
+        List<?> items = (List<?>) payload.getOrDefault("items", List.of());
+        return ResponseEntity.ok(success(payload, 1, items.size()));
+    }
+
+    @PostMapping("/config/enterprise/thresholds/{kind}")
+    public ResponseEntity<Map<String, Object>> createEnterpriseThreshold(
+            @PathVariable String kind,
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
+    ) {
+        return ResponseEntity.ok(success(service.upsertEnterpriseThreshold(kind, tenantId, request, null, actorUserId), 1, 1));
+    }
+
+    @PutMapping("/config/enterprise/thresholds/{kind}/{id}")
+    public ResponseEntity<Map<String, Object>> updateEnterpriseThreshold(
+            @PathVariable String kind,
+            @PathVariable String id,
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
+    ) {
+        return ResponseEntity.ok(success(service.upsertEnterpriseThreshold(kind, tenantId, request, id, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/thresholds/{kind}/{id}/deactivate")
+    public ResponseEntity<Map<String, Object>> deactivateEnterpriseThreshold(
+            @PathVariable String kind,
+            @PathVariable String id,
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId
+    ) {
+        return ResponseEntity.ok(success(service.deactivateEnterpriseThreshold(kind, tenantId, id, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/thresholds/{kind}/{id}/clone")
+    public ResponseEntity<Map<String, Object>> cloneEnterpriseThreshold(
+            @PathVariable String kind,
+            @PathVariable String id,
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId
+    ) {
+        return ResponseEntity.ok(success(service.cloneEnterpriseThreshold(kind, tenantId, id, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/thresholds/{kind}/test")
+    public ResponseEntity<Map<String, Object>> testEnterpriseThreshold(
+            @PathVariable String kind,
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) ReconciliationRequests.ThresholdTestRequest request
+    ) {
+        return ResponseEntity.ok(success(service.testEnterpriseThreshold(kind, tenantId, request), 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/access-control")
+    public ResponseEntity<Map<String, Object>> listEnterpriseAccessControl(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestParam(required = false, defaultValue = "roles") String view,
+            @RequestParam(required = false) Boolean activeOnly,
+            @RequestParam(required = false) String search,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "50") int pageSize,
+            @RequestParam(required = false) String roleId,
+            @RequestParam(required = false) String userId,
+            @RequestParam(required = false) String recoDomain,
+            @RequestParam(required = false) String stage,
+            @RequestParam(required = false) String level,
+            @RequestParam(required = false) String permissionCode,
+            @RequestParam(required = false) String status
+    ) {
+        Map<String, Object> data = service.listEnterpriseAccessControl(
+                tenantId, view, activeOnly, search, page, pageSize,
+                roleId, userId, recoDomain, stage, level, permissionCode, status);
+        return ResponseEntity.ok(success(data, 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/access-control/export-matrix")
+    public ResponseEntity<Map<String, Object>> exportEnterpriseAccessMatrix(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
+    ) {
+        return ResponseEntity.ok(success(service.exportEnterpriseAccessMatrix(tenantId), 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/access-control/roles/{id}")
+    public ResponseEntity<Map<String, Object>> getEnterpriseAccessRole(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String id
+    ) {
+        return ResponseEntity.ok(success(service.getEnterpriseAccessRole(tenantId, id), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/access-control/roles")
+    public ResponseEntity<Map<String, Object>> createEnterpriseAccessRole(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
+    ) {
+        return ResponseEntity.ok(success(service.upsertEnterpriseAccessRole(tenantId, request, null, actorUserId), 1, 1));
+    }
+
+    @PutMapping("/config/enterprise/access-control/roles/{id}")
+    public ResponseEntity<Map<String, Object>> updateEnterpriseAccessRole(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String id,
+            @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
+    ) {
+        return ResponseEntity.ok(success(service.upsertEnterpriseAccessRole(tenantId, request, id, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/access-control/roles/{id}/deactivate")
+    public ResponseEntity<Map<String, Object>> deactivateEnterpriseAccessRole(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String id
+    ) {
+        return ResponseEntity.ok(success(service.deactivateEnterpriseAccessRole(tenantId, id, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/access-control/roles/{id}/clone")
+    public ResponseEntity<Map<String, Object>> cloneEnterpriseAccessRole(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String id
+    ) {
+        return ResponseEntity.ok(success(service.cloneEnterpriseAccessRole(tenantId, id, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/access-control/user-assignments")
+    public ResponseEntity<Map<String, Object>> assignEnterpriseAccessUser(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
+    ) {
+        return ResponseEntity.ok(success(service.assignEnterpriseAccessUser(tenantId, request, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/access-control/preview-effective-access")
+    public ResponseEntity<Map<String, Object>> previewEnterpriseEffectiveAccess(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.previewEnterpriseEffectiveAccess(tenantId, request), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/access-control/preview-impact")
+    public ResponseEntity<Map<String, Object>> previewEnterpriseAccessImpact(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.previewEnterpriseAccessImpact(tenantId, request), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/access-control/sod-violations/{violationId}/acknowledge")
+    public ResponseEntity<Map<String, Object>> acknowledgeEnterpriseSodViolation(
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String violationId
+    ) {
+        return ResponseEntity.ok(success(service.acknowledgeEnterpriseSodViolation(violationId, actorUserId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/roles")
@@ -451,6 +677,120 @@ public class ReconciliationModuleController {
         Map<String, Object> payload = service.listEnterpriseRoles(tenantId);
         List<?> items = (List<?>) payload.getOrDefault("items", List.of());
         return ResponseEntity.ok(success(payload, 1, items.size()));
+    }
+
+    @GetMapping("/config/enterprise/notifications")
+    public ResponseEntity<Map<String, Object>> listEnterpriseNotifications(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestParam(required = false, defaultValue = "rules") String view,
+            @RequestParam(required = false) Boolean activeOnly,
+            @RequestParam(required = false) String search,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "50") int pageSize,
+            @RequestParam(required = false) String notificationEvent,
+            @RequestParam(required = false) String channel,
+            @RequestParam(required = false) String severity,
+            @RequestParam(required = false) String recoDomain,
+            @RequestParam(required = false) String stage,
+            @RequestParam(required = false) String gatewayCode,
+            @RequestParam(required = false) String status
+    ) {
+        Map<String, Object> data = service.listEnterpriseNotifications(
+                tenantId, view, activeOnly, search, page, pageSize,
+                notificationEvent, channel, severity, recoDomain, stage, gatewayCode, status);
+        return ResponseEntity.ok(success(data, 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/notifications/rules/{id}")
+    public ResponseEntity<Map<String, Object>> getEnterpriseNotificationRule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String id
+    ) {
+        return ResponseEntity.ok(success(service.getEnterpriseNotificationRule(tenantId, id), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/notifications/rules")
+    public ResponseEntity<Map<String, Object>> createEnterpriseNotificationRule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
+    ) {
+        return ResponseEntity.ok(success(service.upsertEnterpriseNotificationRule(tenantId, request, null, actorUserId), 1, 1));
+    }
+
+    @PutMapping("/config/enterprise/notifications/rules/{id}")
+    public ResponseEntity<Map<String, Object>> updateEnterpriseNotificationRule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String id,
+            @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
+    ) {
+        return ResponseEntity.ok(success(service.upsertEnterpriseNotificationRule(tenantId, request, id, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/notifications/rules/{id}/deactivate")
+    public ResponseEntity<Map<String, Object>> deactivateEnterpriseNotificationRule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String id
+    ) {
+        return ResponseEntity.ok(success(service.deactivateEnterpriseNotificationRule(tenantId, id, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/notifications/rules/{id}/clone")
+    public ResponseEntity<Map<String, Object>> cloneEnterpriseNotificationRule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String id
+    ) {
+        return ResponseEntity.ok(success(service.cloneEnterpriseNotificationRule(tenantId, id, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/notifications/test")
+    public ResponseEntity<Map<String, Object>> testEnterpriseNotification(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.testEnterpriseNotification(tenantId, request), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/notifications/send-test-alert")
+    public ResponseEntity<Map<String, Object>> sendEnterpriseTestAlert(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @RequestBody Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.sendEnterpriseTestAlert(tenantId, request, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/notifications/preview-recipients")
+    public ResponseEntity<Map<String, Object>> previewEnterpriseNotificationRecipients(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.previewEnterpriseNotificationRecipients(tenantId, request), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/notifications/preview")
+    public ResponseEntity<Map<String, Object>> previewEnterpriseNotification(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.previewEnterpriseNotification(tenantId, request), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/notifications/failed/{notificationId}/retry")
+    public ResponseEntity<Map<String, Object>> retryFailedEnterpriseNotification(
+            @PathVariable String notificationId
+    ) {
+        return ResponseEntity.ok(success(service.retryFailedEnterpriseNotification(notificationId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/notifications/history/{historyId}/resend")
+    public ResponseEntity<Map<String, Object>> resendEnterpriseNotificationHistory(
+            @PathVariable String historyId
+    ) {
+        return ResponseEntity.ok(success(service.resendEnterpriseNotificationHistory(historyId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/notification-rules")
@@ -532,23 +872,117 @@ public class ReconciliationModuleController {
         return ResponseEntity.ok(success(service.testMatchingRulePreview(matchingRuleId, request), 1, 1));
     }
 
+    @GetMapping("/config/enterprise/gl-mapping-rules/export")
+    public ResponseEntity<Map<String, Object>> exportEnterpriseGlMappingRules(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
+    ) {
+        return ResponseEntity.ok(success(service.exportGlMappingRules(tenantId), 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/gl-mapping-rules/lookups")
+    public ResponseEntity<Map<String, Object>> glMappingRulesLookups(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
+    ) {
+        return ResponseEntity.ok(success(service.getGlMappingRuleLookupsBundle(tenantId), 1, 1));
+    }
+
     @GetMapping("/config/enterprise/gl-mapping-rules")
     public ResponseEntity<Map<String, Object>> listEnterpriseGlMappingRules(
             @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false) Boolean activeOnly,
             @RequestParam(required = false) String search,
             @RequestParam(required = false) String locationId,
+            @RequestParam(required = false) String sourceType,
+            @RequestParam(required = false) String transactionType,
+            @RequestParam(required = false) String lineOfBusiness,
+            @RequestParam(required = false) String journalType,
+            @RequestParam(required = false) String itemCategory,
+            @RequestParam(required = false) String paymentMethodCode,
+            @RequestParam(required = false) String currencyCode,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String effectiveFrom,
+            @RequestParam(required = false) String effectiveTo,
+            @RequestParam(required = false) String refundType,
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "50") int pageSize
     ) {
-        Map<String, Object> body = service.listEnterpriseGlMappingRules(tenantId, activeOnly, search, locationId, page, pageSize);
+        Map<String, Object> body = service.listEnterpriseGlMappingRules(
+                tenantId, activeOnly, search, locationId,
+                sourceType, transactionType, lineOfBusiness, journalType, itemCategory,
+                paymentMethodCode, currencyCode, status, effectiveFrom, effectiveTo, refundType,
+                page, pageSize);
         long total = ((Number) body.getOrDefault("totalCount", 0L)).longValue();
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> items = (List<Map<String, Object>>) body.get("items");
         if (items == null) {
             items = List.of();
         }
-        return ResponseEntity.ok(successPaged(Map.of("items", items), page, pageSize, total));
+        Map<String, Object> data = new HashMap<>();
+        data.put("items", items);
+        data.put("kpis", body.get("kpis"));
+        data.put("missingGlMappings", body.get("missingGlMappings"));
+        return ResponseEntity.ok(successPaged(data, page, pageSize, total));
+    }
+
+    @PostMapping("/config/enterprise/gl-mapping-rules/import")
+    public ResponseEntity<Map<String, Object>> importGlMappingRules(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @Valid @RequestBody ReconciliationRequests.GlMappingImportRequest request
+    ) {
+        return ResponseEntity.ok(success(service.importGlMappingRules(tenantId, request, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/gl-mapping-rules/test")
+    public ResponseEntity<Map<String, Object>> testGlMappingJournal(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) ReconciliationRequests.GlMappingJournalTestRequest request
+    ) {
+        return ResponseEntity.ok(success(service.previewGlMappingJournal(tenantId, request), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/gl-mapping-rules/preview-journal")
+    public ResponseEntity<Map<String, Object>> previewGlMappingJournal(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) ReconciliationRequests.GlMappingJournalTestRequest request
+    ) {
+        return ResponseEntity.ok(success(service.previewGlMappingJournal(tenantId, request), 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/gl-mapping-rules/{glMappingRuleId}")
+    public ResponseEntity<Map<String, Object>> getEnterpriseGlMappingRule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String glMappingRuleId
+    ) {
+        return ResponseEntity.ok(success(service.getEnterpriseGlMappingRuleDetail(tenantId, glMappingRuleId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/gl-mapping-rules/{glMappingRuleId}/clone")
+    public ResponseEntity<Map<String, Object>> cloneGlMappingRule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String glMappingRuleId
+    ) {
+        return ResponseEntity.ok(success(service.cloneGlMappingRule(tenantId, glMappingRuleId, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/gl-mapping-rules/{glMappingRuleId}/deactivate")
+    public ResponseEntity<Map<String, Object>> deactivateGlMappingRule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String glMappingRuleId
+    ) {
+        return ResponseEntity.ok(success(service.deactivateGlMappingRule(tenantId, glMappingRuleId, actorUserId), 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/gl-mapping-rules/{glMappingRuleId}/usage")
+    public ResponseEntity<Map<String, Object>> glMappingRuleUsage(
+            @PathVariable String glMappingRuleId,
+            @RequestParam(required = false) Integer limit
+    ) {
+        Map<String, Object> payload = service.glMappingRuleUsage(glMappingRuleId, limit);
+        List<?> items = (List<?>) payload.getOrDefault("items", List.of());
+        return ResponseEntity.ok(success(payload, 1, items.size()));
     }
 
     @PostMapping("/config/enterprise/gl-mapping-rules")
@@ -590,20 +1024,54 @@ public class ReconciliationModuleController {
     @GetMapping("/config/enterprise/schedules")
     public ResponseEntity<Map<String, Object>> listEnterpriseSchedules(
             @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestParam(required = false, defaultValue = "active") String view,
             @RequestParam(required = false) Boolean activeOnly,
             @RequestParam(required = false) String search,
-            @RequestParam(required = false) String locationId,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "50") int pageSize,
+            @RequestParam(required = false) String recoDomain,
+            @RequestParam(required = false) String stage,
+            @RequestParam(required = false) String level,
+            @RequestParam(required = false) String gatewayCode,
+            @RequestParam(required = false) String currencyCode,
+            @RequestParam(required = false) String paymentMethodCode,
+            @RequestParam(required = false) String sourceSystem,
+            @RequestParam(required = false) String frequency,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String from,
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) String locationId
+    ) {
+        Map<String, Object> data = service.listEnterpriseSchedules(
+                tenantId, view, activeOnly, search, page, pageSize,
+                recoDomain, stage, level, gatewayCode, currencyCode, paymentMethodCode,
+                sourceSystem, frequency, status, from, to, locationId);
+        return ResponseEntity.ok(success(data, 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/schedules/{scheduleId}")
+    public ResponseEntity<Map<String, Object>> getEnterpriseScheduleDetail(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String scheduleId
+    ) {
+        return ResponseEntity.ok(success(service.getEnterpriseScheduleDetail(tenantId, scheduleId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/schedules/preview")
+    public ResponseEntity<Map<String, Object>> previewEnterpriseSchedule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.previewEnterpriseSchedule(tenantId, request), 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/schedules/{scheduleId}/runs")
+    public ResponseEntity<Map<String, Object>> listEnterpriseScheduleRuns(
+            @PathVariable String scheduleId,
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "50") int pageSize
     ) {
-        Map<String, Object> body = service.listEnterpriseSchedules(tenantId, activeOnly, search, locationId, page, pageSize);
-        long total = ((Number) body.getOrDefault("totalCount", 0L)).longValue();
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> items = (List<Map<String, Object>>) body.get("items");
-        if (items == null) {
-            items = List.of();
-        }
-        return ResponseEntity.ok(successPaged(Map.of("items", items), page, pageSize, total));
+        return ResponseEntity.ok(success(service.listEnterpriseScheduleRuns(scheduleId, page, pageSize), 1, 1));
     }
 
     @PostMapping("/config/enterprise/schedules")
@@ -625,6 +1093,67 @@ public class ReconciliationModuleController {
         return ResponseEntity.ok(success(service.upsertSchedule(tenantId, request, scheduleId, actorUserId), 1, 1));
     }
 
+    @PostMapping("/config/enterprise/schedules/{scheduleId}/clone")
+    public ResponseEntity<Map<String, Object>> cloneEnterpriseSchedule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String scheduleId
+    ) {
+        return ResponseEntity.ok(success(service.cloneEnterpriseSchedule(tenantId, scheduleId, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/schedules/{scheduleId}/deactivate")
+    public ResponseEntity<Map<String, Object>> deactivateEnterpriseSchedule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String scheduleId
+    ) {
+        return ResponseEntity.ok(success(service.deactivateEnterpriseSchedule(tenantId, scheduleId, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/schedules/{scheduleId}/run-now")
+    public ResponseEntity<Map<String, Object>> runEnterpriseScheduleNow(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String scheduleId
+    ) {
+        return ResponseEntity.ok(success(service.runScheduleNow(tenantId, scheduleId, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/schedules/{scheduleId}/pause")
+    public ResponseEntity<Map<String, Object>> pauseEnterpriseSchedule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String scheduleId
+    ) {
+        return ResponseEntity.ok(success(
+                service.patchScheduleActive(tenantId, scheduleId, new ReconciliationRequests.MatchingRuleActivePatchRequest(false)),
+                1, 1));
+    }
+
+    @PostMapping("/config/enterprise/schedules/{scheduleId}/resume")
+    public ResponseEntity<Map<String, Object>> resumeEnterpriseSchedule(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String scheduleId
+    ) {
+        return ResponseEntity.ok(success(
+                service.patchScheduleActive(tenantId, scheduleId, new ReconciliationRequests.MatchingRuleActivePatchRequest(true)),
+                1, 1));
+    }
+
+    @PostMapping("/config/enterprise/schedules/pause-all")
+    public ResponseEntity<Map<String, Object>> pauseAllEnterpriseSchedules(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
+    ) {
+        return ResponseEntity.ok(success(service.pauseAllEnterpriseSchedules(tenantId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/schedules/resume-all")
+    public ResponseEntity<Map<String, Object>> resumeAllEnterpriseSchedules(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
+    ) {
+        return ResponseEntity.ok(success(service.resumeAllEnterpriseSchedules(tenantId), 1, 1));
+    }
+
     @PatchMapping("/config/enterprise/schedules/{scheduleId}/active")
     public ResponseEntity<Map<String, Object>> patchScheduleActive(
             @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
@@ -634,12 +1163,183 @@ public class ReconciliationModuleController {
         return ResponseEntity.ok(success(service.patchScheduleActive(tenantId, scheduleId, request), 1, 1));
     }
 
+    @PostMapping("/config/enterprise/schedules/queue/{runReference}/cancel")
+    public ResponseEntity<Map<String, Object>> cancelScheduleQueuedRun(@PathVariable String runReference) {
+        return ResponseEntity.ok(success(service.cancelScheduleQueuedRun(runReference), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/schedules/queue/{runReference}/force-start")
+    public ResponseEntity<Map<String, Object>> forceStartScheduleQueuedRun(@PathVariable String runReference) {
+        return ResponseEntity.ok(success(service.forceStartScheduleQueuedRun(runReference), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/schedules/queue/{runReference}/retry")
+    public ResponseEntity<Map<String, Object>> retryScheduleQueuedRun(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @PathVariable String runReference
+    ) {
+        return ResponseEntity.ok(success(service.retryScheduleQueuedRun(tenantId, runReference, actorUserId), 1, 1));
+    }
+
+    @PatchMapping("/config/enterprise/schedules/queue/{runReference}/priority")
+    public ResponseEntity<Map<String, Object>> patchScheduleQueuePriority(
+            @PathVariable String runReference,
+            @RequestBody Map<String, Object> body
+    ) {
+        String priority = body == null || body.get("priority") == null ? "MEDIUM" : String.valueOf(body.get("priority"));
+        return ResponseEntity.ok(success(service.patchScheduleQueuePriority(runReference, priority), 1, 1));
+    }
+
     @DeleteMapping("/config/enterprise/schedules/{scheduleId}")
     public ResponseEntity<Map<String, Object>> deleteSchedule(
             @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String scheduleId
     ) {
         return ResponseEntity.ok(success(service.deleteSchedule(tenantId, scheduleId), 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/publish")
+    public ResponseEntity<Map<String, Object>> listEnterprisePublish(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestParam(required = false, defaultValue = "current") String view,
+            @RequestParam(required = false) String search,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "50") int pageSize,
+            @RequestParam(required = false) String environment,
+            @RequestParam(required = false) String version,
+            @RequestParam(required = false) String publishedBy,
+            @RequestParam(required = false) String publishStatus,
+            @RequestParam(required = false) String from,
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) String versionA,
+            @RequestParam(required = false) String versionB
+    ) {
+        Map<String, Object> data = service.listEnterprisePublish(
+                tenantId, view, search, page, pageSize, environment, version,
+                publishedBy, publishStatus, from, to, versionA, versionB);
+        return ResponseEntity.ok(success(data, 1, 1));
+    }
+
+    @GetMapping("/config/enterprise/publish/export-snapshot")
+    public ResponseEntity<Map<String, Object>> exportEnterprisePublishSnapshot(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestParam(required = false) String version
+    ) {
+        return ResponseEntity.ok(success(service.exportEnterprisePublishSnapshot(tenantId, version), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/publish/save-draft")
+    public ResponseEntity<Map<String, Object>> saveEnterprisePublishDraft(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.saveEnterprisePublishDraft(tenantId, request, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/publish/preview-draft")
+    public ResponseEntity<Map<String, Object>> previewEnterprisePublishDraft(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.previewEnterprisePublishDraft(tenantId, request), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/publish/validate")
+    public ResponseEntity<Map<String, Object>> validateEnterprisePublish(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.validateEnterprisePublish(tenantId, request), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/publish/preview-impact")
+    public ResponseEntity<Map<String, Object>> previewEnterprisePublishImpact(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.previewEnterprisePublishImpact(tenantId, request), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/publish/execute")
+    public ResponseEntity<Map<String, Object>> executeEnterprisePublish(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody Map<String, Object> request
+    ) {
+        if (service.isEnterprisePublishFrozen(tenantId, request)) {
+            Map<String, Object> freeze = service.getEnterprisePublishFreezeWindow(tenantId, request);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> fw = (Map<String, Object>) freeze.get("freezeWindow");
+            String message = fw == null ? "Configuration freeze window is active" : String.valueOf(fw.getOrDefault("message", "Configuration freeze window is active"));
+            return ResponseEntity.status(409).body(Map.of(
+                    "success", false,
+                    "message", message,
+                    "freezeWindow", fw == null ? Map.of() : fw
+            ));
+        }
+        return ResponseEntity.ok(success(service.executeEnterprisePublish(tenantId, request, actorUserId, idempotencyKey), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/publish/rollback")
+    public ResponseEntity<Map<String, Object>> rollbackEnterprisePublishConfig(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @RequestBody Map<String, Object> request
+    ) {
+        if (service.isEnterprisePublishFrozen(tenantId, request)) {
+            Map<String, Object> freeze = service.getEnterprisePublishFreezeWindow(tenantId, request);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> fw = (Map<String, Object>) freeze.get("freezeWindow");
+            String message = fw == null ? "Configuration freeze window is active" : String.valueOf(fw.getOrDefault("message", "Configuration freeze window is active"));
+            return ResponseEntity.status(409).body(Map.of("success", false, "message", message, "freezeWindow", fw == null ? Map.of() : fw));
+        }
+        return ResponseEntity.ok(success(service.rollbackEnterprisePublishConfig(tenantId, request, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/publish/promote")
+    public ResponseEntity<Map<String, Object>> promoteEnterprisePublish(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @RequestBody Map<String, Object> request
+    ) {
+        if (service.isEnterprisePublishFrozen(tenantId, request)) {
+            Map<String, Object> freeze = service.getEnterprisePublishFreezeWindow(tenantId, request);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> fw = (Map<String, Object>) freeze.get("freezeWindow");
+            String message = fw == null ? "Configuration freeze window is active" : String.valueOf(fw.getOrDefault("message", "Configuration freeze window is active"));
+            return ResponseEntity.status(409).body(Map.of("success", false, "message", message, "freezeWindow", fw == null ? Map.of() : fw));
+        }
+        return ResponseEntity.ok(success(service.promoteEnterprisePublish(tenantId, request, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/publish/draft-changes/{draftChangeId}/approve")
+    public ResponseEntity<Map<String, Object>> approveEnterpriseDraftChange(
+            @PathVariable String draftChangeId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.approveEnterpriseDraftChange(draftChangeId, request, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/publish/draft-changes/{draftChangeId}/reject")
+    public ResponseEntity<Map<String, Object>> rejectEnterpriseDraftChange(
+            @PathVariable String draftChangeId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.rejectEnterpriseDraftChange(draftChangeId, request, actorUserId), 1, 1));
+    }
+
+    @PostMapping("/config/enterprise/publish/draft-changes/{draftChangeId}/discard")
+    public ResponseEntity<Map<String, Object>> discardEnterpriseDraftChange(
+            @PathVariable String draftChangeId,
+            @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
+            @RequestBody(required = false) Map<String, Object> request
+    ) {
+        return ResponseEntity.ok(success(service.discardEnterpriseDraftChange(draftChangeId, request, actorUserId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/publishes")

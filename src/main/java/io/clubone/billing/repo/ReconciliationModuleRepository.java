@@ -66,17 +66,17 @@ public class ReconciliationModuleRepository {
                     reconciliation_stage_id,
                     reconciliation_status_id,
                     severity_id,
-                    entity_type,
                     entity_id,
                     entity_reference_code,
                     mismatch_reference_code,
                     expected_amount,
                     actual_amount,
-                    reason_code,
                     reason_text,
                     attributes_json,
                     event_at,
-                    created_on
+                    created_on,
+                    reconciliation_entity_type_id,
+                    reconciliation_reason_id
                 )
                 SELECT
                     gen_random_uuid(),
@@ -89,13 +89,11 @@ public class ReconciliationModuleRepository {
                         ELSE 'RECONCILED' END),
                     (SELECT severity_id FROM reconciliation.lu_severity WHERE code = CASE
                         WHEN ABS(COALESCE(i.total_amount, 0)::numeric - (__RECON_PAID_MAJOR__)) > 1000 THEN 'HIGH' ELSE 'MEDIUM' END),
-                    'INVOICE',
                     i.invoice_id,
                     COALESCE(i.invoice_number, CAST(i.invoice_id AS text)),
                     'MM-' || replace(CAST(i.invoice_id AS text), '-', ''),
                     i.total_amount,
                     (__RECON_PAID_MAJOR__),
-                    CASE WHEN NOT (__RECON_HAS_TXN__) THEN 'MISSING_PAYMENT' ELSE 'PAYMENT_PARTIAL' END,
                     'Invoice amount vs captured transaction',
                     jsonb_build_object(
                         'source', 'reconciliation_run',
@@ -104,10 +102,14 @@ public class ReconciliationModuleRepository {
                         CASE WHEN EXISTS (
                             SELECT 1 FROM client_subscription_billing.subscription_billing_schedule sbs
                             WHERE sbs.invoice_id = i.invoice_id
-                        ) THEN 'SUBSCRIPTION' ELSE 'CASH' END
+                        ) THEN 'SUBSCRIPTION' ELSE 'CASH' END,
+                        'legacyReason', CASE WHEN NOT (__RECON_HAS_TXN__) THEN 'MISSING_PAYMENT' ELSE 'PAYMENT_PARTIAL' END
                     ),
                     COALESCE(i.created_on, now()),
-                    now()
+                    now(),
+                    (SELECT reconciliation_entity_type_id FROM reconciliation.lu_reconciliation_entity_type WHERE code = 'INVOICE' LIMIT 1),
+                    (SELECT reconciliation_reason_id FROM reconciliation.lu_reconciliation_reason WHERE code = CASE
+                        WHEN NOT (__RECON_HAS_TXN__) THEN 'PAYMENT_NOT_RECEIVED' ELSE 'AMOUNT_VARIANCE' END LIMIT 1)
                 FROM transactions.invoice i
                 __RECON_SCOPE_FILTER__
                 """;
@@ -252,13 +254,14 @@ public class ReconciliationModuleRepository {
                     rcs.code AS reco_status,
                     sev.code AS severity,
                     s.mismatch_reference_code,
-                    s.reason_code,
+                    lr.code AS reason_code,
                     s.reason_text,
                     s.event_at
                 FROM reconciliation.reconciliation_run_snapshot s
                 JOIN reconciliation.reconciliation_run rr ON rr.reconciliation_run_id = s.reconciliation_run_id
                 JOIN reconciliation.lu_reconciliation_status rcs ON rcs.reconciliation_status_id = s.reconciliation_status_id
                 LEFT JOIN reconciliation.lu_severity sev ON sev.severity_id = s.severity_id
+                LEFT JOIN reconciliation.lu_reconciliation_reason lr ON lr.reconciliation_reason_id = s.reconciliation_reason_id
                 WHERE rr.run_reference_code = ?
                   AND (s.entity_reference_code = ? OR CAST(s.entity_id AS text) = ?)
                 ORDER BY s.created_on DESC
@@ -306,6 +309,16 @@ public class ReconciliationModuleRepository {
         }
         String reasonText = "Live recompute: invoice vs payment transaction";
 
+        UUID reasonPk = null;
+        if (!"MATCHED".equals(reasonCode)) {
+            String dbReason = "MISSING_PAYMENT".equals(reasonCode) ? "PAYMENT_NOT_RECEIVED" : "AMOUNT_VARIANCE";
+            List<UUID> ids = jdbc.query(
+                    "SELECT reconciliation_reason_id FROM reconciliation.lu_reconciliation_reason WHERE code = ? LIMIT 1",
+                    (rs, rn) -> rs.getObject(1, UUID.class),
+                    dbReason);
+            reasonPk = ids.isEmpty() ? null : ids.get(0);
+        }
+
         jdbc.update("""
                         UPDATE reconciliation.reconciliation_run_snapshot s
                         SET expected_amount = ?,
@@ -317,12 +330,12 @@ public class ReconciliationModuleRepository {
                                 SELECT severity_id FROM reconciliation.lu_severity
                                 WHERE code = CASE WHEN ABS(? - ?) > 1000 THEN 'HIGH' ELSE 'MEDIUM' END
                             ),
-                            reason_code = ?,
+                            reconciliation_reason_id = ?,
                             reason_text = ?,
                             event_at = now()
                         WHERE s.reconciliation_run_snapshot_id = ?
                         """,
-                liveExpected, liveActual, liveStatus, liveExpected, liveActual, reasonCode, reasonText, snapshotPk);
+                liveExpected, liveActual, liveStatus, liveExpected, liveActual, reasonPk, reasonText, snapshotPk);
 
         UUID runPk = getRunInternalIdByReferenceCode(recoRunId);
         UUID tenantUuid = parseTenantUuidOrNull(tenantId);
@@ -393,16 +406,18 @@ public class ReconciliationModuleRepository {
         jdbc.update("""
                         INSERT INTO reconciliation.reconciliation_exception
                         (exception_reference_code, reconciliation_run_id, reconciliation_run_snapshot_id, mismatch_reference_code,
-                         entity_type, entity_id, entity_reference_code, title, description, reconciliation_stage_id, severity_id,
-                         exception_status_id, tags_json, tenant_id, created_on, modified_on)
+                         entity_id, entity_reference_code, title, description, reconciliation_stage_id, severity_id,
+                         exception_status_id, tags_json, application_id, reconciliation_entity_type_id, created_on, modified_on)
                         VALUES (
                             ?, ?, ?, ?,
-                            'INVOICE', ?::uuid, ?, ?, ?,
+                            ?::uuid, ?, ?, ?,
                             (SELECT reconciliation_stage_id FROM reconciliation.lu_reconciliation_stage WHERE code = 'INVOICE_TO_PAYMENT'),
                             (SELECT severity_id FROM reconciliation.lu_severity WHERE code = CASE WHEN ABS(? - ?) > 1000 THEN 'HIGH' ELSE 'MEDIUM' END),
                             (SELECT exception_status_id FROM reconciliation.lu_exception_status WHERE code = 'OPEN'),
                             '[]'::jsonb,
-                            ?, now(), now()
+                            ?,
+                            (SELECT reconciliation_entity_type_id FROM reconciliation.lu_reconciliation_entity_type WHERE code = 'INVOICE' LIMIT 1),
+                            now(), now()
                         )
                         """,
                 exceptionCode,
@@ -562,9 +577,12 @@ public class ReconciliationModuleRepository {
         int runVersion = computeNextRunVersion(tenantUuid, financialPeriodId, priorRunVersionForSequence);
         filterMap.put("runVersion", runVersion);
         String refCode = "RR-" + Math.abs(UUID.randomUUID().hashCode());
+        if (locationId != null) {
+            filterMap.putIfAbsent("locationIds", List.of(locationId.toString()));
+        }
         jdbc.update("""
                 INSERT INTO reconciliation.reconciliation_run
-                (run_reference_code, run_type, reconciliation_run_status_id, reconciliation_trigger_mode_id, tenant_id, requested_by_user_id, financial_period_id, location_id, filters_json, started_on, created_on, modified_on)
+                (run_reference_code, run_type, reconciliation_run_status_id, reconciliation_trigger_mode_id, application_id, requested_by, financial_period_id, level_id, filters_json, started_on, created_on, modified_on)
                 VALUES (
                     ?,
                     ?,
@@ -573,11 +591,11 @@ public class ReconciliationModuleRepository {
                     ?,
                     ?,
                     ?,
-                    ?,
+                    NULL,
                     ?::jsonb,
                     now(), now(), now()
                 )
-                """, refCode, runType, triggerMode == null ? "MANUAL" : triggerMode.toUpperCase(), tenantUuid, requestedByUuid, financialPeriodId, locationId, toJson(filterMap));
+                """, refCode, runType, triggerMode == null ? "MANUAL" : triggerMode.toUpperCase(), tenantUuid, requestedByUuid, financialPeriodId, toJson(filterMap));
         UUID runUuid = getRunInternalIdByReferenceCode(refCode);
         try {
             Map<String, Object> summary = computeDashboardSummaryLive(filterMap);
@@ -690,9 +708,10 @@ public class ReconciliationModuleRepository {
                     s.entity_reference_code AS "entityRef",
                     COALESCE(s.attributes_json->>'reconciliationType', '') AS "recoType",
                     s.severity_id AS "severityId",
-                    s.reason_code AS "reasonCode",
+                    lr.code AS "reasonCode",
                     s.reason_text AS "reasonText"
                 FROM reconciliation.reconciliation_run_snapshot s
+                LEFT JOIN reconciliation.lu_reconciliation_reason lr ON lr.reconciliation_reason_id = s.reconciliation_reason_id
                 WHERE s.reconciliation_run_id = ?
                 """, runUuid);
 
@@ -718,11 +737,7 @@ public class ReconciliationModuleRepository {
                         re.exception_reference_code AS "exceptionRef",
                         re.entity_id AS "entityId",
                         re.reconciliation_stage_id AS "stageId",
-                        COALESCE(
-                            NULLIF(TRIM(re.reconciliation_type), ''),
-                            NULLIF(TRIM(s.attributes_json->>'reconciliationType'), ''),
-                            ''
-                        ) AS "recoType",
+                        COALESCE(NULLIF(TRIM(s.attributes_json->>'reconciliationType'), ''), '') AS "recoType",
                         s.expected_amount AS "prevExpected",
                         s.actual_amount AS "prevActual",
                         re.created_on AS "createdOn"
@@ -801,7 +816,6 @@ public class ReconciliationModuleRepository {
                 if (newSnapPk == null) {
                     continue;
                 }
-                String newRecoType = Objects.toString(newSnap.get("recoType"), "").trim();
                 jdbc.update("""
                         UPDATE reconciliation.reconciliation_exception
                         SET latest_reconciliation_run_id = ?,
@@ -810,14 +824,12 @@ public class ReconciliationModuleRepository {
                             occurrence_count = COALESCE(occurrence_count, 1) + 1,
                             last_seen_at = now(),
                             origin_reconciliation_run_id = COALESCE(origin_reconciliation_run_id, reconciliation_run_id),
-                            reconciliation_type = COALESCE(NULLIF(TRIM(?), ''), reconciliation_type),
                             modified_on = now()
                         WHERE reconciliation_exception_id = ?
                         """,
                         runUuid,
                         runUuid,
                         newSnapPk,
-                        newRecoType.isEmpty() ? "" : newRecoType,
                         exPk);
                 double prevVar = varianceFromAmounts(ex.get("prevExpected"), ex.get("prevActual"));
                 double newVar = varianceFromAmounts(newSnap.get("expectedAmount"), newSnap.get("actualAmount"));
@@ -914,7 +926,6 @@ public class ReconciliationModuleRepository {
                 if (exPk == null || exRef == null) {
                     continue;
                 }
-                String newRecoType = snapReco.trim();
                 jdbc.update("""
                         UPDATE reconciliation.reconciliation_exception
                         SET latest_reconciliation_run_id = ?,
@@ -923,14 +934,12 @@ public class ReconciliationModuleRepository {
                             occurrence_count = COALESCE(occurrence_count, 1) + 1,
                             last_seen_at = now(),
                             origin_reconciliation_run_id = COALESCE(origin_reconciliation_run_id, reconciliation_run_id),
-                            reconciliation_type = COALESCE(NULLIF(TRIM(?), ''), reconciliation_type),
                             modified_on = now()
                         WHERE reconciliation_exception_id = ?
                         """,
                         runUuid,
                         runUuid,
                         newSnapPk,
-                        newRecoType.isEmpty() ? "" : newRecoType,
                         exPk);
                 double prevVar = varianceFromAmounts(primary.get("prevExpected"), primary.get("prevActual"));
                 double newVar = varianceFromAmounts(snap.get("expectedAmount"), snap.get("actualAmount"));
@@ -954,24 +963,24 @@ public class ReconciliationModuleRepository {
             String exceptionCode = "EX-" + Math.abs(UUID.randomUUID().hashCode());
             String entityRef = snap.get("entityRef") != null ? String.valueOf(snap.get("entityRef")) : String.valueOf(entityId);
             String desc = Objects.toString(snap.get("reasonText"), "Invoice amount vs captured transaction");
-            String recoType = snapReco.trim();
             jdbc.update("""
                             INSERT INTO reconciliation.reconciliation_exception (
                                 exception_reference_code,
                                 reconciliation_run_id,
                                 reconciliation_run_snapshot_id,
                                 mismatch_reference_code,
-                                entity_type, entity_id, entity_reference_code, title, description,
-                                reconciliation_stage_id, severity_id, exception_status_id, tags_json, tenant_id,
+                                entity_id, entity_reference_code, title, description,
+                                reconciliation_stage_id, severity_id, exception_status_id, tags_json, application_id,
+                                reconciliation_entity_type_id,
                                 origin_reconciliation_run_id, latest_reconciliation_run_id,
-                                first_detected_at, last_seen_at, occurrence_count,
-                                reconciliation_type, created_on, modified_on
+                                first_detected_at, last_seen_at, occurrence_count, created_on, modified_on
                             ) VALUES (
                                 ?, ?, ?, ?,
-                                'INVOICE', ?::uuid, ?, 'Invoice reconciliation mismatch', ?,
+                                ?::uuid, ?, 'Invoice reconciliation mismatch', ?,
                                 ?, ?, (SELECT exception_status_id FROM reconciliation.lu_exception_status WHERE code = 'OPEN'),
                                 '[]'::jsonb, ?,
-                                ?, ?, now(), now(), 1, NULLIF(TRIM(?), ''), now(), now()
+                                (SELECT reconciliation_entity_type_id FROM reconciliation.lu_reconciliation_entity_type WHERE code = 'INVOICE' LIMIT 1),
+                                ?, ?, now(), now(), 1, now(), now()
                             )
                             """,
                     exceptionCode,
@@ -985,8 +994,7 @@ public class ReconciliationModuleRepository {
                     snap.get("severityId"),
                     tenantUuid,
                     runUuid,
-                    runUuid,
-                    recoType.isEmpty() ? null : recoType);
+                    runUuid);
             String openNote = isResync
                     ? ("Opened from resync run " + runRefCode + " (new mismatch vs prior run " + srcRef + ").")
                     : ("Opened from reconciliation run " + runRefCode + ".");
@@ -1008,7 +1016,7 @@ public class ReconciliationModuleRepository {
     private void writeLifecycleAuditLog(UUID tenantUuid, String actionCode, String exceptionReferenceCode, Map<String, Object> details) {
         try {
             jdbc.update("""
-                    INSERT INTO reconciliation.audit_log (tenant_id, action_code, entity_type, entity_reference_code, details_json)
+                    INSERT INTO reconciliation.audit_log (application_id, action_code, entity_type, entity_reference_code, details_json)
                     VALUES (?, ?, 'RECONCILIATION_EXCEPTION', ?, ?::jsonb)
                     """,
                     tenantUuid,
@@ -1070,11 +1078,7 @@ public class ReconciliationModuleRepository {
                     re.exception_reference_code AS "exceptionRef",
                     re.entity_id AS "entityId",
                     re.reconciliation_stage_id AS "stageId",
-                    COALESCE(
-                        NULLIF(TRIM(re.reconciliation_type), ''),
-                        NULLIF(TRIM(s.attributes_json->>'reconciliationType'), ''),
-                        ''
-                    ) AS "recoType",
+                    COALESCE(NULLIF(TRIM(s.attributes_json->>'reconciliationType'), ''), '') AS "recoType",
                     re.created_on AS "createdOn",
                     s.expected_amount AS "prevExpected",
                     s.actual_amount AS "prevActual"
@@ -1084,7 +1088,7 @@ public class ReconciliationModuleRepository {
                 WHERE re.entity_id = ?
                   AND re.reconciliation_stage_id = ?
                   AND es.code IN ('OPEN', 'IN_PROGRESS', 'ESCALATED')
-                  AND (re.tenant_id IS NOT DISTINCT FROM ?)
+                  AND (re.application_id IS NOT DISTINCT FROM ?)
                 ORDER BY re.created_on ASC
                 """, entityId, stageId, tenantUuid);
     }
@@ -1571,7 +1575,7 @@ public class ReconciliationModuleRepository {
                          ELSE ABS(COALESCE(s.expected_amount, 0) - COALESCE(s.actual_amount, 0)) * 100.0 / COALESCE(s.expected_amount, 1) END AS "variancePct",
                     rcs.code AS "status",
                     sev.code AS "severity",
-                    s.reason_code AS "reasonCode",
+                    lr.code AS "reasonCode",
                     COALESCE(s.reason_text, '') AS "reasonText",
                     s.event_at AS "createdAt",
                     NULL::text AS "locationId"
@@ -1579,6 +1583,7 @@ public class ReconciliationModuleRepository {
                 JOIN reconciliation.reconciliation_run rr ON rr.reconciliation_run_id = s.reconciliation_run_id
                 JOIN reconciliation.lu_reconciliation_status rcs ON rcs.reconciliation_status_id = s.reconciliation_status_id
                 LEFT JOIN reconciliation.lu_severity sev ON sev.severity_id = s.severity_id
+                LEFT JOIN reconciliation.lu_reconciliation_reason lr ON lr.reconciliation_reason_id = s.reconciliation_reason_id
                 WHERE rr.run_reference_code = ?
                   AND rcs.code <> 'RECONCILED'
                 """ + extra + """
@@ -1653,8 +1658,8 @@ public class ReconciliationModuleRepository {
                     st.code AS "status",
                     COALESCE(fp.period_code, rr.filters_json->>'financialPeriod') AS "financialPeriod",
                     rr.filters_json->>'currency' AS "currency",
-                    CAST(rr.requested_by_user_id AS text) AS "requestedBy",
-                    CAST(rr.tenant_id AS text) AS "tenantId",
+                    CAST(rr.requested_by AS text) AS "requestedBy",
+                    CAST(rr.application_id AS text) AS "tenantId",
                     rr.filters_json AS "filters",
                     rr.started_on AS "startedAt",
                     rr.ended_on AS "endedAt",
@@ -1727,8 +1732,8 @@ public class ReconciliationModuleRepository {
                     st.code AS "status",
                     COALESCE(fp.period_code, rr.filters_json->>'financialPeriod') AS "financialPeriod",
                     rr.filters_json->>'currency' AS "currency",
-                    CAST(rr.tenant_id AS text) AS "tenantId",
-                    CAST(rr.requested_by_user_id AS text) AS "requestedBy",
+                    CAST(rr.application_id AS text) AS "tenantId",
+                    CAST(rr.requested_by AS text) AS "requestedBy",
                     rr.filters_json AS "filters",
                     rr.started_on AS "startedAt",
                     rr.ended_on AS "endedAt",
@@ -1808,9 +1813,13 @@ public class ReconciliationModuleRepository {
                 }
             }
             if (!locUuids.isEmpty()) {
-                where.append(" AND rr.location_id IN (");
+                where.append("""
+                         AND EXISTS (
+                            SELECT 1 FROM jsonb_array_elements_text(COALESCE(rr.filters_json->'locationIds', '[]'::jsonb)) elem
+                            WHERE NULLIF(TRIM(elem), '')::uuid IN (
+                        """);
                 appendPlaceholders(where, locUuids.size());
-                where.append(") ");
+                where.append(")) ");
                 args.addAll(locUuids);
             }
         }
@@ -1839,7 +1848,7 @@ public class ReconciliationModuleRepository {
                     END
                 ), 0)
                 FROM reconciliation.reconciliation_run rr
-                WHERE (rr.tenant_id IS NOT DISTINCT FROM ?)
+                WHERE (rr.application_id IS NOT DISTINCT FROM ?)
                   AND (rr.financial_period_id IS NOT DISTINCT FROM ?)
                 """, Integer.class, tenantUuid, financialPeriodId);
         int max = maxExisting == null ? 0 : maxExisting;
@@ -2072,7 +2081,9 @@ public class ReconciliationModuleRepository {
                      WHERE rr_l.reconciliation_run_id = re.latest_reconciliation_run_id) AS "latestRunId",
                     re.occurrence_count AS "occurrenceCount",
                     re.is_auto_resolved AS "isAutoResolved",
-                    re.reconciliation_type AS "reconciliationType",
+                    (SELECT NULLIF(TRIM(s2.attributes_json->>'reconciliationType'), '')
+                     FROM reconciliation.reconciliation_run_snapshot s2
+                     WHERE s2.reconciliation_run_snapshot_id = re.reconciliation_run_snapshot_id LIMIT 1) AS "reconciliationType",
                     re.first_detected_at AS "firstDetectedAt",
                     re.last_seen_at AS "lastSeenAt"
                 FROM reconciliation.reconciliation_exception re
@@ -2102,19 +2113,21 @@ public class ReconciliationModuleRepository {
 
     public String createException(ReconciliationRequests.CreateExceptionRequest request, String tenantId) {
         String exceptionCode = "EX-" + Math.abs(UUID.randomUUID().hashCode());
+        UUID entityPk = parseOptionalUuid(request.entityId());
         jdbc.update("""
                 INSERT INTO reconciliation.reconciliation_exception
-                (exception_reference_code, mismatch_reference_code, entity_type, entity_reference_code, title, description, reconciliation_stage_id, severity_id, exception_status_id, tags_json, tenant_id, created_on, modified_on)
+                (exception_reference_code, mismatch_reference_code, entity_id, entity_reference_code, title, description, reconciliation_stage_id, severity_id, exception_status_id, tags_json, application_id, reconciliation_entity_type_id, created_on, modified_on)
                 VALUES (
-                    ?, ?, 'INVOICE', ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
                     (SELECT reconciliation_stage_id FROM reconciliation.lu_reconciliation_stage WHERE code = ?),
                     (SELECT severity_id FROM reconciliation.lu_severity WHERE code = ?),
                     (SELECT exception_status_id FROM reconciliation.lu_exception_status WHERE code = 'OPEN'),
                     ?::jsonb,
                     NULLIF(?, '')::uuid,
+                    (SELECT reconciliation_entity_type_id FROM reconciliation.lu_reconciliation_entity_type WHERE code = 'INVOICE' LIMIT 1),
                     now(), now()
                 )
-                """, exceptionCode, request.mismatchId(), request.entityId(), request.title(), request.description(), request.stage().toUpperCase(), request.severity().toUpperCase(), toJson(request.tags() == null ? List.of() : request.tags()), tenantId);
+                """, exceptionCode, request.mismatchId(), entityPk, request.entityId(), request.title(), request.description(), request.stage().toUpperCase(), request.severity().toUpperCase(), toJson(request.tags() == null ? List.of() : request.tags()), tenantId);
         return exceptionCode;
     }
 
@@ -2166,10 +2179,22 @@ public class ReconciliationModuleRepository {
     }
 
     public void addExceptionNote(String exceptionId, String note) {
+        addExceptionNote(exceptionId, note, null);
+    }
+
+    public void addExceptionNote(String exceptionId, String note, String exceptionNoteTypeCode) {
+        UUID typeId = null;
+        if (exceptionNoteTypeCode != null && !exceptionNoteTypeCode.isBlank()) {
+            List<UUID> ids = jdbc.query(
+                    "SELECT exception_note_type_id FROM reconciliation.lu_exception_note_type WHERE UPPER(code) = UPPER(?) AND is_active = true LIMIT 1",
+                    (rs, rn) -> rs.getObject(1, UUID.class),
+                    exceptionNoteTypeCode.trim());
+            typeId = ids.isEmpty() ? null : ids.get(0);
+        }
         jdbc.update("""
-                INSERT INTO reconciliation.exception_note (reconciliation_exception_id, note_text, created_on)
-                VALUES ((SELECT reconciliation_exception_id FROM reconciliation.reconciliation_exception WHERE exception_reference_code = ?), ?, now())
-                """, exceptionId, note);
+                INSERT INTO reconciliation.exception_note (reconciliation_exception_id, note_text, created_on, exception_note_type_id)
+                VALUES ((SELECT reconciliation_exception_id FROM reconciliation.reconciliation_exception WHERE exception_reference_code = ?), ?, now(), ?)
+                """, exceptionId, note, typeId);
     }
 
     public List<Map<String, Object>> getJournal(String period, List<String> glAccountCodes, List<String> postingStatus, String entityId, String recoRunId) {
@@ -2178,13 +2203,14 @@ public class ReconciliationModuleRepository {
                 SELECT
                     ge.gl_entry_reference_code AS "journalId",
                     COALESCE(ge.entity_reference_code, CAST(ge.entity_id AS text)) AS "entityId",
-                    ge.gl_account_code AS "glAccountCode",
+                    gc.gl_code AS "glAccountCode",
                     ge.debit_amount AS "debitAmount",
                     ge.credit_amount AS "creditAmount",
                     gps.code AS "postingStatus",
                     ge.posted_at AS "postedAt"
                 FROM reconciliation.gl_entry ge
                 JOIN reconciliation.lu_gl_posting_status gps ON gps.gl_posting_status_id = ge.gl_posting_status_id
+                LEFT JOIN finance.gl_code gc ON gc.gl_code_id = ge.gl_code_id
                 LEFT JOIN reconciliation.financial_period fp ON fp.financial_period_id = ge.financial_period_id
                 WHERE 1=1
                 """);
@@ -2202,7 +2228,7 @@ public class ReconciliationModuleRepository {
         }
         List<String> accounts = glAccountCodes == null ? List.of() : glAccountCodes.stream().filter(s -> s != null && !s.isBlank()).toList();
         if (!accounts.isEmpty()) {
-            sql.append(" AND ge.gl_account_code IN (");
+            sql.append(" AND gc.gl_code IN (");
             appendPlaceholders(sql, accounts.size());
             sql.append(") ");
             args.addAll(accounts);
@@ -2409,8 +2435,16 @@ public class ReconciliationModuleRepository {
         return rows.isEmpty() ? Map.of("exportId", exportId, "status", "NOT_FOUND") : rows.get(0);
     }
 
-    public List<Map<String, Object>> listAudit(String entityType, String entityId, Integer limit) {
-        int lim = limit == null || limit < 1 ? 500 : Math.min(limit, 2000);
+    public List<Map<String, Object>> listAudit(String entityType, String entityId, Integer limit, Integer page, Integer pageSize) {
+        int effectiveLimit;
+        int offset = 0;
+        if (page != null && page > 0 && pageSize != null && pageSize > 0) {
+            int cappedPageSize = Math.min(pageSize, 200);
+            offset = (page - 1) * cappedPageSize;
+            effectiveLimit = cappedPageSize;
+        } else {
+            effectiveLimit = limit == null || limit < 1 ? 500 : Math.min(limit, 2000);
+        }
         List<Object> args = new ArrayList<>();
         StringBuilder sql = new StringBuilder("""
                 SELECT
@@ -2435,8 +2469,9 @@ public class ReconciliationModuleRepository {
             args.add(entityId.trim());
             args.add(entityId.trim());
         }
-        sql.append(" ORDER BY event_at DESC LIMIT ? ");
-        args.add(lim);
+        sql.append(" ORDER BY event_at DESC LIMIT ? OFFSET ? ");
+        args.add(effectiveLimit);
+        args.add(offset);
         return jdbc.queryForList(sql.toString(), args.toArray());
     }
 
@@ -2460,7 +2495,7 @@ public class ReconciliationModuleRepository {
                     response_body_json AS "responseBodyJson",
                     response_reference_code AS "responseReferenceCode"
                 FROM reconciliation.idempotency_request
-                WHERE tenant_id IS NOT DISTINCT FROM NULLIF(?, '')::uuid
+                WHERE application_id IS NOT DISTINCT FROM NULLIF(?, '')::uuid
                   AND idempotency_key = ?
                 LIMIT 1
                 """, tenantId, idempotencyKey);
@@ -2470,9 +2505,9 @@ public class ReconciliationModuleRepository {
     public boolean reserveIdempotency(String tenantId, String idempotencyKey, String method, String path, String requestHash, Object requestBody) {
         int count = jdbc.update("""
                 INSERT INTO reconciliation.idempotency_request
-                (tenant_id, idempotency_key, request_method, request_path, request_hash, request_body_json, first_seen_on, last_seen_on)
+                (application_id, idempotency_key, request_method, request_path, request_hash, request_body_json, first_seen_on, last_seen_on)
                 VALUES (NULLIF(?, '')::uuid, ?, ?, ?, ?, ?::jsonb, now(), now())
-                ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+                ON CONFLICT (application_id, idempotency_key) DO NOTHING
                 """, tenantId, idempotencyKey, method, path, requestHash, toJson(requestBody));
         return count > 0;
     }
@@ -2484,7 +2519,7 @@ public class ReconciliationModuleRepository {
                     response_body_json = ?::jsonb,
                     response_reference_code = ?,
                     last_seen_on = now()
-                WHERE tenant_id IS NOT DISTINCT FROM NULLIF(?, '')::uuid
+                WHERE application_id IS NOT DISTINCT FROM NULLIF(?, '')::uuid
                   AND idempotency_key = ?
                 """, statusCode, toJson(responseBody), responseReferenceCode, tenantId, idempotencyKey);
     }
@@ -3031,12 +3066,12 @@ public class ReconciliationModuleRepository {
         String inList = invoiceIds.stream().map(u -> "'" + u + "'").collect(Collectors.joining(","));
         String sql = "SELECT "
                 + "ge.gl_entry_reference_code AS \"glEntryId\", "
-                + "ge.entity_type AS \"entityType\", "
+                + "et.code AS \"entityType\", "
                 + "ge.entity_id::text AS entity_id, "
                 + "ge.entity_reference_code AS \"entityReferenceCode\", "
-                + "ge.gl_account_code AS \"glAccountCode\", "
-                + "ge.gl_account_name AS \"glAccountName\", "
-                + "ge.currency_code AS \"currencyCode\", "
+                + "gc.gl_code AS \"glAccountCode\", "
+                + "gc.description AS \"glAccountName\", "
+                + "pcur.currency_code AS \"currencyCode\", "
                 + "ge.debit_amount AS \"debitAmount\", "
                 + "ge.credit_amount AS \"creditAmount\", "
                 + "gps.code AS \"postingStatus\", "
@@ -3045,6 +3080,9 @@ public class ReconciliationModuleRepository {
                 + "ge.created_on AS \"createdOn\" "
                 + "FROM reconciliation.gl_entry ge "
                 + "JOIN reconciliation.lu_gl_posting_status gps ON gps.gl_posting_status_id = ge.gl_posting_status_id "
+                + "LEFT JOIN reconciliation.lu_reconciliation_entity_type et ON et.reconciliation_entity_type_id = ge.entity_type_id "
+                + "LEFT JOIN finance.gl_code gc ON gc.gl_code_id = ge.gl_code_id "
+                + "LEFT JOIN payment_gateway.lu_payment_gateway_currency_type pcur ON pcur.payment_gateway_currency_type_id = ge.payment_currency_type_id "
                 + "WHERE ge.reconciliation_run_id = ?::uuid "
                 + "AND (ge.entity_id IN (" + inList + ") "
                 + "OR ge.entity_reference_code IN (SELECT invoice_number FROM transactions.invoice WHERE invoice_id IN (" + inList + ")))";
@@ -3087,7 +3125,7 @@ public class ReconciliationModuleRepository {
                 + "COALESCE(s.actual_amount, 0) AS \"actualAmount\", "
                 + "rcs.code AS \"reconciliationStatus\", "
                 + "sev.code AS \"severity\", "
-                + "s.reason_code AS \"reasonCode\", "
+                + "lr.code AS \"reasonCode\", "
                 + "s.reason_text AS \"reasonText\", "
                 + "s.attributes_json AS \"attributesJson\", "
                 + "s.event_at AS \"eventAt\" "
@@ -3095,8 +3133,10 @@ public class ReconciliationModuleRepository {
                 + "JOIN reconciliation.reconciliation_run rr ON rr.reconciliation_run_id = s.reconciliation_run_id "
                 + "JOIN reconciliation.lu_reconciliation_status rcs ON rcs.reconciliation_status_id = s.reconciliation_status_id "
                 + "LEFT JOIN reconciliation.lu_severity sev ON sev.severity_id = s.severity_id "
+                + "LEFT JOIN reconciliation.lu_reconciliation_entity_type et ON et.reconciliation_entity_type_id = s.reconciliation_entity_type_id "
+                + "LEFT JOIN reconciliation.lu_reconciliation_reason lr ON lr.reconciliation_reason_id = s.reconciliation_reason_id "
                 + "WHERE rr.run_reference_code = ? "
-                + "AND s.entity_type = 'INVOICE' "
+                + "AND et.code = 'INVOICE' "
                 + "AND (s.entity_id IN (" + inList + ") "
                 + "OR s.entity_reference_code IN (SELECT invoice_number FROM transactions.invoice WHERE invoice_id IN (" + inList + ")))";
         List<Map<String, Object>> rows = jdbc.queryForList(sql, recoRunId);

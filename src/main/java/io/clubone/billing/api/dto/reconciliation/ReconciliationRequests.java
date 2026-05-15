@@ -52,7 +52,8 @@ public final class ReconciliationRequests {
     }
 
     public record AddNoteRequest(
-            @NotBlank String note
+            @NotBlank String note,
+            String noteTypeCode
     ) {
     }
 
@@ -141,6 +142,32 @@ public final class ReconciliationRequests {
     /** Optional sample payload for rule test stub. */
     public record MatchingRuleTestRequest(
             Map<String, Object> samplePayload
+    ) {
+    }
+
+    /** Bulk import GL mapping rows (same shape as list/export rows + write fields). */
+    public record GlMappingImportRequest(
+            @NotNull List<Map<String, Object>> items
+    ) {
+    }
+
+    /** Sample transaction for GL mapping journal preview / test. */
+    public record GlMappingJournalTestRequest(
+            Map<String, Object> sample
+    ) {
+    }
+
+    /** Threshold preview-impact toolbar (optional filters / search). */
+    public record ThresholdPreviewImpactRequest(
+            String kind,
+            Map<String, Object> filters,
+            String search
+    ) {
+    }
+
+    /** Threshold test/evaluate sample (optional). */
+    public record ThresholdTestRequest(
+            Map<String, Object> sample
     ) {
     }
 }
