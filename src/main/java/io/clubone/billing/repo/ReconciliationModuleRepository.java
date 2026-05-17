@@ -123,48 +123,20 @@ public class ReconciliationModuleRepository {
     }
 
     public Map<String, Object> getWorkspace(String entityId, String entityType, String recoRunId, boolean recompute, String tenantId) {
-        List<Map<String, Object>> rows = jdbc.queryForList("""
-                SELECT
-                    i.invoice_id, i.invoice_number, i.total_amount AS invoice_amount, lis.status_name AS invoice_status, i.created_on AS invoice_created_on,
-                    (SELECT cpi_one.client_payment_intent_id FROM client_payments.client_payment_intent cpi_one
-                     WHERE cpi_one.invoice_id = i.invoice_id ORDER BY cpi_one.client_payment_intent_id DESC LIMIT 1) AS client_payment_intent_id,
-                    (SELECT COALESCE(cpi_one.amount, 0)::numeric / 100.0
-                     FROM client_payments.client_payment_intent cpi_one
-                     WHERE cpi_one.invoice_id = i.invoice_id ORDER BY cpi_one.client_payment_intent_id DESC LIMIT 1) AS intent_amount,
-                    (SELECT cpt_one.client_payment_transaction_id
-                     FROM client_payments.client_payment_intent cpi_one
-                     JOIN client_payments.client_payment_transaction cpt_one ON cpt_one.client_payment_intent_id = cpi_one.client_payment_intent_id
-                     WHERE cpi_one.invoice_id = i.invoice_id
-                     ORDER BY cpt_one.client_payment_transaction_id DESC LIMIT 1) AS client_payment_transaction_id,
-                """ + "(" + INVOICE_CAPTURED_PAID_MAJOR_EXPR.strip() + ") AS txn_amount,\n" + """
-                    (SELECT cpt_one.payment_gateway_order_id
-                     FROM client_payments.client_payment_intent cpi_one
-                     JOIN client_payments.client_payment_transaction cpt_one ON cpt_one.client_payment_intent_id = cpi_one.client_payment_intent_id
-                     WHERE cpi_one.invoice_id = i.invoice_id
-                     ORDER BY cpt_one.client_payment_transaction_id DESC LIMIT 1) AS payment_gateway_order_id
-                FROM transactions.invoice i
-                LEFT JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
-                WHERE i.invoice_number = ? OR CAST(i.invoice_id AS text) = ?
-                LIMIT 1
-                """, entityId, entityId);
-        if (rows.isEmpty()) {
-            Map<String, Object> notFound = new HashMap<>();
-            Map<String, Object> lookup = new HashMap<>();
-            lookup.put("entityId", entityId);
-            lookup.put("entityType", entityType == null ? "INVOICE" : entityType);
-            notFound.put("lookup", lookup);
-            notFound.put("reconciliationStatus", "NOT_FOUND");
-            notFound.put("mismatches", List.of());
-            notFound.put("snapshotSync", Map.of("performed", false));
-            return notFound;
+        UUID invoiceId = resolveInvoiceId(entityId);
+        if (invoiceId == null) {
+            return workspaceNotFound(entityId, entityType);
         }
-        Map<String, Object> row = rows.get(0);
-        Map<String, Object> out = buildWorkspacePayload(row, entityId, entityType);
-        if (recoRunId != null && !recoRunId.isBlank()) {
-            Map<String, Object> snap = loadRunSnapshotForEntity(recoRunId, entityId);
+        String runRef = recoRunId == null || recoRunId.isBlank() ? null : recoRunId.trim();
+        UUID runUuid = lookupRunUuidOrNull(runRef);
+        boolean subscription = isSubscriptionInvoice(invoiceId);
+        Map<String, Object> chain = buildSingleInvoiceChain(runRef, runUuid, invoiceId, subscription);
+        Map<String, Object> out = buildWorkspaceResponseFromChain(chain, entityId, entityType, runRef, subscription);
+        if (runRef != null) {
+            Map<String, Object> snap = normalizeWorkspaceRunSnapshot(loadRunSnapshotForEntity(runRef, entityId));
             out.put("runSnapshot", snap);
             if (recompute) {
-                out.put("snapshotSync", syncRunSnapshotWithLiveIfChanged(recoRunId, tenantId, row, snap));
+                out.put("snapshotSync", syncRunSnapshotWithLiveIfChanged(runRef, tenantId, liveRowFromChain(chain), snap));
             } else {
                 out.put("snapshotSync", Map.of("performed", false, "reason", "recompute_disabled"));
             }
@@ -175,36 +147,398 @@ public class ReconciliationModuleRepository {
         return out;
     }
 
-    private Map<String, Object> buildWorkspacePayload(Map<String, Object> row, String entityId, String entityType) {
-        Map<String, Object> lookup = new HashMap<>();
+    private Map<String, Object> workspaceNotFound(String entityId, String entityType) {
+        Map<String, Object> lookup = new LinkedHashMap<>();
+        lookup.put("entityId", entityId);
+        lookup.put("entityType", entityType == null ? "INVOICE" : entityType);
+        Map<String, Object> notFound = new LinkedHashMap<>();
+        notFound.put("lookup", lookup);
+        notFound.put("reconciliationStatus", "NOT_FOUND");
+        notFound.put("invoice", Map.of());
+        notFound.put("paymentIntent", Map.of());
+        notFound.put("paymentTransaction", Map.of());
+        notFound.put("paymentIntents", List.of());
+        notFound.put("runSnapshots", List.of());
+        notFound.put("refunds", List.of());
+        notFound.put("glPosting", Map.of("entries", List.of()));
+        notFound.put("exceptions", List.of());
+        notFound.put("stages", List.of());
+        notFound.put("snapshotSync", Map.of("performed", false, "reason", "entity_not_found"));
+        return notFound;
+    }
+
+    private UUID resolveInvoiceId(String entityId) {
+        if (entityId == null || entityId.isBlank()) {
+            return null;
+        }
+        List<UUID> ids = jdbc.query("""
+                SELECT i.invoice_id
+                FROM transactions.invoice i
+                WHERE i.invoice_number = ? OR CAST(i.invoice_id AS text) = ?
+                LIMIT 1
+                """, (rs, rn) -> rs.getObject(1, UUID.class), entityId.trim(), entityId.trim());
+        return ids.isEmpty() ? null : ids.get(0);
+    }
+
+    private UUID lookupRunUuidOrNull(String recoRunId) {
+        if (recoRunId == null || recoRunId.isBlank()) {
+            return null;
+        }
+        List<UUID> ids = jdbc.query(
+                "SELECT reconciliation_run_id FROM reconciliation.reconciliation_run WHERE run_reference_code = ? LIMIT 1",
+                (rs, rn) -> rs.getObject(1, UUID.class),
+                recoRunId.trim());
+        return ids.isEmpty() ? null : ids.get(0);
+    }
+
+    private boolean isSubscriptionInvoice(UUID invoiceId) {
+        Boolean exists = jdbc.queryForObject("""
+                SELECT EXISTS (
+                    SELECT 1 FROM client_subscription_billing.subscription_billing_schedule sbs
+                    WHERE sbs.invoice_id = ?
+                )
+                """, Boolean.class, invoiceId);
+        return Boolean.TRUE.equals(exists);
+    }
+
+    private Map<String, Object> buildSingleInvoiceChain(String recoRunId, UUID runUuid, UUID invoiceId, boolean subscription) {
+        Map<String, Object> root = subscription
+                ? loadSubscriptionScheduleRootForInvoice(invoiceId)
+                : loadCashInvoiceRootForInvoice(invoiceId);
+        List<Map<String, Object>> chains = assembleChains(
+                recoRunId == null ? "" : recoRunId,
+                runUuid,
+                List.of(root),
+                List.of(invoiceId),
+                subscription);
+        return chains.isEmpty() ? Map.of() : chains.get(0);
+    }
+
+    private Map<String, Object> loadSubscriptionScheduleRootForInvoice(UUID invoiceId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT
+                    sbs.billing_schedule_id AS "billingScheduleId",
+                    sbs.subscription_instance_id AS "subscriptionInstanceId",
+                    sbs.subscription_plan_id AS "subscriptionPlanId",
+                    sbs.invoice_id AS "invoiceId",
+                    sbs.billing_date AS "billingDate",
+                    sbs.billed_on AS "billedOn",
+                    sbs.billing_period_start AS "billingPeriodStart",
+                    sbs.billing_period_end AS "billingPeriodEnd",
+                    sbs.final_amount AS "scheduleFinalAmount",
+                    sbs.cycle_number AS "cycleNumber",
+                    sbs.label AS "scheduleLabel",
+                    sbs.period_label AS "periodLabel",
+                    sbs.billing_run_id AS "scheduleBillingRunId",
+                    sbs.isactive AS "scheduleIsActive",
+                    bss.status_code AS "billingScheduleStatusCode",
+                    bss.display_name AS "billingScheduleStatusName",
+                    i.invoice_number AS "invoiceNumber",
+                    i.total_amount AS "invoiceTotalAmount",
+                    i.created_on AS "invoiceCreatedOn"
+                FROM client_subscription_billing.subscription_billing_schedule sbs
+                JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
+                JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
+                WHERE sbs.invoice_id = ?
+                ORDER BY sbs.billing_schedule_id
+                LIMIT 1
+                """, invoiceId);
+        if (!rows.isEmpty()) {
+            return rows.get(0);
+        }
+        Map<String, Object> fallback = new LinkedHashMap<>();
+        fallback.put("invoiceId", invoiceId.toString());
+        return fallback;
+    }
+
+    private Map<String, Object> loadCashInvoiceRootForInvoice(UUID invoiceId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT
+                    i.invoice_id AS "invoiceId",
+                    i.invoice_number AS "invoiceNumber",
+                    i.total_amount AS "invoiceTotalAmount",
+                    i.created_on AS "invoiceCreatedOn",
+                    lis.status_name AS "invoiceStatusName"
+                FROM transactions.invoice i
+                LEFT JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
+                WHERE i.invoice_id = ?
+                """, invoiceId);
+        return rows.isEmpty() ? Map.of("invoiceId", invoiceId.toString()) : rows.get(0);
+    }
+
+    private Map<String, Object> buildWorkspaceResponseFromChain(
+            Map<String, Object> chain,
+            String entityId,
+            String entityType,
+            String recoRunId,
+            boolean subscription
+    ) {
+        Map<String, Object> lookup = new LinkedHashMap<>();
         lookup.put("entityId", entityId);
         lookup.put("entityType", entityType == null ? "INVOICE" : entityType);
 
-        Map<String, Object> invoice = new HashMap<>();
-        invoice.put("invoiceId", row.get("invoice_id") != null ? String.valueOf(row.get("invoice_id")) : null);
-        invoice.put("invoiceNumber", row.get("invoice_number") != null ? String.valueOf(row.get("invoice_number")) : null);
-        invoice.put("invoiceAmount", row.get("invoice_amount"));
-        invoice.put("status", row.get("invoice_status"));
-        invoice.put("createdOn", row.get("invoice_created_on"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> invoiceDetail = (Map<String, Object>) chain.getOrDefault("invoice", Map.of());
+        Map<String, Object> invoice = new LinkedHashMap<>(invoiceDetail);
+        if (!invoice.containsKey("invoiceAmount") && invoice.get("totalAmount") != null) {
+            invoice.put("invoiceAmount", invoice.get("totalAmount"));
+        }
+        if (!invoice.containsKey("status") && invoice.get("statusName") != null) {
+            invoice.put("status", invoice.get("statusName"));
+        }
 
-        Map<String, Object> paymentIntent = new HashMap<>();
-        paymentIntent.put("paymentIntentId", row.get("client_payment_intent_id") != null ? String.valueOf(row.get("client_payment_intent_id")) : null);
-        paymentIntent.put("amount", row.get("intent_amount"));
+        Map<String, Object> paymentIntent = latestPaymentIntentSummary(chain);
+        Map<String, Object> paymentTransaction = latestPaymentTransactionSummary(chain);
 
-        Map<String, Object> paymentTransaction = new HashMap<>();
-        paymentTransaction.put("paymentTxnId", row.get("client_payment_transaction_id") != null ? String.valueOf(row.get("client_payment_transaction_id")) : null);
-        paymentTransaction.put("gatewayTransactionId", row.get("payment_gateway_order_id"));
-        paymentTransaction.put("amount", row.get("txn_amount"));
+        double expected = num(invoice.get("totalAmount") != null ? invoice.get("totalAmount") : invoice.get("invoiceAmount"));
+        double actual = totalCapturedMajorFromChain(chain);
+        Map<String, Object> liveRow = liveRowFromChain(chain, expected, actual);
 
-        String recoStatus = deriveInvoiceToPaymentStatus(row);
-
-        Map<String, Object> out = new HashMap<>();
+        Map<String, Object> out = new LinkedHashMap<>();
         out.put("lookup", lookup);
-        out.put("reconciliationStatus", recoStatus);
+        out.put("reconciliationStatus", deriveInvoiceToPaymentStatus(liveRow));
+        out.put("recoRunId", recoRunId);
+        out.put("reconciliationType", chain.getOrDefault("reconciliationType", subscription ? "SUBSCRIPTION" : "CASH"));
+        out.put("expectedAmount", expected);
+        out.put("actualAmount", actual);
+        out.put("varianceAmount", expected - actual);
         out.put("invoice", invoice);
         out.put("paymentIntent", paymentIntent);
         out.put("paymentTransaction", paymentTransaction);
+        out.put("billingSchedule", chain.get("billingSchedule"));
+        out.put("paymentIntents", chain.getOrDefault("paymentIntents", List.of()));
+        out.put("subscriptionBillingHistory", chain.getOrDefault("subscriptionBillingHistory", List.of()));
+        out.put("refunds", chain.getOrDefault("refunds", List.of()));
+        out.put("glPosting", chain.getOrDefault("glPosting", Map.of("entries", List.of())));
+        out.put("runSnapshots", chain.getOrDefault("runSnapshots", List.of()));
+        out.put("stages", chain.getOrDefault("stages", List.of()));
+        out.put("exceptions", loadWorkspaceExceptions(entityId, parseUuidLenient(invoice.get("invoiceId")), recoRunId));
+        if (recoRunId != null) {
+            out.put("run", loadWorkspaceRunHeader(recoRunId));
+        }
         return out;
+    }
+
+    private Map<String, Object> liveRowFromChain(Map<String, Object> chain, double expected, double actual) {
+        Map<String, Object> row = new HashMap<>();
+        row.put("invoice_amount", expected);
+        row.put("txn_amount", actual);
+        row.put("client_payment_transaction_id", latestPaymentTransactionSummary(chain).get("paymentTxnId"));
+        return row;
+    }
+
+    private Map<String, Object> liveRowFromChain(Map<String, Object> chain) {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> invoice = (Map<String, Object>) chain.getOrDefault("invoice", Map.of());
+        double expected = num(invoice.get("totalAmount") != null ? invoice.get("totalAmount") : invoice.get("invoiceAmount"));
+        return liveRowFromChain(chain, expected, totalCapturedMajorFromChain(chain));
+    }
+
+    private static double totalCapturedMajorFromChain(Map<String, Object> chain) {
+        double sum = 0d;
+        for (Object ipObj : listOrEmpty(chain.get("paymentIntents"))) {
+            if (!(ipObj instanceof Map<?, ?> ip)) {
+                continue;
+            }
+            for (Object txObj : listOrEmpty(ip.get("paymentTransactions"))) {
+                if (!(txObj instanceof Map<?, ?> tx)) {
+                    continue;
+                }
+                Object amt = tx.get("amount");
+                if (amt == null) {
+                    continue;
+                }
+                double v = num(amt);
+                sum += v > 1000 && v == Math.floor(v) ? v / 100.0 : v;
+            }
+        }
+        return sum;
+    }
+
+    private static List<?> listOrEmpty(Object o) {
+        if (o instanceof List<?> list) {
+            return list;
+        }
+        return List.of();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> latestPaymentIntentSummary(Map<String, Object> chain) {
+        List<Map<String, Object>> payloads = (List<Map<String, Object>>) chain.getOrDefault("paymentIntents", List.of());
+        if (payloads.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> latest = payloads.get(payloads.size() - 1);
+        Map<String, Object> intent = (Map<String, Object>) latest.getOrDefault("intent", Map.of());
+        Map<String, Object> summary = new LinkedHashMap<>();
+        Object id = intent.get("client_payment_intent_id");
+        summary.put("paymentIntentId", id == null ? null : String.valueOf(id));
+        Object amt = intent.get("amount");
+        if (amt != null) {
+            double v = num(amt);
+            summary.put("amount", v > 1000 && v == Math.floor(v) ? v / 100.0 : v);
+        }
+        summary.put("status", intent.get("intent_status_text"));
+        summary.put("paymentGatewayName", intent.get("payment_gateway_name"));
+        summary.put("currencyCode", intent.get("payment_currency_code"));
+        summary.put("paymentMethodTypeCode", intent.get("payment_method_type_code"));
+        summary.put("paymentMethodTypeName", intent.get("payment_method_type_name"));
+        summary.put("paymentTypeCode", intent.get("intent_payment_type_code"));
+        summary.put("paymentTypeName", intent.get("intent_payment_type_name"));
+        return summary;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> latestPaymentTransactionSummary(Map<String, Object> chain) {
+        Map<String, Object> latestTxn = null;
+        for (Object ipObj : listOrEmpty(chain.get("paymentIntents"))) {
+            if (!(ipObj instanceof Map<?, ?> ip)) {
+                continue;
+            }
+            for (Object txObj : listOrEmpty(ip.get("paymentTransactions"))) {
+                if (txObj instanceof Map<?, ?> tx) {
+                    latestTxn = (Map<String, Object>) tx;
+                }
+            }
+        }
+        if (latestTxn == null) {
+            return Map.of();
+        }
+        Map<String, Object> summary = new LinkedHashMap<>();
+        Object id = latestTxn.get("client_payment_transaction_id");
+        summary.put("paymentTxnId", id == null ? null : String.valueOf(id));
+        summary.put("gatewayTransactionId", latestTxn.get("payment_gateway_order_id"));
+        Object amt = latestTxn.get("amount");
+        if (amt != null) {
+            double v = num(amt);
+            summary.put("amount", v > 1000 && v == Math.floor(v) ? v / 100.0 : v);
+        }
+        summary.put("gatewayTransactionStatusCode", latestTxn.get("gateway_transaction_status_code"));
+        summary.put("gatewayTransactionStatusName", latestTxn.get("gateway_transaction_status_name"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> gateway = (Map<String, Object>) latestTxn.getOrDefault("gateway", Map.of());
+        summary.put("gateway", gateway);
+        return summary;
+    }
+
+    private Map<String, Object> loadWorkspaceRunHeader(String recoRunId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT
+                    rr.run_reference_code AS "reconciliationRunId",
+                    rr.run_type AS "runType",
+                    st.code AS "runStatus",
+                    tm.code AS "triggerMode",
+                    COALESCE(fp.period_code, rr.filters_json->>'financialPeriod') AS "financialPeriod",
+                    rr.filters_json->>'currency' AS "currency",
+                    CAST(rr.level_id AS text) AS "scopeLevelId",
+                    lv_scope."name" AS "scopeLevelName",
+                    rr.started_on AS "startedAt",
+                    rr.ended_on AS "endedAt",
+                    rr.created_on AS "createdAt"
+                FROM reconciliation.reconciliation_run rr
+                JOIN reconciliation.lu_reconciliation_run_status st ON st.reconciliation_run_status_id = rr.reconciliation_run_status_id
+                JOIN reconciliation.lu_reconciliation_trigger_mode tm ON tm.reconciliation_trigger_mode_id = rr.reconciliation_trigger_mode_id
+                LEFT JOIN reconciliation.financial_period fp ON fp.financial_period_id = rr.financial_period_id
+                LEFT JOIN locations.levels lv_scope ON lv_scope.level_id = rr.level_id
+                WHERE rr.run_reference_code = ?
+                """, recoRunId);
+        return rows.isEmpty() ? Map.of("reconciliationRunId", recoRunId, "found", false) : rows.get(0);
+    }
+
+    private List<Map<String, Object>> loadWorkspaceExceptions(String entityId, UUID invoiceId, String recoRunId) {
+        StringBuilder sql = new StringBuilder("""
+                SELECT
+                    re.exception_reference_code AS "exceptionId",
+                    re.exception_reference_code AS "exceptionRef",
+                    re.title,
+                    re.description,
+                    es.code AS "status",
+                    sev.code AS "severity",
+                    stg.code AS "stage",
+                    re.created_on AS "createdAt",
+                    re.resolved_at AS "resolvedAt",
+                    re.sla_due_at AS "slaDueAt",
+                    CAST(re.assignee_user_id AS text) AS "assigneeId"
+                FROM reconciliation.reconciliation_exception re
+                JOIN reconciliation.lu_exception_status es ON es.exception_status_id = re.exception_status_id
+                JOIN reconciliation.lu_severity sev ON sev.severity_id = re.severity_id
+                JOIN reconciliation.lu_reconciliation_stage stg ON stg.reconciliation_stage_id = re.reconciliation_stage_id
+                WHERE (re.entity_reference_code = ? OR CAST(re.entity_id AS text) = ?)
+                """);
+        List<Object> args = new ArrayList<>();
+        args.add(entityId);
+        args.add(invoiceId == null ? entityId : invoiceId.toString());
+        if (recoRunId != null && !recoRunId.isBlank()) {
+            sql.append("""
+                     AND (
+                        re.reconciliation_run_id = (
+                            SELECT reconciliation_run_id FROM reconciliation.reconciliation_run WHERE run_reference_code = ?
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM reconciliation.reconciliation_run_snapshot s
+                            JOIN reconciliation.reconciliation_run rr ON rr.reconciliation_run_id = s.reconciliation_run_id
+                            WHERE s.reconciliation_run_snapshot_id = re.reconciliation_run_snapshot_id
+                              AND rr.run_reference_code = ?
+                        )
+                     )
+                    """);
+            args.add(recoRunId);
+            args.add(recoRunId);
+        }
+        sql.append(" ORDER BY re.created_on DESC LIMIT 20");
+        return jdbc.queryForList(sql.toString(), args.toArray());
+    }
+
+    private Map<String, Object> normalizeWorkspaceRunSnapshot(Map<String, Object> snap) {
+        if (!Boolean.TRUE.equals(snap.get("found"))) {
+            return snap;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("found", true);
+        putSnapshotAlias(out, "snapshotReferenceCode", snap);
+        putSnapshotAlias(out, "expectedAmount", snap);
+        putSnapshotAlias(out, "actualAmount", snap);
+        putSnapshotAlias(out, "reconciliationStatus", snap, "reco_status");
+        putSnapshotAlias(out, "severity", snap);
+        putSnapshotAlias(out, "mismatchReferenceCode", snap, "mismatch_reference_code");
+        putSnapshotAlias(out, "reasonCode", snap, "reason_code");
+        putSnapshotAlias(out, "reasonText", snap, "reason_text");
+        putSnapshotAlias(out, "eventAt", snap, "event_at");
+        Object reconType = snap.get("reconciliationType");
+        if (reconType == null && snap.get("attributes_json") instanceof Map<?, ?> attrs) {
+            reconType = attrs.get("reconciliationType");
+        }
+        if (reconType != null) {
+            out.put("reconciliationType", reconType);
+        }
+        return out;
+    }
+
+    private static void putSnapshotAlias(Map<String, Object> out, String camelKey, Map<String, Object> snap, String... snakeKeys) {
+        Object val = snap.get(camelKey);
+        if (val == null) {
+            for (String sk : snakeKeys) {
+                if (snap.containsKey(sk)) {
+                    val = snap.get(sk);
+                    break;
+                }
+            }
+        }
+        if (val == null && snakeKeys.length == 0) {
+            String snake = camelToSnake(camelKey);
+            val = snap.get(snake);
+        }
+        out.put(camelKey, val);
+        if (snakeKeys.length > 0) {
+            out.put(snakeKeys[0], val);
+        } else {
+            out.put(camelToSnake(camelKey), val);
+        }
+    }
+
+    private static String camelToSnake(String camel) {
+        return camel.replaceAll("([a-z])([A-Z])", "$1_$2").toLowerCase();
     }
 
     private static String deriveInvoiceToPaymentStatus(Map<String, Object> row) {
@@ -218,6 +552,15 @@ public class ReconciliationModuleRepository {
             return "PARTIAL";
         }
         return "RECONCILED";
+    }
+
+    private static Object firstNonNull(Map<String, Object> map, String... keys) {
+        for (String key : keys) {
+            if (map.containsKey(key) && map.get(key) != null) {
+                return map.get(key);
+            }
+        }
+        return null;
     }
 
     private static double num(Object o) {
@@ -248,15 +591,17 @@ public class ReconciliationModuleRepository {
         List<Map<String, Object>> rows = jdbc.queryForList("""
                 SELECT
                     s.reconciliation_run_snapshot_id,
-                    s.snapshot_reference_code,
-                    s.expected_amount,
-                    s.actual_amount,
+                    s.snapshot_reference_code AS "snapshotReferenceCode",
+                    s.expected_amount AS "expectedAmount",
+                    s.actual_amount AS "actualAmount",
+                    rcs.code AS "reconciliationStatus",
                     rcs.code AS reco_status,
                     sev.code AS severity,
-                    s.mismatch_reference_code,
-                    lr.code AS reason_code,
-                    s.reason_text,
-                    s.event_at
+                    s.mismatch_reference_code AS "mismatchReferenceCode",
+                    lr.code AS "reasonCode",
+                    s.reason_text AS "reasonText",
+                    s.event_at AS "eventAt",
+                    s.attributes_json AS "attributesJson"
                 FROM reconciliation.reconciliation_run_snapshot s
                 JOIN reconciliation.reconciliation_run rr ON rr.reconciliation_run_id = s.reconciliation_run_id
                 JOIN reconciliation.lu_reconciliation_status rcs ON rcs.reconciliation_status_id = s.reconciliation_status_id
@@ -287,9 +632,10 @@ public class ReconciliationModuleRepository {
         double liveActual = num(liveRow.get("txn_amount"));
         String liveStatus = deriveInvoiceToPaymentStatus(liveRow);
 
-        double snapExpected = num(snapshot.get("expected_amount"));
-        double snapActual = num(snapshot.get("actual_amount"));
-        String snapStatus = String.valueOf(snapshot.getOrDefault("reco_status", ""));
+        double snapExpected = num(firstNonNull(snapshot, "expectedAmount", "expected_amount"));
+        double snapActual = num(firstNonNull(snapshot, "actualAmount", "actual_amount"));
+        Object snapStatusObj = firstNonNull(snapshot, "reconciliationStatus", "reco_status");
+        String snapStatus = snapStatusObj == null ? "" : String.valueOf(snapStatusObj);
 
         boolean unchanged = nearlyEqual(snapExpected, liveExpected) && nearlyEqual(snapActual, liveActual) && snapStatus.equals(liveStatus);
         if (unchanged) {
@@ -518,13 +864,106 @@ public class ReconciliationModuleRepository {
         return out;
     }
 
-    public List<Map<String, Object>> getWorkspaceTimeline(String entityId) {
-        return jdbc.queryForList("""
-                SELECT created_on AS eventAt, 'BILLING' AS source, 'INVOICE_CREATED' AS eventType, 'SUCCESS' AS status, invoice_number AS referenceId, 'Invoice generated' AS details
-                FROM transactions.invoice
-                WHERE invoice_number = ? OR CAST(invoice_id AS text) = ?
-                ORDER BY created_on DESC LIMIT 20
-                """, entityId, entityId);
+    public List<Map<String, Object>> getWorkspaceTimeline(String entityId, String recoRunId) {
+        UUID invoiceId = resolveInvoiceId(entityId);
+        if (invoiceId == null) {
+            return List.of();
+        }
+        String entityRef = entityId == null ? "" : entityId.trim();
+        List<Map<String, Object>> events = new ArrayList<>();
+
+        events.addAll(jdbc.queryForList("""
+                SELECT
+                    i.created_on AS "eventAt",
+                    'BILLING' AS source,
+                    'INVOICE_CREATED' AS "eventType",
+                    COALESCE(lis.status_name, 'SUCCESS') AS status,
+                    i.invoice_number AS "referenceId",
+                    'Invoice ' || COALESCE(i.invoice_number, CAST(i.invoice_id AS text)) || ' created' AS details
+                FROM transactions.invoice i
+                LEFT JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
+                WHERE i.invoice_id = ?
+                """, invoiceId));
+
+        events.addAll(jdbc.queryForList("""
+                SELECT
+                    cpi.created_on AS "eventAt",
+                    'PAYMENTS' AS source,
+                    'PAYMENT_INTENT_CREATED' AS "eventType",
+                    COALESCE(pis.payment_intent_status, 'UNKNOWN') AS status,
+                    CAST(cpi.client_payment_intent_id AS text) AS "referenceId",
+                    'Payment intent created' AS details
+                FROM client_payments.client_payment_intent cpi
+                LEFT JOIN client_payments.lu_payment_intent_status pis ON pis.payment_intent_status_id = cpi.intent_status_id
+                WHERE cpi.invoice_id = ?
+                """, invoiceId));
+
+        events.addAll(jdbc.queryForList("""
+                SELECT
+                    cpt.created_on AS "eventAt",
+                    'PAYMENTS' AS source,
+                    'PAYMENT_CAPTURED' AS "eventType",
+                    COALESCE(pgts.status_code, 'UNKNOWN') AS status,
+                    COALESCE(cpt.payment_gateway_order_id, CAST(cpt.client_payment_transaction_id AS text)) AS "referenceId",
+                    'Payment captured' AS details
+                FROM client_payments.client_payment_transaction cpt
+                JOIN client_payments.client_payment_intent cpi ON cpi.client_payment_intent_id = cpt.client_payment_intent_id
+                LEFT JOIN payment_gateway.lu_payment_gateway_transaction_status pgts
+                    ON pgts.payment_gateway_transaction_status_id = cpt.payment_gateway_transaction_status_id
+                WHERE cpi.invoice_id = ?
+                """, invoiceId));
+
+        if (recoRunId != null && !recoRunId.isBlank()) {
+            events.addAll(jdbc.queryForList("""
+                    SELECT
+                        s.event_at AS "eventAt",
+                        'RECONCILIATION' AS source,
+                        'RUN_SNAPSHOT' AS "eventType",
+                        rcs.code AS status,
+                        s.snapshot_reference_code AS "referenceId",
+                        COALESCE(s.reason_text, 'Reconciliation snapshot') AS details
+                    FROM reconciliation.reconciliation_run_snapshot s
+                    JOIN reconciliation.reconciliation_run rr ON rr.reconciliation_run_id = s.reconciliation_run_id
+                    JOIN reconciliation.lu_reconciliation_status rcs ON rcs.reconciliation_status_id = s.reconciliation_status_id
+                    LEFT JOIN reconciliation.lu_reconciliation_entity_type et ON et.reconciliation_entity_type_id = s.reconciliation_entity_type_id
+                    WHERE rr.run_reference_code = ?
+                      AND (et.code = 'INVOICE' OR et.code IS NULL)
+                      AND (s.entity_id = ? OR s.entity_reference_code = ?)
+                    """, recoRunId.trim(), invoiceId, entityRef));
+        }
+
+        events.addAll(jdbc.queryForList("""
+                SELECT
+                    re.created_on AS "eventAt",
+                    'RECONCILIATION' AS source,
+                    'EXCEPTION_OPENED' AS "eventType",
+                    es.code AS status,
+                    re.exception_reference_code AS "referenceId",
+                    COALESCE(re.title, re.description, 'Exception') AS details
+                FROM reconciliation.reconciliation_exception re
+                JOIN reconciliation.lu_exception_status es ON es.exception_status_id = re.exception_status_id
+                WHERE re.entity_id = ? OR re.entity_reference_code = ?
+                """, invoiceId, entityRef));
+
+        events.addAll(jdbc.queryForList("""
+                SELECT
+                    en.created_on AS "eventAt",
+                    'RECONCILIATION' AS source,
+                    'EXCEPTION_NOTE' AS "eventType",
+                    'INFO' AS status,
+                    re.exception_reference_code AS "referenceId",
+                    LEFT(en.note_text, 500) AS details
+                FROM reconciliation.exception_note en
+                JOIN reconciliation.reconciliation_exception re ON re.reconciliation_exception_id = en.reconciliation_exception_id
+                WHERE re.entity_id = ? OR re.entity_reference_code = ?
+                ORDER BY en.created_on DESC
+                LIMIT 10
+                """, invoiceId, entityRef));
+
+        events.sort(Comparator.comparing(
+                m -> m.get("eventAt") == null ? "" : String.valueOf(m.get("eventAt")),
+                Comparator.nullsLast(Comparator.reverseOrder())));
+        return events.size() <= 50 ? events : events.subList(0, 50);
     }
 
     public List<Map<String, Object>> getWorkspacePayloads(String entityId, String source) {

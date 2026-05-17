@@ -200,8 +200,14 @@ public class ReconciliationModuleController {
     }
 
     @GetMapping("/workspace/{entityId}/timeline")
-    public ResponseEntity<Map<String, Object>> workspaceTimeline(@PathVariable String entityId) {
-        return ResponseEntity.ok(success(service.getWorkspaceTimeline(entityId), 1, 1));
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Map<String, Object>> workspaceTimeline(
+            @PathVariable String entityId,
+            @RequestParam(required = false) String recoRunId
+    ) {
+        Map<String, Object> timeline = service.getWorkspaceTimeline(entityId, recoRunId);
+        List<Map<String, Object>> events = (List<Map<String, Object>>) timeline.getOrDefault("events", List.of());
+        return ResponseEntity.ok(success(timeline, 1, events.size()));
     }
 
     @GetMapping("/workspace/{entityId}/payloads")

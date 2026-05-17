@@ -69,8 +69,8 @@ public class ReconciliationModuleService {
         return repository.getDashboardTrendsPayload(filters);
     }
 
-    public Map<String, Object> getWorkspaceTimeline(String entityId) {
-        return Map.of("events", repository.getWorkspaceTimeline(entityId));
+    public Map<String, Object> getWorkspaceTimeline(String entityId, String recoRunId) {
+        return Map.of("events", repository.getWorkspaceTimeline(entityId, recoRunId));
     }
 
     public Map<String, Object> getWorkspacePayloads(String entityId, String source) {
