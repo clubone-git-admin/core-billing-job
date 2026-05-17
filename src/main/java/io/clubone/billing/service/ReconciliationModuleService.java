@@ -30,6 +30,7 @@ public class ReconciliationModuleService {
     private final ReconciliationEnterpriseNotificationRepository notificationRepository;
     private final ReconciliationEnterpriseAccessControlRepository accessControlRepository;
     private final ReconciliationEnterprisePublishRepository publishRepository;
+    private final ReconciliationReportExportService reportExportService;
     private final ObjectMapper objectMapper;
 
     public ReconciliationModuleService(
@@ -39,6 +40,7 @@ public class ReconciliationModuleService {
             ReconciliationEnterpriseNotificationRepository notificationRepository,
             ReconciliationEnterpriseAccessControlRepository accessControlRepository,
             ReconciliationEnterprisePublishRepository publishRepository,
+            ReconciliationReportExportService reportExportService,
             ObjectMapper objectMapper
     ) {
         this.repository = repository;
@@ -47,6 +49,7 @@ public class ReconciliationModuleService {
         this.notificationRepository = notificationRepository;
         this.accessControlRepository = accessControlRepository;
         this.publishRepository = publishRepository;
+        this.reportExportService = reportExportService;
         this.objectMapper = objectMapper;
     }
 
@@ -169,11 +172,26 @@ public class ReconciliationModuleService {
 
     @Transactional
     public Map<String, Object> idempotentReportExport(String tenantId, String idempotencyKey, String slug, ReconciliationRequests.ReportExportRequest request) {
-        return executeIdempotent(tenantId, idempotencyKey, "POST", "/reconciliation/v1/reports/" + slug + "/export", request, () -> reportExport(slug, request));
+        return executeIdempotent(tenantId, idempotencyKey, "POST", "/reconciliation/v1/reports/" + slug + "/export", request,
+                () -> reportExport(tenantId, slug, request));
     }
 
     public Map<String, Object> listExceptions(Map<String, Object> filters) {
-        return Map.of("items", repository.listExceptions(filters));
+        return repository.listExceptions(filters);
+    }
+
+    public Map<String, Object> listAssignableExceptionUsers(
+            String tenantId,
+            String search,
+            Integer page,
+            Integer pageSize,
+            Boolean activeOnly
+    ) {
+        return repository.listAssignableExceptionUsers(tenantId, search, page, pageSize, activeOnly);
+    }
+
+    public Map<String, Object> getExceptionDetail(String exceptionId, String tenantId) {
+        return repository.getExceptionDetail(exceptionId, tenantId);
     }
 
     @Transactional
@@ -206,8 +224,17 @@ public class ReconciliationModuleService {
         return Map.of("exceptionId", exceptionId, "noteAdded", true);
     }
 
-    public Map<String, Object> getJournal(String period, List<String> glAccountCodes, List<String> postingStatus, String entityId, String recoRunId) {
-        return Map.of("items", repository.getJournal(period, glAccountCodes, postingStatus, entityId, recoRunId));
+    public Map<String, Object> getJournal(
+            String tenantId,
+            String period,
+            List<String> glAccountCodes,
+            List<String> postingStatus,
+            String entityId,
+            String recoRunId,
+            Integer page,
+            Integer pageSize
+    ) {
+        return repository.getJournal(tenantId, period, glAccountCodes, postingStatus, entityId, recoRunId, page, pageSize);
     }
 
     @Transactional
@@ -267,18 +294,25 @@ public class ReconciliationModuleService {
         return Map.of("items", repository.reportCatalog());
     }
 
-    public Map<String, Object> reportQuery(String slug, ReconciliationRequests.ReportQueryRequest request) {
-        return Map.of("slug", slug, "rows", repository.reportQuery(slug, request.filters()));
+    public Map<String, Object> reportQuery(
+            String slug,
+            ReconciliationRequests.ReportQueryRequest request,
+            String tenantId
+    ) {
+        Map<String, Object> filters = repository.normalizeReportFilters(request.filters(), tenantId);
+        return repository.reportQuery(slug, filters);
     }
 
-    @Transactional
-    public Map<String, Object> reportExport(String slug, ReconciliationRequests.ReportExportRequest request) {
-        String exportId = repository.reportExport(slug, request.format(), request.filters());
-        return Map.of("exportId", exportId, "status", "QUEUED");
+    public Map<String, Object> reportExport(
+            String tenantId,
+            String slug,
+            ReconciliationRequests.ReportExportRequest request
+    ) {
+        return reportExportService.exportReport(tenantId, slug, request);
     }
 
     public Map<String, Object> reportExportStatus(String exportId) {
-        return repository.reportExportStatus(exportId);
+        return reportExportService.exportStatus(exportId);
     }
 
     public Map<String, Object> listAudit(String entityType, String entityId, Integer limit, Integer page, Integer pageSize) {

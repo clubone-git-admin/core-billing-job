@@ -1648,6 +1648,10 @@ public class ReconciliationModuleRepository {
         return jdbc.update(sql, args.toArray());
     }
 
+    private static final String RECON_RUN_CATALOG_SCOPE_JOIN = """
+            LEFT JOIN locations.levels lv_scope ON lv_scope.level_id = rr.level_id
+            """;
+
     public Map<String, Object> getReconciliationRun(String runId) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
                 SELECT
@@ -1661,6 +1665,8 @@ public class ReconciliationModuleRepository {
                     CAST(rr.requested_by AS text) AS "requestedBy",
                     CAST(rr.application_id AS text) AS "tenantId",
                     rr.filters_json AS "filters",
+                    CAST(rr.level_id AS text) AS "scopeLevelId",
+                    lv_scope."name" AS "scopeLevelName",
                     rr.started_on AS "startedAt",
                     rr.ended_on AS "endedAt",
                     rr.created_on AS "createdAt",
@@ -1676,6 +1682,8 @@ public class ReconciliationModuleRepository {
                 JOIN reconciliation.lu_reconciliation_trigger_mode tm ON tm.reconciliation_trigger_mode_id = rr.reconciliation_trigger_mode_id
                 LEFT JOIN reconciliation.financial_period fp ON fp.financial_period_id = rr.financial_period_id
                 LEFT JOIN reconciliation.reco_config_publish cp ON cp.reco_config_publish_id = rr.reco_config_publish_id
+                """
+                + RECON_RUN_CATALOG_SCOPE_JOIN + """
                 WHERE rr.run_reference_code = ?
                 """, runId);
         if (rows.isEmpty()) {
@@ -1717,6 +1725,8 @@ public class ReconciliationModuleRepository {
                 JOIN reconciliation.lu_reconciliation_run_status st ON st.reconciliation_run_status_id = rr.reconciliation_run_status_id
                 JOIN reconciliation.lu_reconciliation_trigger_mode tm ON tm.reconciliation_trigger_mode_id = rr.reconciliation_trigger_mode_id
                 LEFT JOIN reconciliation.financial_period fp ON fp.financial_period_id = rr.financial_period_id
+                """
+                + RECON_RUN_CATALOG_SCOPE_JOIN + """
                 WHERE 1=1
                 """ + where;
         Long total = jdbc.queryForObject("SELECT COUNT(1) " + fromSql, Long.class, filterArgs.toArray());
@@ -1741,7 +1751,9 @@ public class ReconciliationModuleRepository {
                     rr.modified_on AS "updatedAt",
                     COALESCE((rr.filters_json->>'runVersion')::int, 1) AS "version",
                     rr.filters_json->>'failureStage' AS "failureStage",
-                    rr.filters_json->>'failureMessage' AS "failureMessage"
+                    rr.filters_json->>'failureMessage' AS "failureMessage",
+                    CAST(rr.level_id AS text) AS "scopeLevelId",
+                    lv_scope."name" AS "scopeLevelName"
                 """ + fromSql + """
                 ORDER BY COALESCE(rr.ended_on, rr.modified_on, rr.created_on) DESC
                 LIMIT ? OFFSET ?
@@ -1839,18 +1851,21 @@ public class ReconciliationModuleRepository {
      * when provided (resync parent).
      */
     private int computeNextRunVersion(UUID tenantUuid, UUID financialPeriodId, Integer priorRunVersionForSequence) {
+        // Do not use PostgreSQL jsonb "?" key-exists operator here: JDBC treats "?" as a bind placeholder.
         Integer maxExisting = jdbc.queryForObject("""
                 SELECT COALESCE(MAX(
                     CASE
-                        WHEN rr.filters_json ? 'runVersion'
-                             AND (rr.filters_json->>'runVersion') ~ '^[0-9]+$'
+                        WHEN (rr.filters_json->>'runVersion') ~ '^[0-9]+$'
                         THEN (rr.filters_json->>'runVersion')::int
                     END
                 ), 0)
                 FROM reconciliation.reconciliation_run rr
-                WHERE (rr.application_id IS NOT DISTINCT FROM ?)
-                  AND (rr.financial_period_id IS NOT DISTINCT FROM ?)
-                """, Integer.class, tenantUuid, financialPeriodId);
+                WHERE rr.application_id IS NOT DISTINCT FROM ?
+                  AND rr.financial_period_id IS NOT DISTINCT FROM ?
+                """,
+                Integer.class,
+                tenantUuid,
+                financialPeriodId);
         int max = maxExisting == null ? 0 : maxExisting;
         int prior = priorRunVersionForSequence == null ? 0 : Math.max(0, priorRunVersionForSequence);
         return Math.max(max, prior) + 1;
@@ -2061,37 +2076,59 @@ public class ReconciliationModuleRepository {
         return out;
     }
 
-    public List<Map<String, Object>> listExceptions(Map<String, Object> filters) {
-        List<Object> args = new ArrayList<>();
-        StringBuilder sql = new StringBuilder("""
-                SELECT
-                    re.exception_reference_code AS "exceptionId",
-                    re.mismatch_reference_code AS "mismatchId",
-                    COALESCE(re.entity_reference_code, CAST(re.entity_id AS text), '') AS "entityId",
-                    re.title, re.description,
-                    sev.code AS "severity",
-                    stg.code AS "stage",
-                    es.code AS "status",
-                    CAST(re.assignee_user_id AS text) AS "assigneeId",
-                    re.created_on AS "createdAt",
-                    re.modified_on AS "updatedAt",
-                    (SELECT rr_o.run_reference_code FROM reconciliation.reconciliation_run rr_o
-                     WHERE rr_o.reconciliation_run_id = re.origin_reconciliation_run_id) AS "originRunId",
-                    (SELECT rr_l.run_reference_code FROM reconciliation.reconciliation_run rr_l
-                     WHERE rr_l.reconciliation_run_id = re.latest_reconciliation_run_id) AS "latestRunId",
-                    re.occurrence_count AS "occurrenceCount",
-                    re.is_auto_resolved AS "isAutoResolved",
-                    (SELECT NULLIF(TRIM(s2.attributes_json->>'reconciliationType'), '')
-                     FROM reconciliation.reconciliation_run_snapshot s2
-                     WHERE s2.reconciliation_run_snapshot_id = re.reconciliation_run_snapshot_id LIMIT 1) AS "reconciliationType",
-                    re.first_detected_at AS "firstDetectedAt",
-                    re.last_seen_at AS "lastSeenAt"
-                FROM reconciliation.reconciliation_exception re
-                JOIN reconciliation.lu_severity sev ON sev.severity_id = re.severity_id
-                JOIN reconciliation.lu_reconciliation_stage stg ON stg.reconciliation_stage_id = re.reconciliation_stage_id
-                JOIN reconciliation.lu_exception_status es ON es.exception_status_id = re.exception_status_id
-                WHERE 1=1
-                """);
+    private static String accessUserDisplayNameSql(String userAlias) {
+        return "COALESCE(NULLIF(TRIM(CONCAT_WS(' ', "
+                + userAlias + ".first_name, " + userAlias + ".last_name)), ''), CAST("
+                + userAlias + ".user_id AS text))";
+    }
+
+    private static List<String> normalizeCodeFilterList(Object raw) {
+        if (raw == null) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>();
+        if (raw instanceof List<?> list) {
+            for (Object item : list) {
+                if (item == null) {
+                    continue;
+                }
+                for (String part : String.valueOf(item).split(",")) {
+                    String code = part.trim();
+                    if (!code.isEmpty()) {
+                        out.add(code.toUpperCase());
+                    }
+                }
+            }
+        } else {
+            for (String part : String.valueOf(raw).split(",")) {
+                String code = part.trim();
+                if (!code.isEmpty()) {
+                    out.add(code.toUpperCase());
+                }
+            }
+        }
+        return out.stream().distinct().toList();
+    }
+
+    private static List<UUID> normalizeUuidFilterList(Object raw) {
+        List<String> tokens = normalizeCodeFilterList(raw);
+        List<UUID> out = new ArrayList<>();
+        for (String token : tokens) {
+            UUID id = parseOptionalUuid(token);
+            if (id != null) {
+                out.add(id);
+            }
+        }
+        return out;
+    }
+
+    private void appendExceptionListFilters(StringBuilder sql, List<Object> args, Map<String, Object> filters) {
+        UUID tenantUuid = parseOptionalUuid(asString(filters.get("tenantId")));
+        if (tenantUuid != null) {
+            sql.append(" AND (re.application_id IS NOT DISTINCT FROM ? OR re.tenant_id IS NOT DISTINCT FROM ?) ");
+            args.add(tenantUuid);
+            args.add(tenantUuid);
+        }
         String recoRunId = asString(filters.get("recoRunId"));
         if (recoRunId != null && !recoRunId.isBlank()) {
             sql.append("""
@@ -2105,10 +2142,329 @@ public class ReconciliationModuleRepository {
                           )
                     )
                     """);
-            args.add(recoRunId);
+            args.add(recoRunId.trim());
         }
-        sql.append(" ORDER BY re.created_on DESC LIMIT 500");
-        return jdbc.queryForList(sql.toString(), args.toArray());
+        List<String> severities = normalizeCodeFilterList(filters.get("severity"));
+        if (!severities.isEmpty()) {
+            sql.append(" AND UPPER(sev.code) IN (");
+            appendPlaceholders(sql, severities.size());
+            sql.append(") ");
+            args.addAll(severities);
+        }
+        List<String> statuses = normalizeCodeFilterList(filters.get("status"));
+        if (!statuses.isEmpty()) {
+            sql.append(" AND UPPER(es.code) IN (");
+            appendPlaceholders(sql, statuses.size());
+            sql.append(") ");
+            args.addAll(statuses);
+        }
+        List<String> stages = normalizeCodeFilterList(filters.get("stage"));
+        if (!stages.isEmpty()) {
+            sql.append(" AND UPPER(stg.code) IN (");
+            appendPlaceholders(sql, stages.size());
+            sql.append(") ");
+            args.addAll(stages);
+        }
+        List<UUID> assigneeIds = normalizeUuidFilterList(filters.get("assigneeIds"));
+        if (!assigneeIds.isEmpty()) {
+            sql.append(" AND re.assignee_user_id IN (");
+            appendPlaceholders(sql, assigneeIds.size());
+            sql.append(") ");
+            args.addAll(assigneeIds);
+        }
+        Object slaBreached = filters.get("slaBreached");
+        if (slaBreached instanceof Boolean b && b) {
+            sql.append("""
+                     AND re.sla_due_at IS NOT NULL
+                     AND re.sla_due_at < now()
+                     AND es.is_terminal = false
+                    """);
+        }
+        String search = asString(filters.get("search"));
+        if (search != null && !search.isBlank()) {
+            String q = "%" + search.trim().replace("%", "\\%").replace("_", "\\_") + "%";
+            sql.append("""
+                     AND (
+                        re.exception_reference_code ILIKE ? ESCAPE '\\'
+                        OR re.mismatch_reference_code ILIKE ? ESCAPE '\\'
+                        OR re.entity_reference_code ILIKE ? ESCAPE '\\'
+                        OR re.title ILIKE ? ESCAPE '\\'
+                        OR re.description ILIKE ? ESCAPE '\\'
+                        OR CAST(re.entity_id AS text) ILIKE ? ESCAPE '\\'
+                     )
+                    """);
+            for (int i = 0; i < 6; i++) {
+                args.add(q);
+            }
+        }
+    }
+
+    private static final String EXCEPTION_LIST_FROM_SQL = """
+            FROM reconciliation.reconciliation_exception re
+            JOIN reconciliation.lu_severity sev ON sev.severity_id = re.severity_id
+            JOIN reconciliation.lu_reconciliation_stage stg ON stg.reconciliation_stage_id = re.reconciliation_stage_id
+            JOIN reconciliation.lu_exception_status es ON es.exception_status_id = re.exception_status_id
+            LEFT JOIN access.access_user assignee_u ON assignee_u.user_id = re.assignee_user_id
+            LEFT JOIN access.access_user creator_u ON creator_u.user_id = re.created_by
+            LEFT JOIN access.access_user resolver_u ON resolver_u.user_id = re.modified_by
+            """;
+
+    private static final String EXCEPTION_LIST_SELECT_SQL = buildExceptionListSelectSql();
+
+    private static String buildExceptionListSelectSql() {
+        return """
+                SELECT
+                    re.exception_reference_code AS "exceptionId",
+                    re.exception_reference_code AS "exceptionRef",
+                    re.mismatch_reference_code AS "mismatchId",
+                    COALESCE(re.entity_reference_code, CAST(re.entity_id AS text), '') AS "entityId",
+                    re.title,
+                    re.description,
+                    sev.code AS "severity",
+                    stg.code AS "stage",
+                    es.code AS "status",
+                    CAST(re.assignee_user_id AS text) AS "assigneeId",
+                """
+                + accessUserDisplayNameSql("assignee_u") + " AS \"assigneeName\", "
+                + """
+                    (SELECT LEFT(en.note_text, 500)
+                     FROM reconciliation.exception_note en
+                     WHERE en.reconciliation_exception_id = re.reconciliation_exception_id
+                     ORDER BY en.created_on DESC
+                     LIMIT 1) AS "latestNote",
+                    CAST(CASE
+                        WHEN es.code IN ('RESOLVED', 'CLOSED', 'AUTO_RESOLVED', 'SUPERSEDED') THEN re.modified_by
+                        ELSE NULL END AS text) AS "resolvedBy",
+                    CAST(CASE
+                        WHEN es.code IN ('RESOLVED', 'CLOSED', 'AUTO_RESOLVED', 'SUPERSEDED') THEN re.modified_by
+                        ELSE NULL END AS text) AS "resolvedById",
+                    CASE
+                        WHEN es.code = 'AUTO_RESOLVED' THEN 'System'
+                        WHEN es.code IN ('RESOLVED', 'CLOSED', 'SUPERSEDED') """
+                + " THEN " + accessUserDisplayNameSql("resolver_u") + " "
+                + """
+                        ELSE NULL END AS "resolvedByName",
+                    re.resolved_at AS "resolvedAt",
+                    re.created_on AS "createdAt",
+                    CAST(re.created_by AS text) AS "createdBy",
+                    CAST(re.created_by AS text) AS "createdById",
+                    CASE
+                        WHEN re.created_by IS NULL THEN 'System' """
+                + " ELSE " + accessUserDisplayNameSql("creator_u") + " "
+                + """
+                    END AS "createdByName",
+                    COALESCE(
+                        (SELECT rr_l.run_reference_code FROM reconciliation.reconciliation_run rr_l
+                         WHERE rr_l.reconciliation_run_id = re.latest_reconciliation_run_id),
+                        (SELECT rr_o.run_reference_code FROM reconciliation.reconciliation_run rr_o
+                         WHERE rr_o.reconciliation_run_id = re.origin_reconciliation_run_id),
+                        (SELECT rr_c.run_reference_code FROM reconciliation.reconciliation_run rr_c
+                         WHERE rr_c.reconciliation_run_id = re.reconciliation_run_id)
+                    ) AS "recoRunId",
+                    (SELECT rr_o.run_reference_code FROM reconciliation.reconciliation_run rr_o
+                     WHERE rr_o.reconciliation_run_id = re.origin_reconciliation_run_id) AS "originRunId",
+                    (SELECT rr_l.run_reference_code FROM reconciliation.reconciliation_run rr_l
+                     WHERE rr_l.reconciliation_run_id = re.latest_reconciliation_run_id) AS "latestRunId",
+                    re.occurrence_count AS "occurrenceCount",
+                    re.is_auto_resolved AS "isAutoResolved",
+                    COALESCE(
+                        (SELECT NULLIF(TRIM(s2.attributes_json->>'reconciliationType'), '')
+                         FROM reconciliation.reconciliation_run_snapshot s2
+                         WHERE s2.reconciliation_run_snapshot_id = re.reconciliation_run_snapshot_id
+                         LIMIT 1),
+                        'SUBSCRIPTION'
+                    ) AS "reconciliationType",
+                    re.first_detected_at AS "firstDetectedAt",
+                    re.last_seen_at AS "lastSeenAt",
+                    re.sla_due_at AS "slaDueAt",
+                    (re.sla_due_at IS NOT NULL AND re.sla_due_at < now() AND es.is_terminal = false) AS "slaBreached"
+                """;
+    }
+
+    public Map<String, Object> listExceptions(Map<String, Object> filters) {
+        int p = filters.get("page") instanceof Number n && n.intValue() > 0 ? n.intValue() : 1;
+        int ps = filters.get("pageSize") instanceof Number n && n.intValue() > 0
+                ? Math.min(n.intValue(), 500) : 20;
+        int offset = (p - 1) * ps;
+
+        List<Object> args = new ArrayList<>();
+        StringBuilder fromWhere = new StringBuilder(EXCEPTION_LIST_FROM_SQL + " WHERE 1=1 ");
+        appendExceptionListFilters(fromWhere, args, filters);
+
+        String countSql = "SELECT COUNT(1) " + fromWhere;
+        Long totalN = jdbc.queryForObject(countSql, Long.class, args.toArray());
+        long total = totalN == null ? 0L : totalN;
+
+        List<Object> pageArgs = new ArrayList<>(args);
+        pageArgs.add(ps);
+        pageArgs.add(offset);
+        String listSql = EXCEPTION_LIST_SELECT_SQL + fromWhere + " ORDER BY re.created_on DESC LIMIT ? OFFSET ?";
+        List<Map<String, Object>> items = jdbc.queryForList(listSql, pageArgs.toArray());
+
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("page", p);
+        meta.put("pageSize", ps);
+        meta.put("total", total);
+        meta.put("totalRecords", total);
+        meta.put("totalPages", (int) Math.max(1, Math.ceil(total / (double) ps)));
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("items", items);
+        out.put("meta", meta);
+        return out;
+    }
+
+    public Map<String, Object> listAssignableExceptionUsers(
+            String tenantId,
+            String search,
+            Integer page,
+            Integer pageSize,
+            Boolean activeOnly
+    ) {
+        int p = page == null || page < 1 ? 1 : page;
+        int ps = pageSize == null || pageSize < 1 ? 25 : Math.min(pageSize, 100);
+        int offset = (p - 1) * ps;
+        boolean active = activeOnly == null || activeOnly;
+
+        UUID tenantUuid = parseOptionalUuid(tenantId);
+        if (tenantUuid == null) {
+            Map<String, Object> meta = new LinkedHashMap<>();
+            meta.put("page", p);
+            meta.put("pageSize", ps);
+            meta.put("total", 0L);
+            meta.put("totalRecords", 0L);
+            meta.put("totalPages", 1);
+            return Map.of("items", List.of(), "meta", meta);
+        }
+        List<Object> args = new ArrayList<>();
+        StringBuilder where = new StringBuilder("""
+                WHERE aau.application_id IS NOT DISTINCT FROM ?
+                """);
+        args.add(tenantUuid);
+
+        if (active) {
+            where.append(" AND aau.is_active = true AND COALESCE(r.is_active, true) = true ");
+        }
+        if (search != null && !search.isBlank()) {
+            String q = "%" + search.trim().replace("%", "\\%").replace("_", "\\_") + "%";
+            where.append("""
+                     AND (
+                        CAST(aau.user_id AS text) ILIKE ? ESCAPE '\\'
+                        OR COALESCE(u.email, '') ILIKE ? ESCAPE '\\' """
+                    + " OR " + accessUserDisplayNameSql("u") + " ILIKE ? ESCAPE '\\' "
+                    + """
+                     )
+                    """);
+            args.add(q);
+            args.add(q);
+            args.add(q);
+        }
+
+        String fromSql = """
+                FROM access.access_application_user aau
+                JOIN access.access_user u ON u.user_id = aau.user_id
+                JOIN access.access_user_role_location aurl ON aurl.application_user_id = aau.application_user_id
+                JOIN access.access_role r ON r.role_id = aurl.role_id
+                  AND r.application_id IS NOT DISTINCT FROM aau.application_id
+                """ + where;
+
+        String distinctUsers = """
+                SELECT DISTINCT
+                    CAST(aau.user_id AS text) AS "userId",
+                    """
+                + accessUserDisplayNameSql("u") + " AS \"displayName\", "
+                + """
+                    u.email AS "email",
+                    (SELECT r2.name
+                     FROM access.access_user_role_location aurl2
+                     JOIN access.access_role r2 ON r2.role_id = aurl2.role_id
+                     JOIN access.access_application_user aau2 ON aau2.application_user_id = aurl2.application_user_id
+                     WHERE aau2.user_id = aau.user_id
+                       AND aau2.application_id IS NOT DISTINCT FROM aau.application_id
+                     ORDER BY r2.name
+                     LIMIT 1) AS "roleName"
+                """
+                + fromSql;
+
+        Long totalN = jdbc.queryForObject(
+                "SELECT COUNT(1) FROM (" + distinctUsers + ") assignable_users_sub",
+                Long.class,
+                args.toArray());
+        long total = totalN == null ? 0L : totalN;
+
+        List<Object> pageArgs = new ArrayList<>(args);
+        pageArgs.add(ps);
+        pageArgs.add(offset);
+        List<Map<String, Object>> items = jdbc.queryForList(
+                distinctUsers + " ORDER BY \"displayName\" LIMIT ? OFFSET ?",
+                pageArgs.toArray());
+
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("page", p);
+        meta.put("pageSize", ps);
+        meta.put("total", total);
+        meta.put("totalRecords", total);
+        meta.put("totalPages", (int) Math.max(1, Math.ceil(total / (double) ps)));
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("items", items);
+        out.put("meta", meta);
+        return out;
+    }
+
+    public Map<String, Object> getExceptionDetail(String exceptionId, String tenantId) {
+        if (exceptionId == null || exceptionId.isBlank()) {
+            return Map.of("status", "NOT_FOUND");
+        }
+        List<Object> args = new ArrayList<>();
+        StringBuilder fromWhere = new StringBuilder(EXCEPTION_LIST_FROM_SQL + " WHERE re.exception_reference_code = ? ");
+        args.add(exceptionId.trim());
+        Map<String, Object> tenantFilter = new LinkedHashMap<>();
+        tenantFilter.put("tenantId", tenantId);
+        appendExceptionListFilters(fromWhere, args, tenantFilter);
+
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                EXCEPTION_LIST_SELECT_SQL + fromWhere + " LIMIT 1",
+                args.toArray());
+        if (rows.isEmpty()) {
+            return Map.of("status", "NOT_FOUND", "exceptionId", exceptionId);
+        }
+        Map<String, Object> row = rows.get(0);
+
+        List<Map<String, Object>> notes = jdbc.queryForList("""
+                SELECT
+                    CAST(en.exception_note_id AS text) AS "noteId",
+                    en.note_text AS "text",
+                    en.note_text AS "note",
+                    en.note_text AS "body",
+                    en.created_on AS "createdAt",
+                    CAST(en.created_by AS text) AS "createdBy",
+                    COALESCE(
+                        NULLIF(TRIM(CONCAT_WS(' ', nu.first_name, nu.last_name)), ''),
+                        CAST(en.created_by AS text),
+                        'System'
+                    ) AS "createdByName"
+                FROM reconciliation.exception_note en
+                JOIN reconciliation.reconciliation_exception re
+                    ON re.reconciliation_exception_id = en.reconciliation_exception_id
+                LEFT JOIN access.access_user nu ON nu.user_id = en.created_by
+                WHERE re.exception_reference_code = ?
+                ORDER BY en.created_on ASC
+                """, exceptionId.trim());
+
+        Map<String, Object> detail = new LinkedHashMap<>(row);
+        detail.put("notes", notes);
+        if (notes.isEmpty()) {
+            Object latest = row.get("latestNote");
+            if (latest != null && !String.valueOf(latest).isBlank()) {
+                detail.put("noteSummary", String.valueOf(latest));
+            }
+        } else {
+            Map<String, Object> last = notes.get(notes.size() - 1);
+            detail.put("latestNote", last.get("text"));
+            detail.put("noteSummary", last.get("text"));
+        }
+        return detail;
     }
 
     public String createException(ReconciliationRequests.CreateExceptionRequest request, String tenantId) {
@@ -2161,14 +2517,21 @@ public class ReconciliationModuleRepository {
         }
         String placeholders = request.exceptionIds().stream().map(i -> "?").reduce((a, b) -> a + "," + b).orElse("?");
         if (request.status() != null && !request.status().isBlank()) {
+            String st = request.status().toUpperCase();
             List<Object> args = new ArrayList<>();
-            args.add(request.status().toUpperCase());
+            args.add(st);
             args.add(request.note());
+            args.add(st);
+            args.add(st);
+            args.add(st);
             args.addAll(request.exceptionIds());
             return jdbc.update("""
                     UPDATE reconciliation.reconciliation_exception
                     SET exception_status_id = (SELECT exception_status_id FROM reconciliation.lu_exception_status WHERE code=?),
                         resolution_note = COALESCE(?, resolution_note),
+                        resolved_at = CASE WHEN ? IN ('RESOLVED','CLOSED','AUTO_RESOLVED','SUPERSEDED') THEN now() ELSE resolved_at END,
+                        closed_at = CASE WHEN ? = 'CLOSED' THEN now() ELSE closed_at END,
+                        is_auto_resolved = CASE WHEN ? = 'AUTO_RESOLVED' THEN true ELSE is_auto_resolved END,
                         modified_on = now()
                     WHERE exception_reference_code IN (%s)
                     """.formatted(placeholders), args.toArray());
@@ -2197,23 +2560,89 @@ public class ReconciliationModuleRepository {
                 """, exceptionId, note, typeId);
     }
 
-    public List<Map<String, Object>> getJournal(String period, List<String> glAccountCodes, List<String> postingStatus, String entityId, String recoRunId) {
+    /**
+     * Journal listing from {@code reconciliation.gl_entry} joined to {@code finance.gl_code},
+     * mapping rule dimensions, and reconciliation lookups (matches production DDL).
+     */
+    public Map<String, Object> getJournal(
+            String tenantId,
+            String period,
+            List<String> glAccountCodes,
+            List<String> postingStatus,
+            String entityId,
+            String recoRunId,
+            Integer page,
+            Integer pageSize
+    ) {
+        int p = page == null || page < 1 ? 1 : page;
+        int ps = pageSize == null || pageSize < 1 ? 50 : Math.min(pageSize, 500);
+        int offset = (p - 1) * ps;
+
         List<Object> args = new ArrayList<>();
         StringBuilder sql = new StringBuilder("""
                 SELECT
                     ge.gl_entry_reference_code AS "journalId",
+                    CAST(ge.gl_entry_id AS text) AS "glEntryId",
                     COALESCE(ge.entity_reference_code, CAST(ge.entity_id AS text)) AS "entityId",
+                    CAST(ge.entity_id AS text) AS "entityUuid",
+                    et.code AS "entityType",
+                    et.display_name AS "entityTypeName",
+                    rr.run_reference_code AS "recoRunId",
+                    CAST(rr.application_id AS text) AS "applicationId",
+                    fp.period_code AS "periodCode",
+                    CAST(ge.gl_code_id AS text) AS "glCodeId",
                     gc.gl_code AS "glAccountCode",
+                    gc.description AS "glAccountName",
+                    gat.name AS "glAccountType",
+                    CAST(ge.gl_mapping_rule_id AS text) AS "glMappingRuleId",
+                    gmr.mapping_code AS "glMappingRuleCode",
+                    gmr.mapping_name AS "glMappingRuleName",
+                    jt.code AS "journalType",
+                    jt.display_name AS "journalTypeName",
+                    lob.code AS "lineOfBusiness",
+                    lob.display_name AS "lineOfBusinessName",
+                    gst.code AS "sourceType",
+                    gst.display_name AS "sourceTypeName",
+                    gtx.code AS "transactionType",
+                    gtx.display_name AS "transactionTypeName",
+                    pcur.currency_code AS "currencyCode",
                     ge.debit_amount AS "debitAmount",
                     ge.credit_amount AS "creditAmount",
-                    gps.code AS "postingStatus",
-                    ge.posted_at AS "postedAt"
+                    COALESCE(gps.code, 'UNKNOWN') AS "postingStatus",
+                    gps.display_name AS "postingStatusName",
+                    ge.posting_reference AS "postingReference",
+                    ge.posted_at AS "postedAt",
+                    ge.created_on AS "createdAt",
+                    ge.modified_on AS "updatedAt"
                 FROM reconciliation.gl_entry ge
-                JOIN reconciliation.lu_gl_posting_status gps ON gps.gl_posting_status_id = ge.gl_posting_status_id
-                LEFT JOIN finance.gl_code gc ON gc.gl_code_id = ge.gl_code_id
+                INNER JOIN finance.gl_code gc ON gc.gl_code_id = ge.gl_code_id
+                LEFT JOIN finance.lu_gl_account_type gat ON gat.gl_account_type_id = gc.gl_account_type_id
+                LEFT JOIN reconciliation.lu_gl_posting_status gps ON gps.gl_posting_status_id = ge.gl_posting_status_id
+                LEFT JOIN reconciliation.lu_reconciliation_entity_type et ON et.reconciliation_entity_type_id = ge.entity_type_id
                 LEFT JOIN reconciliation.financial_period fp ON fp.financial_period_id = ge.financial_period_id
+                LEFT JOIN reconciliation.reconciliation_run rr ON rr.reconciliation_run_id = ge.reconciliation_run_id
+                LEFT JOIN reconciliation.gl_mapping_rule gmr ON gmr.gl_mapping_rule_id = ge.gl_mapping_rule_id
+                LEFT JOIN reconciliation.lu_journal_type jt ON jt.journal_type_id = COALESCE(ge.journal_type_id, gmr.journal_type_id)
+                LEFT JOIN reconciliation.lu_line_of_business lob ON lob.line_of_business_id = COALESCE(ge.line_of_business_id, gmr.line_of_business_id)
+                LEFT JOIN reconciliation.lu_gl_source_type gst ON gst.gl_source_type_id = gmr.gl_source_type_id
+                LEFT JOIN reconciliation.lu_gl_transaction_type gtx ON gtx.gl_transaction_type_id = gmr.gl_transaction_type_id
+                LEFT JOIN payment_gateway.lu_payment_gateway_currency_type pcur
+                    ON pcur.payment_gateway_currency_type_id = COALESCE(ge.payment_currency_type_id, gmr.payment_currency_type_id)
                 WHERE 1=1
                 """);
+        UUID tenantUuid = parseOptionalUuid(tenantId);
+        if (tenantUuid != null) {
+            sql.append("""
+                     AND (
+                        gc.application_id IS NOT DISTINCT FROM ?
+                        OR gmr.application_id IS NOT DISTINCT FROM ?
+                        OR rr.application_id IS NOT DISTINCT FROM ?
+                     )
+                    """);
+            args.add(tenantUuid);
+            args.add(tenantUuid);
+            args.add(tenantUuid);
+        }
         if (period != null && !period.isBlank()) {
             sql.append(" AND fp.period_code = ? ");
             args.add(period.trim());
@@ -2235,7 +2664,7 @@ public class ReconciliationModuleRepository {
         }
         List<String> pstat = postingStatus == null ? List.of() : postingStatus.stream().filter(s -> s != null && !s.isBlank()).map(String::toUpperCase).toList();
         if (!pstat.isEmpty()) {
-            sql.append(" AND gps.code IN (");
+            sql.append(" AND UPPER(COALESCE(gps.code, '')) IN (");
             appendPlaceholders(sql, pstat.size());
             sql.append(") ");
             args.addAll(pstat);
@@ -2245,8 +2674,27 @@ public class ReconciliationModuleRepository {
             args.add(entityId);
             args.add(entityId);
         }
-        sql.append(" ORDER BY ge.created_on DESC LIMIT 500");
-        return jdbc.queryForList(sql.toString(), args.toArray());
+
+        String fromWhere = sql.toString();
+        Long n = jdbc.queryForObject("SELECT COUNT(1) FROM (" + fromWhere + ") AS journal_count_sub", Long.class, args.toArray());
+        long total = n == null ? 0L : n;
+
+        List<Object> pageArgs = new ArrayList<>(args);
+        pageArgs.add(ps);
+        pageArgs.add(offset);
+        sql.append(" ORDER BY ge.created_on DESC LIMIT ? OFFSET ? ");
+        List<Map<String, Object>> items = jdbc.queryForList(sql.toString(), pageArgs.toArray());
+
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("total", total);
+        meta.put("page", p);
+        meta.put("pageSize", ps);
+        meta.put("totalPages", (int) Math.max(1, Math.ceil(total / (double) ps)));
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("items", items);
+        out.put("meta", meta);
+        return out;
     }
 
     public List<Map<String, Object>> validateJournal(List<String> journalIds) {
@@ -2399,11 +2847,320 @@ public class ReconciliationModuleRepository {
         );
     }
 
-    public List<Map<String, Object>> reportQuery(String slug, Object filters) {
-        return List.of(Map.of("slug", slug, "filters", filters, "generatedAt", OffsetDateTime.now().toString()));
+    public Map<String, Object> normalizeReportFilters(Object filtersRaw, String tenantId) {
+        Map<String, Object> filters = normalizeFiltersObject(filtersRaw);
+        if (tenantId != null && !tenantId.isBlank()) {
+            filters.putIfAbsent("tenantId", tenantId.trim());
+            filters.putIfAbsent("applicationId", tenantId.trim());
+        }
+        return filters;
     }
 
-    public String reportExport(String slug, String format, Object filters) {
+    public Map<String, Object> reportQuery(String slug, Object filtersRaw) {
+        Map<String, Object> filters = normalizeFiltersObject(filtersRaw);
+        applyDefaultReportDates(filters);
+        String normalized = slug == null ? "" : slug.trim().toLowerCase();
+        return switch (normalized) {
+            case "revenue-vs-collection" -> queryRevenueVsCollectionReport(filters);
+            case "exception-trends" -> queryExceptionTrendsReport(filters);
+            case "gateway-performance" -> queryGatewayPerformanceReport(filters);
+            default -> unknownReportPayload(slug, filters);
+        };
+    }
+
+    private void applyDefaultReportDates(Map<String, Object> filters) {
+        String to = asString(filters.get("toDate"));
+        String from = asString(filters.get("fromDate"));
+        LocalDate end = to == null || to.isBlank() ? LocalDate.now() : LocalDate.parse(to.trim());
+        if (to == null || to.isBlank()) {
+            filters.put("toDate", end.toString());
+        }
+        if (from == null || from.isBlank()) {
+            filters.put("fromDate", end.minusDays(29).toString());
+        }
+    }
+
+    private Map<String, Object> unknownReportPayload(String slug, Map<String, Object> filters) {
+        return reportEnvelope(
+                slug,
+                filters,
+                Map.of("message", "Unknown report slug"),
+                List.of(),
+                List.of()
+        );
+    }
+
+    private Map<String, Object> reportEnvelope(
+            String slug,
+            Map<String, Object> filters,
+            Map<String, Object> summary,
+            List<Map<String, Object>> rows,
+            List<Map<String, Object>> breakdown
+    ) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("slug", slug);
+        out.put("filters", filters);
+        out.put("generatedAt", OffsetDateTime.now().toString());
+        out.put("summary", summary);
+        out.put("rows", rows);
+        if (breakdown != null && !breakdown.isEmpty()) {
+            out.put("breakdown", breakdown);
+        }
+        out.put("meta", Map.of(
+                "rowCount", rows.size(),
+                "hasData", !rows.isEmpty(),
+                "breakdownCount", breakdown == null ? 0 : breakdown.size()
+        ));
+        return out;
+    }
+
+    private static double reportPct(double numerator, double denominator) {
+        return denominator == 0d ? 0d : Math.round(numerator * 10000.0 / denominator) / 100.0;
+    }
+
+    private UUID applicationIdFromFilters(Map<String, Object> filters) {
+        UUID id = parseOptionalUuid(asString(filters.get("applicationId")));
+        if (id != null) {
+            return id;
+        }
+        return parseOptionalUuid(asString(filters.get("tenantId")));
+    }
+
+    private Map<String, Object> queryRevenueVsCollectionReport(Map<String, Object> filters) {
+        List<Object> args = new ArrayList<>();
+        String where = buildInvoiceWhere(filters, args);
+        String paidExpr = INVOICE_CAPTURED_PAID_MAJOR_EXPR.strip();
+        String invoiceFrom = """
+                FROM transactions.invoice i
+                LEFT JOIN client_payments.client_payment_intent cpi ON cpi.invoice_id = i.invoice_id
+                LEFT JOIN client_payments.client_payment_transaction cpt ON cpt.client_payment_intent_id = cpi.client_payment_intent_id
+                """;
+        String invoiceScoped = """
+                SELECT
+                    i.invoice_id,
+                    MAX(i.created_on::date) AS period_date,
+                    COALESCE(MAX(i.total_amount), 0)::numeric AS revenue_amount,
+                    MAX("""
+                + "(" + paidExpr + ")"
+                + """
+                    )::numeric AS collected_amount
+                """
+                + invoiceFrom + where + """
+                GROUP BY i.invoice_id
+                """;
+
+        String totalsSql = """
+                SELECT
+                    COUNT(*) AS "invoiceCount",
+                    COALESCE(SUM(scoped.revenue_amount), 0) AS "revenueAmount",
+                    COALESCE(SUM(scoped.collected_amount), 0) AS "collectedAmount",
+                    COUNT(*) FILTER (
+                        WHERE ABS(scoped.revenue_amount - scoped.collected_amount) <= 0.01
+                    ) AS "reconciledCount",
+                    COUNT(*) FILTER (
+                        WHERE ABS(scoped.revenue_amount - scoped.collected_amount) > 0.01
+                    ) AS "varianceCount"
+                FROM ("""
+                + invoiceScoped + ") scoped";
+        Map<String, Object> totals = jdbc.queryForMap(totalsSql, args.toArray());
+
+        String rowsSql = """
+                SELECT
+                    scoped.period_date AS "periodDate",
+                    COUNT(*) AS "invoiceCount",
+                    COALESCE(SUM(scoped.revenue_amount), 0) AS "revenueAmount",
+                    COALESCE(SUM(scoped.collected_amount), 0) AS "collectedAmount",
+                    COALESCE(SUM(scoped.revenue_amount - scoped.collected_amount), 0) AS "varianceAmount"
+                FROM ("""
+                + invoiceScoped + """
+                ) scoped
+                GROUP BY scoped.period_date
+                ORDER BY scoped.period_date
+                """;
+        List<Map<String, Object>> rows = jdbc.queryForList(rowsSql, args.toArray());
+        enrichRevenueCollectionRows(rows);
+
+        double revenue = num(totals.get("revenueAmount"));
+        double collected = num(totals.get("collectedAmount"));
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("invoiceCount", ((Number) totals.getOrDefault("invoiceCount", 0)).longValue());
+        summary.put("revenueAmount", revenue);
+        summary.put("collectedAmount", collected);
+        summary.put("varianceAmount", revenue - collected);
+        summary.put("collectionRatePct", reportPct(collected, revenue));
+        summary.put("reconciledCount", ((Number) totals.getOrDefault("reconciledCount", 0)).longValue());
+        summary.put("varianceCount", ((Number) totals.getOrDefault("varianceCount", 0)).longValue());
+        summary.put("reconciledRatePct", reportPct(
+                ((Number) totals.getOrDefault("reconciledCount", 0)).doubleValue(),
+                ((Number) totals.getOrDefault("invoiceCount", 0)).doubleValue()));
+
+        return reportEnvelope("revenue-vs-collection", filters, summary, rows, List.of());
+    }
+
+    private void enrichRevenueCollectionRows(List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            double revenue = num(row.get("revenueAmount"));
+            double collected = num(row.get("collectedAmount"));
+            row.put("collectionRatePct", reportPct(collected, revenue));
+            row.put("varianceAmount", num(row.get("varianceAmount")));
+        }
+    }
+
+    private Map<String, Object> queryExceptionTrendsReport(Map<String, Object> filters) {
+        List<Object> args = new ArrayList<>();
+        StringBuilder where = new StringBuilder(" WHERE 1=1 ");
+        String fromDate = asString(filters.get("fromDate"));
+        String toDate = asString(filters.get("toDate"));
+        if (fromDate != null && !fromDate.isBlank()) {
+            where.append(" AND re.created_on::date >= ?::date ");
+            args.add(fromDate);
+        }
+        if (toDate != null && !toDate.isBlank()) {
+            where.append(" AND re.created_on::date <= ?::date ");
+            args.add(toDate);
+        }
+        UUID applicationId = applicationIdFromFilters(filters);
+        if (applicationId != null) {
+            where.append(" AND re.application_id IS NOT DISTINCT FROM ? ");
+            args.add(applicationId);
+        }
+
+        String fromSql = """
+                FROM reconciliation.reconciliation_exception re
+                JOIN reconciliation.lu_severity sev ON sev.severity_id = re.severity_id
+                JOIN reconciliation.lu_exception_status es ON es.exception_status_id = re.exception_status_id
+                JOIN reconciliation.lu_reconciliation_stage stg ON stg.reconciliation_stage_id = re.reconciliation_stage_id
+                """ + where;
+
+        Map<String, Object> totals = jdbc.queryForMap("""
+                SELECT
+                    COUNT(*) AS "totalExceptions",
+                    COUNT(*) FILTER (WHERE es.code IN ('OPEN', 'IN_PROGRESS', 'ESCALATED')) AS "openCount",
+                    COUNT(*) FILTER (WHERE es.is_terminal = true OR es.code IN ('RESOLVED', 'CLOSED')) AS "closedCount",
+                    COUNT(*) FILTER (WHERE sev.code = 'CRITICAL') AS "criticalCount",
+                    COUNT(*) FILTER (WHERE sev.code = 'HIGH') AS "highCount"
+                """ + fromSql, args.toArray());
+
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT
+                    re.created_on::date AS "periodDate",
+                    COUNT(*) AS "openedCount",
+                    COUNT(*) FILTER (WHERE re.resolved_at IS NOT NULL OR re.closed_at IS NOT NULL) AS "resolvedCount",
+                    COUNT(*) FILTER (WHERE es.code IN ('OPEN', 'IN_PROGRESS', 'ESCALATED')) AS "openCount",
+                    COUNT(*) FILTER (WHERE sev.code = 'CRITICAL') AS "criticalCount",
+                    COUNT(*) FILTER (WHERE sev.code = 'HIGH') AS "highCount"
+                """ + fromSql + """
+                GROUP BY re.created_on::date
+                ORDER BY re.created_on::date
+                """, args.toArray());
+
+        List<Map<String, Object>> severityBreakdown = jdbc.queryForList("""
+                SELECT sev.code AS "severity", COUNT(*) AS "count"
+                """ + fromSql + """
+                GROUP BY sev.code
+                ORDER BY COUNT(*) DESC
+                """, args.toArray());
+
+        List<Map<String, Object>> statusBreakdown = jdbc.queryForList("""
+                SELECT es.code AS "status", COUNT(*) AS "count"
+                """ + fromSql + """
+                GROUP BY es.code
+                ORDER BY COUNT(*) DESC
+                """, args.toArray());
+
+        List<Map<String, Object>> stageBreakdown = jdbc.queryForList("""
+                SELECT stg.code AS "stage", COUNT(*) AS "count"
+                """ + fromSql + """
+                GROUP BY stg.code
+                ORDER BY COUNT(*) DESC
+                """, args.toArray());
+
+        Map<String, Object> summary = new LinkedHashMap<>(totals);
+        summary.put("periodDays", rows.size());
+
+        List<Map<String, Object>> breakdown = new ArrayList<>();
+        breakdown.add(Map.of("dimension", "severity", "items", severityBreakdown));
+        breakdown.add(Map.of("dimension", "status", "items", statusBreakdown));
+        breakdown.add(Map.of("dimension", "stage", "items", stageBreakdown));
+
+        return reportEnvelope("exception-trends", filters, summary, rows, breakdown);
+    }
+
+    private Map<String, Object> queryGatewayPerformanceReport(Map<String, Object> filters) {
+        List<Object> args = new ArrayList<>();
+        StringBuilder where = new StringBuilder(" WHERE cpt.client_payment_transaction_id IS NOT NULL ");
+        String fromDate = asString(filters.get("fromDate"));
+        String toDate = asString(filters.get("toDate"));
+        if (fromDate != null && !fromDate.isBlank()) {
+            where.append(" AND cpt.created_on::date >= ?::date ");
+            args.add(fromDate);
+        }
+        if (toDate != null && !toDate.isBlank()) {
+            where.append(" AND cpt.created_on::date <= ?::date ");
+            args.add(toDate);
+        }
+        where.append(" AND ").append(SQL_INVOICE_STATUS_IN_RECONCILIATION_SCOPE);
+
+        String fromSql = """
+                FROM client_payments.client_payment_transaction cpt
+                JOIN client_payments.client_payment_intent cpi ON cpi.client_payment_intent_id = cpt.client_payment_intent_id
+                JOIN transactions.invoice i ON i.invoice_id = cpi.invoice_id
+                LEFT JOIN payment_gateway.lu_payment_gateway_transaction_status pgts
+                    ON pgts.payment_gateway_transaction_status_id = cpt.payment_gateway_transaction_status_id
+                LEFT JOIN payment_gateway.payment_gateway pgw
+                    ON pgw.payment_gateway_id = pgts.payment_gateway_id
+                """ + where;
+
+        String successCondition =
+                "UPPER(COALESCE(pgts.status_code, '')) IN ('SUCCESS', 'CAPTURED', 'COMPLETED', 'SUCCEEDED', 'PAID')";
+
+        String totalsSql = "SELECT "
+                + "COUNT(*) AS \"transactionCount\", "
+                + "COUNT(*) FILTER (WHERE " + successCondition + ") AS \"successCount\", "
+                + "COUNT(*) FILTER (WHERE NOT (" + successCondition + ")) AS \"failedCount\", "
+                + "COALESCE(SUM(" + CPT_AMT_MAJOR_EXPR + "), 0) AS \"totalAmount\", "
+                + "COALESCE(SUM(" + CPT_AMT_MAJOR_EXPR + ") FILTER (WHERE " + successCondition + "), 0) AS \"successAmount\" "
+                + fromSql;
+        Map<String, Object> totals = jdbc.queryForMap(totalsSql, args.toArray());
+
+        String rowsSql = "SELECT "
+                + "COALESCE(NULLIF(TRIM(pgw.name), ''), 'Unknown') AS \"gatewayName\", "
+                + "CAST(COALESCE(pgw.payment_gateway_id, '00000000-0000-0000-0000-000000000000') AS text) AS \"gatewayId\", "
+                + "COUNT(*) AS \"transactionCount\", "
+                + "COUNT(*) FILTER (WHERE " + successCondition + ") AS \"successCount\", "
+                + "COUNT(*) FILTER (WHERE NOT (" + successCondition + ")) AS \"failedCount\", "
+                + "COALESCE(SUM(" + CPT_AMT_MAJOR_EXPR + "), 0) AS \"totalAmount\", "
+                + "COALESCE(SUM(" + CPT_AMT_MAJOR_EXPR + ") FILTER (WHERE " + successCondition + "), 0) AS \"successAmount\", "
+                + "COALESCE(AVG(" + CPT_AMT_MAJOR_EXPR + "), 0) AS \"avgTransactionAmount\" "
+                + fromSql
+                + " GROUP BY pgw.payment_gateway_id, pgw.name "
+                + " ORDER BY COALESCE(SUM(" + CPT_AMT_MAJOR_EXPR + "), 0) DESC";
+        List<Map<String, Object>> rows = jdbc.queryForList(rowsSql, args.toArray());
+
+        for (Map<String, Object> row : rows) {
+            long txn = ((Number) row.getOrDefault("transactionCount", 0)).longValue();
+            long ok = ((Number) row.getOrDefault("successCount", 0)).longValue();
+            row.put("successRatePct", reportPct(ok, txn));
+            double total = num(row.get("totalAmount"));
+            double successAmt = num(row.get("successAmount"));
+            row.put("failedAmount", Math.max(0d, total - successAmt));
+        }
+
+        long txnTotal = ((Number) totals.getOrDefault("transactionCount", 0)).longValue();
+        long successTotal = ((Number) totals.getOrDefault("successCount", 0)).longValue();
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("transactionCount", txnTotal);
+        summary.put("successCount", successTotal);
+        summary.put("failedCount", ((Number) totals.getOrDefault("failedCount", 0)).longValue());
+        summary.put("totalAmount", num(totals.get("totalAmount")));
+        summary.put("successAmount", num(totals.get("successAmount")));
+        summary.put("successRatePct", reportPct(successTotal, txnTotal));
+        summary.put("gatewayCount", rows.size());
+
+        return reportEnvelope("gateway-performance", filters, summary, rows, List.of());
+    }
+
+    public String insertReportExport(String slug, String format, Map<String, Object> filters) {
         String exportCode = "REP-" + Math.abs(UUID.randomUUID().hashCode());
         jdbc.update("""
                 INSERT INTO reconciliation.report_export
@@ -2417,6 +3174,38 @@ public class ReconciliationModuleRepository {
         return exportCode;
     }
 
+    public void updateReportExportStatus(
+            String exportId,
+            String statusCode,
+            String fileUrl,
+            String errorMessage,
+            Integer exportRowCount
+    ) {
+        Map<String, Object> patch = new LinkedHashMap<>();
+        if (errorMessage != null && !errorMessage.isBlank()) {
+            patch.put("error", errorMessage);
+        }
+        if (exportRowCount != null) {
+            patch.put("exportRowCount", exportRowCount);
+        }
+        jdbc.update("""
+                UPDATE reconciliation.report_export
+                SET reconciliation_run_status_id = (
+                        SELECT reconciliation_run_status_id
+                        FROM reconciliation.lu_reconciliation_run_status
+                        WHERE code = ?
+                    ),
+                    file_url = ?,
+                    filters_json = filters_json || ?::jsonb,
+                    modified_on = now()
+                WHERE report_export_reference_code = ?
+                """,
+                statusCode,
+                fileUrl,
+                toJson(patch),
+                exportId);
+    }
+
     public Map<String, Object> reportExportStatus(String exportId) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
                 SELECT
@@ -2425,6 +3214,8 @@ public class ReconciliationModuleRepository {
                     ef.code AS "format",
                     rs.code AS "status",
                     re.file_url AS "fileUrl",
+                    re.filters_json->>'error' AS "error",
+                    re.filters_json->>'exportRowCount' AS "exportRowCount",
                     re.created_on AS "createdAt",
                     re.modified_on AS "updatedAt"
                 FROM reconciliation.report_export re

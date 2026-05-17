@@ -222,17 +222,50 @@ public class ReconciliationModuleController {
         return ResponseEntity.accepted().body(success(service.idempotentRetrySync(tenantId, idempotencyKey, entityId, request), 1, 1));
     }
 
+    @GetMapping("/exceptions/assignable-users")
+    public ResponseEntity<Map<String, Object>> listAssignableExceptionUsers(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false, defaultValue = "1") Integer page,
+            @RequestParam(required = false, defaultValue = "25") Integer pageSize,
+            @RequestParam(required = false, defaultValue = "true") Boolean activeOnly
+    ) {
+        Map<String, Object> payload = service.listAssignableExceptionUsers(tenantId, search, page, pageSize, activeOnly);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> meta = (Map<String, Object>) payload.getOrDefault("meta", Map.of());
+        long total = ((Number) meta.getOrDefault("totalRecords", meta.getOrDefault("total", 0))).longValue();
+        int p = ((Number) meta.getOrDefault("page", page)).intValue();
+        int ps = ((Number) meta.getOrDefault("pageSize", pageSize)).intValue();
+        return ResponseEntity.ok(successPaged(payload, p, ps, total));
+    }
+
+    @GetMapping("/exceptions/{exceptionId}")
+    public ResponseEntity<Map<String, Object>> getExceptionDetail(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String exceptionId
+    ) {
+        Map<String, Object> detail = service.getExceptionDetail(exceptionId, tenantId);
+        if ("NOT_FOUND".equals(detail.get("status"))) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(success(detail, 1, 1));
+    }
+
     @GetMapping("/exceptions")
     public ResponseEntity<Map<String, Object>> listExceptions(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false) String recoRunId,
             @RequestParam(required = false) List<String> severity,
             @RequestParam(required = false) List<String> status,
             @RequestParam(required = false) List<String> assigneeIds,
             @RequestParam(required = false) List<String> stage,
             @RequestParam(required = false) Boolean slaBreached,
-            @RequestParam(required = false) String search
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false, defaultValue = "1") Integer page,
+            @RequestParam(required = false, defaultValue = "20") Integer pageSize
     ) {
         Map<String, Object> filters = new HashMap<>();
+        filters.put("tenantId", tenantId);
         filters.put("recoRunId", recoRunId);
         filters.put("severity", severity == null ? List.of() : severity);
         filters.put("status", status == null ? List.of() : status);
@@ -240,9 +273,15 @@ public class ReconciliationModuleController {
         filters.put("stage", stage == null ? List.of() : stage);
         filters.put("slaBreached", slaBreached);
         filters.put("search", search);
+        filters.put("page", page);
+        filters.put("pageSize", pageSize);
         Map<String, Object> payload = service.listExceptions(filters);
-        List<?> items = (List<?>) payload.getOrDefault("items", List.of());
-        return ResponseEntity.ok(success(payload, 1, items.size()));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> meta = (Map<String, Object>) payload.getOrDefault("meta", Map.of());
+        long total = ((Number) meta.getOrDefault("totalRecords", meta.getOrDefault("total", 0))).longValue();
+        int p = ((Number) meta.getOrDefault("page", page)).intValue();
+        int ps = ((Number) meta.getOrDefault("pageSize", pageSize)).intValue();
+        return ResponseEntity.ok(successPaged(payload, p, ps, total));
     }
 
     @PostMapping("/exceptions")
@@ -285,15 +324,23 @@ public class ReconciliationModuleController {
 
     @GetMapping("/accounting/journal")
     public ResponseEntity<Map<String, Object>> journal(
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false) String period,
             @RequestParam(required = false) List<String> glAccountCodes,
             @RequestParam(required = false) List<String> postingStatus,
             @RequestParam(required = false) String entityId,
-            @RequestParam(required = false) String recoRunId
+            @RequestParam(required = false) String recoRunId,
+            @RequestParam(required = false, defaultValue = "1") Integer page,
+            @RequestParam(required = false, defaultValue = "50") Integer pageSize
     ) {
-        Map<String, Object> payload = service.getJournal(period, glAccountCodes, postingStatus, entityId, recoRunId);
-        List<?> items = (List<?>) payload.getOrDefault("items", List.of());
-        return ResponseEntity.ok(success(payload, 1, items.size()));
+        Map<String, Object> payload = service.getJournal(
+                tenantId, period, glAccountCodes, postingStatus, entityId, recoRunId, page, pageSize);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> jm = (Map<String, Object>) payload.getOrDefault("meta", Map.of());
+        long total = ((Number) jm.getOrDefault("total", 0)).longValue();
+        int p = ((Number) jm.getOrDefault("page", page)).intValue();
+        int ps = ((Number) jm.getOrDefault("pageSize", pageSize)).intValue();
+        return ResponseEntity.ok(successPaged(payload, p, ps, total));
     }
 
     @PostMapping("/accounting/journal/validate")
@@ -376,9 +423,15 @@ public class ReconciliationModuleController {
     @PostMapping("/reports/{slug}/query")
     public ResponseEntity<Map<String, Object>> reportQuery(
             @PathVariable String slug,
+            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @Valid @RequestBody ReconciliationRequests.ReportQueryRequest request
     ) {
-        return ResponseEntity.ok(success(service.reportQuery(slug, request), 1, 1));
+        Map<String, Object> payload = service.reportQuery(slug, request, tenantId);
+        Object rowCount = payload.get("meta") instanceof Map<?, ?> meta
+                ? meta.get("rowCount")
+                : payload.get("rows") instanceof List<?> rows ? rows.size() : 0;
+        int count = rowCount instanceof Number n ? n.intValue() : 0;
+        return ResponseEntity.ok(success(payload, 1, count));
     }
 
     @PostMapping("/reports/{slug}/export")
