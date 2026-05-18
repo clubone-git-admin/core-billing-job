@@ -832,7 +832,7 @@ public class ReconciliationModuleRepository {
         out.put("statusBreakdown", List.of());
         Map<String, Object> zeroAgg = emptyScopeAgg();
         out.put("reconciliationScope", Map.of(
-                "subscription", Map.of("kpis", buildKpiBlock(zeroAgg, "SUBSCRIPTION"), "chainStages", buildSubscriptionChainStages(zeroAgg, 0)),
+                "subscription", Map.of("kpis", buildKpiBlock(zeroAgg, "SUBSCRIPTION"), "chainStages", buildSubscriptionChainStages(zeroAgg, emptyScheduleAgg())),
                 "cash", Map.of("kpis", buildKpiBlock(zeroAgg, "CASH"), "chainStages", buildCashChainStages(zeroAgg))
         ));
         out.put("varianceByReconciliationType", buildVarianceByReconciliationType(zeroAgg, zeroAgg, 5, true));
@@ -853,6 +853,15 @@ public class ReconciliationModuleRepository {
         m.put("mismatch_count", 0);
         m.put("intent_rows", 0);
         m.put("txn_rows", 0);
+        return m;
+    }
+
+    private static Map<String, Object> emptyScheduleAgg() {
+        Map<String, Object> m = new HashMap<>();
+        m.put("schedule_count", 0);
+        m.put("total_expected_amount", 0.0);
+        m.put("total_actual_amount", 0.0);
+        m.put("reconciled_schedule_count", 0);
         return m;
     }
 
@@ -1625,42 +1634,37 @@ public class ReconciliationModuleRepository {
      * Same KPI logic as getDashboardSummary but without recoRunId branching (live only).
      */
     private Map<String, Object> computeDashboardSummaryLive(Map<String, Object> filters) {
-        List<Object> args = new ArrayList<>();
-        String where = buildInvoiceWhere(filters, args);
-        Map<String, Object> totals = jdbc.queryForMap("""
-                SELECT COUNT(1) AS total_invoices, COALESCE(SUM(i.total_amount), 0) AS total_expected_amount
-                FROM transactions.invoice i
-                LEFT JOIN client_payments.client_payment_intent cpi ON cpi.invoice_id = i.invoice_id
-                LEFT JOIN client_payments.client_payment_transaction cpt ON cpt.client_payment_intent_id = cpi.client_payment_intent_id
-                """ + where, args.toArray());
-        String sumCaptured = "COALESCE(SUM(" + CPT_AMT_MAJOR_EXPR + "), 0)";
-        String mismatchCountExpr = "COUNT(1) FILTER (WHERE ABS(COALESCE(i.total_amount, 0)::numeric - (" + CPT_AMT_MAJOR_EXPR + ")) > 0.01)";
-        String actualSql = "SELECT " + sumCaptured + " AS total_actual_amount, " + mismatchCountExpr + " AS mismatch_count "
-                + "FROM transactions.invoice i "
-                + "LEFT JOIN client_payments.client_payment_intent cpi ON cpi.invoice_id = i.invoice_id "
-                + "LEFT JOIN client_payments.client_payment_transaction cpt ON cpt.client_payment_intent_id = cpi.client_payment_intent_id "
-                + where;
-        Map<String, Object> actual = jdbc.queryForMap(actualSql, args.toArray());
-        double expected = ((Number) totals.getOrDefault("total_expected_amount", 0)).doubleValue();
-        double actualAmount = ((Number) actual.getOrDefault("total_actual_amount", 0)).doubleValue();
+        Map<String, Object> combinedAgg = computeScopeInvoicePaymentAgg(filters, (Boolean) null);
+        double expected = ((Number) combinedAgg.getOrDefault("total_expected_amount", 0)).doubleValue();
+        double actualAmount = ((Number) combinedAgg.getOrDefault("total_actual_amount", 0)).doubleValue();
         double variance = expected - actualAmount;
-        int mismatchCount = ((Number) actual.getOrDefault("mismatch_count", 0)).intValue();
-        int totalInvoices = ((Number) totals.getOrDefault("total_invoices", 0)).intValue();
+        int mismatchCount = ((Number) combinedAgg.getOrDefault("mismatch_count", 0)).intValue();
+        int totalInvoices = ((Number) combinedAgg.getOrDefault("total_invoices", 0)).intValue();
         int reconciledCount = Math.max(0, totalInvoices - mismatchCount);
 
         Map<String, Object> subAgg = computeScopeInvoicePaymentAgg(filters, true);
         Map<String, Object> cashAgg = computeScopeInvoicePaymentAgg(filters, false);
-        long scheduleCount = countSubscriptionBillingSchedulesInScope(filters);
+        Map<String, Object> scheduleAgg = computeBillingScheduleAgg(filters);
 
         Map<String, Object> subKpis = buildKpiBlock(subAgg, "SUBSCRIPTION");
         Map<String, Object> cashKpis = buildKpiBlock(cashAgg, "CASH");
-        Map<String, Object> glMetrics = computeGlPostingMetricsForFilters(filters);
-        List<Map<String, Object>> subStages = withGlPostingStage(
-                buildSubscriptionChainStages(subAgg, scheduleCount), 8, glMetrics);
-        List<Map<String, Object>> cashStages = withGlPostingStage(
-                buildCashChainStages(cashAgg), 5, glMetrics);
-
+        Map<String, Object> glPack = computeGlPostingMetricsPackForFilters(filters);
         int driverLimit = parsePositiveInt(filters.get("varianceDriverLimit"), 5);
+        List<Map<String, Object>> subUnreconciled = listUnreconciledItemsLive(filters, true, driverLimit);
+        List<Map<String, Object>> cashUnreconciled = listUnreconciledItemsLive(filters, false, driverLimit);
+        List<Map<String, Object>> subStages = attachUnreconciledItemsToStages(
+                withGlPostingStage(
+                        buildSubscriptionChainStages(subAgg, scheduleAgg), 8,
+                        scopeGlMetrics(glPack, "subscription"),
+                        scopeInvoiceMismatch(subKpis)),
+                subUnreconciled);
+        List<Map<String, Object>> cashStages = attachUnreconciledItemsToStages(
+                withGlPostingStage(
+                        buildCashChainStages(cashAgg), 5,
+                        scopeGlMetrics(glPack, "cash"),
+                        scopeInvoiceMismatch(cashKpis)),
+                cashUnreconciled);
+
         boolean includeChart = parseBooleanDefault(filters.get("includeVarianceChart"), true);
         Map<String, Object> varianceByType = buildVarianceByReconciliationType(subAgg, cashAgg, driverLimit, includeChart);
 
@@ -1670,11 +1674,11 @@ public class ReconciliationModuleRepository {
                 "unreconciledCount", mismatchCount, "partialCount", mismatchCount, "reconciledCount", reconciledCount, "criticalExceptions", 0));
         summary.put("chainSummary", List.of(Map.of("stage", "INVOICE_TO_PAYMENT", "total", totalInvoices, "mismatch", mismatchCount,
                 "mismatchPct", totalInvoices == 0 ? 0 : (mismatchCount * 100.0 / totalInvoices))));
-        summary.put("varianceDrivers", List.of(Map.of("driver", "Amount mismatch", "count", mismatchCount, "amount", Math.abs(variance))));
-        summary.put("statusBreakdown", List.of(Map.of("status", "RECONCILED", "count", reconciledCount), Map.of("status", "UNRECONCILED", "count", mismatchCount), Map.of("status", "PARTIAL", "count", mismatchCount)));
+        summary.put("varianceDrivers", buildVarianceDrivers(mismatchCount, Math.abs(variance), subUnreconciled, cashUnreconciled));
+        summary.put("statusBreakdown", buildStatusBreakdown(reconciledCount, mismatchCount));
         summary.put("reconciliationScope", Map.of(
-                "subscription", Map.of("kpis", subKpis, "chainStages", subStages),
-                "cash", Map.of("kpis", cashKpis, "chainStages", cashStages)
+                "subscription", buildReconciliationScopeBlock(subKpis, subStages, subUnreconciled),
+                "cash", buildReconciliationScopeBlock(cashKpis, cashStages, cashUnreconciled)
         ));
         summary.put("varianceByReconciliationType", varianceByType);
         Map<String, Object> meta = new LinkedHashMap<>();
@@ -1684,48 +1688,390 @@ public class ReconciliationModuleRepository {
         meta.put("includeVarianceChart", includeChart);
         meta.put("subscriptionCashClassification", "SUBSCRIPTION = invoice_id in client_subscription_billing.subscription_billing_schedule; else CASH");
         meta.put("invoiceStatusScope", List.of("ISSUED", "PARTIALLY_PAID", "PAID", "DUE"));
-        meta.put("glPosting", glMetrics);
+        meta.put("glPosting", glPack);
         summary.put("meta", meta);
         return summary;
     }
 
-    private Map<String, Object> computeScopeInvoicePaymentAgg(Map<String, Object> filters, boolean subscription) {
+    private Map<String, Object> buildReconciliationScopeBlock(
+            Map<String, Object> kpis,
+            List<Map<String, Object>> chainStages,
+            List<Map<String, Object>> unreconciledItems
+    ) {
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put("kpis", kpis);
+        block.put("chainStages", chainStages);
+        block.put("unreconciledItems", unreconciledItems);
+        int total = ((Number) kpis.getOrDefault("totalInvoices", 0)).intValue();
+        int unreconciled = ((Number) kpis.getOrDefault("unreconciledCount", 0)).intValue();
+        block.put("paidSummary", Map.of(
+                "totalUnits", total,
+                "reconciledUnits", Math.max(0, total - unreconciled),
+                "unreconciledUnits", unreconciled,
+                "paidPct", total == 0 ? 0.0 : Math.max(0, total - unreconciled) * 100.0 / total
+        ));
+        return block;
+    }
+
+    private List<Map<String, Object>> buildVarianceDrivers(
+            int mismatchCount,
+            double varianceAmount,
+            List<Map<String, Object>> subUnreconciled,
+            List<Map<String, Object>> cashUnreconciled
+    ) {
+        if (mismatchCount <= 0) {
+            return List.of();
+        }
+        List<Map<String, Object>> items = new ArrayList<>();
+        items.addAll(subUnreconciled);
+        items.addAll(cashUnreconciled);
+        return List.of(Map.of(
+                "driver", "Amount mismatch",
+                "count", mismatchCount,
+                "amount", varianceAmount,
+                "items", items
+        ));
+    }
+
+    /**
+     * Invoices (or subscription schedules) in scope where invoice total does not match captured payment.
+     */
+    private List<Map<String, Object>> listUnreconciledItemsLive(Map<String, Object> filters, boolean subscriptionScope, int limit) {
+        int maxRows = Math.max(1, Math.min(limit, 100));
         List<Object> args = new ArrayList<>();
         String where = buildInvoiceWhere(filters, args);
-        String scope = subscription ? (" AND " + SQL_INVOICE_IS_SUBSCRIPTION) : (" AND NOT (" + SQL_INVOICE_IS_SUBSCRIPTION + ")");
-        Map<String, Object> totals = jdbc.queryForMap("""
-                SELECT COUNT(1) AS total_invoices, COALESCE(SUM(i.total_amount), 0) AS total_expected_amount
-                FROM transactions.invoice i
-                LEFT JOIN client_payments.client_payment_intent cpi ON cpi.invoice_id = i.invoice_id
-                LEFT JOIN client_payments.client_payment_transaction cpt ON cpt.client_payment_intent_id = cpi.client_payment_intent_id
-                """ + where + scope, args.toArray());
-        String sumCapturedAgg = "COALESCE(SUM(" + CPT_AMT_MAJOR_EXPR + "), 0)";
-        String mismatchCountAgg = "COUNT(1) FILTER (WHERE ABS(COALESCE(i.total_amount, 0)::numeric - (" + CPT_AMT_MAJOR_EXPR + ")) > 0.01)";
-        String actSql = "SELECT " + sumCapturedAgg + " AS total_actual_amount, " + mismatchCountAgg + " AS mismatch_count, "
-                + "COUNT(cpi.client_payment_intent_id) FILTER (WHERE cpi.client_payment_intent_id IS NOT NULL) AS intent_rows, "
-                + "COUNT(cpt.client_payment_transaction_id) FILTER (WHERE cpt.client_payment_transaction_id IS NOT NULL) AS txn_rows "
-                + "FROM transactions.invoice i "
-                + "LEFT JOIN client_payments.client_payment_intent cpi ON cpi.invoice_id = i.invoice_id "
-                + "LEFT JOIN client_payments.client_payment_transaction cpt ON cpt.client_payment_intent_id = cpi.client_payment_intent_id "
-                + where + scope;
-        Map<String, Object> act = jdbc.queryForMap(actSql, args.toArray());
-        Map<String, Object> out = new HashMap<>();
-        out.putAll(totals);
-        out.putAll(act);
+        String scope = subscriptionScope
+                ? (" AND " + SQL_INVOICE_IS_SUBSCRIPTION)
+                : (" AND NOT (" + SQL_INVOICE_IS_SUBSCRIPTION + ")");
+        String reconType = subscriptionScope ? "SUBSCRIPTION" : "CASH";
+        String scheduleLateral = subscriptionScope
+                ? """
+                 LEFT JOIN LATERAL (
+                    SELECT sbs.billing_schedule_id, sbs.schedule_label
+                    FROM client_subscription_billing.subscription_billing_schedule sbs
+                    WHERE sbs.invoice_id = f.invoice_id
+                    ORDER BY sbs.billing_schedule_id
+                    LIMIT 1
+                ) sch ON true
+                """
+                : "";
+        String scheduleSelect = subscriptionScope
+                ? """
+                    CAST(sch.billing_schedule_id AS text) AS "billingScheduleId",
+                    sch.schedule_label AS "scheduleLabel",
+                """
+                : """
+                    NULL::text AS "billingScheduleId",
+                    NULL::text AS "scheduleLabel",
+                """;
+        args.add(maxRows);
+        return jdbc.queryForList("""
+                WITH invoice_facts AS (
+                    SELECT
+                        i.invoice_id,
+                        i.invoice_number,
+                        MAX(i.total_amount) AS expected_amount,
+                        COALESCE(SUM(cpt.amount), 0)::numeric / 100.0 AS captured_amount
+                    FROM transactions.invoice i
+                    LEFT JOIN client_payments.client_payment_intent cpi ON cpi.invoice_id = i.invoice_id
+                    LEFT JOIN client_payments.client_payment_transaction cpt
+                        ON cpt.client_payment_intent_id = cpi.client_payment_intent_id
+                """ + where + scope + """
+                    GROUP BY i.invoice_id, i.invoice_number
+                )
+                SELECT
+                """ + scheduleSelect + """
+                    CAST(f.invoice_id AS text) AS "invoiceId",
+                    f.invoice_number AS "invoiceNumber",
+                    f.expected_amount AS "expectedAmount",
+                    f.captured_amount AS "actualAmount",
+                    (f.expected_amount - f.captured_amount) AS "varianceAmount",
+                    CASE WHEN f.expected_amount = 0 THEN 0
+                         ELSE ABS(f.expected_amount - f.captured_amount) * 100.0 / f.expected_amount END AS "variancePct",
+                    'AMOUNT_VARIANCE' AS "reasonCode",
+                    'Invoice amount vs captured payment' AS "reasonText",
+                    'UNRECONCILED' AS "reconciliationStatus",
+                    false AS "paid",
+                    '""" + reconType + "' AS \"reconciliationType\"\n" + """
+                FROM invoice_facts f
+                """ + scheduleLateral + """
+                WHERE ABS(f.expected_amount - f.captured_amount) > 0.01
+                ORDER BY ABS(f.expected_amount - f.captured_amount) DESC
+                LIMIT ?
+                """, args.toArray());
+    }
+
+    /**
+     * Mismatch rows materialized on the run (same source as {@code GET /dashboard/mismatches}).
+     */
+    private List<Map<String, Object>> listUnreconciledItemsFromRun(String recoRunId, String reconciliationType, int limit) {
+        if (recoRunId == null || recoRunId.isBlank()) {
+            return List.of();
+        }
+        int maxRows = Math.max(1, Math.min(limit, 100));
+        List<Object> args = new ArrayList<>();
+        args.add(recoRunId.trim());
+        StringBuilder extra = new StringBuilder();
+        if (reconciliationType != null && !reconciliationType.isBlank()) {
+            String u = reconciliationType.trim().toUpperCase();
+            if ("SUBSCRIPTION".equals(u)) {
+                extra.append("""
+                         AND (
+                            s.attributes_json->>'reconciliationType' IN ('SUBSCRIPTION')
+                            OR (s.attributes_json->>'reconciliationType') IS NULL
+                        )
+                        """);
+            } else if ("CASH".equals(u)) {
+                extra.append(" AND s.attributes_json->>'reconciliationType' = 'CASH' ");
+            }
+        }
+        args.add(maxRows);
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT
+                    s.snapshot_reference_code AS "snapshotId",
+                    COALESCE(s.attributes_json->>'reconciliationType', 'SUBSCRIPTION') AS "reconciliationType",
+                    CAST(s.entity_id AS text) AS "invoiceId",
+                    COALESCE(s.entity_reference_code, CAST(s.entity_id AS text)) AS "invoiceNumber",
+                    COALESCE(s.expected_amount, 0) AS "expectedAmount",
+                    COALESCE(s.actual_amount, 0) AS "actualAmount",
+                    (COALESCE(s.expected_amount, 0) - COALESCE(s.actual_amount, 0)) AS "varianceAmount",
+                    CASE WHEN COALESCE(s.expected_amount, 0) = 0 THEN 0
+                         ELSE ABS(COALESCE(s.expected_amount, 0) - COALESCE(s.actual_amount, 0))
+                              * 100.0 / COALESCE(s.expected_amount, 1) END AS "variancePct",
+                    COALESCE(lr.code, 'AMOUNT_VARIANCE') AS "reasonCode",
+                    COALESCE(s.reason_text, 'Invoice amount vs captured payment') AS "reasonText",
+                    rcs.code AS "reconciliationStatus",
+                    false AS "paid",
+                    NULL::text AS "billingScheduleId",
+                    NULL::text AS "scheduleLabel"
+                FROM reconciliation.reconciliation_run_snapshot s
+                JOIN reconciliation.reconciliation_run rr ON rr.reconciliation_run_id = s.reconciliation_run_id
+                JOIN reconciliation.lu_reconciliation_status rcs ON rcs.reconciliation_status_id = s.reconciliation_status_id
+                LEFT JOIN reconciliation.lu_reconciliation_reason lr ON lr.reconciliation_reason_id = s.reconciliation_reason_id
+                WHERE rr.run_reference_code = ?
+                  AND rcs.code <> 'RECONCILED'
+                """ + extra + """
+                ORDER BY ABS(COALESCE(s.expected_amount, 0) - COALESCE(s.actual_amount, 0)) DESC
+                LIMIT ?
+                """, args.toArray());
+        return rows;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void patchUnreconciledItemsOnDashboard(String recoRunId, Map<String, Object> parsed) {
+        Object scope = parsed.get("reconciliationScope");
+        if (!(scope instanceof Map<?, ?> scopeMap)) {
+            return;
+        }
+        int limit = 25;
+        Object meta = parsed.get("meta");
+        if (meta instanceof Map<?, ?> metaMap && metaMap.get("varianceDriverLimit") != null) {
+            limit = parsePositiveInt(metaMap.get("varianceDriverLimit"), 25);
+        }
+        List<Map<String, Object>> subItems = listUnreconciledItemsFromRun(recoRunId, "SUBSCRIPTION", limit);
+        List<Map<String, Object>> cashItems = listUnreconciledItemsFromRun(recoRunId, "CASH", limit);
+        patchScopeUnreconciledItems((Map<String, Object>) scopeMap.get("subscription"), subItems);
+        patchScopeUnreconciledItems((Map<String, Object>) scopeMap.get("cash"), cashItems);
+        refreshVarianceDriversWithItems(parsed, subItems, cashItems);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void patchScopeUnreconciledItems(Map<String, Object> scopePart, List<Map<String, Object>> items) {
+        if (scopePart == null) {
+            return;
+        }
+        scopePart.put("unreconciledItems", items);
+        Object kpis = scopePart.get("kpis");
+        if (kpis instanceof Map<?, ?> kpisMap) {
+            int total = ((Number) ((Map<String, Object>) kpisMap).getOrDefault("totalInvoices", 0)).intValue();
+            int unreconciled = ((Number) ((Map<String, Object>) kpisMap).getOrDefault("unreconciledCount", 0)).intValue();
+            scopePart.put("paidSummary", Map.of(
+                    "totalUnits", total,
+                    "reconciledUnits", Math.max(0, total - unreconciled),
+                    "unreconciledUnits", unreconciled,
+                    "paidPct", total == 0 ? 0.0 : Math.max(0, total - unreconciled) * 100.0 / total
+            ));
+        }
+        if (scopePart.get("chainStages") instanceof List<?>) {
+            scopePart.put("chainStages", attachUnreconciledItemsToStages(
+                    (List<Map<String, Object>>) scopePart.get("chainStages"), items));
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void refreshVarianceDriversWithItems(
+            Map<String, Object> parsed,
+            List<Map<String, Object>> subItems,
+            List<Map<String, Object>> cashItems
+    ) {
+        List<Map<String, Object>> all = new ArrayList<>();
+        all.addAll(subItems);
+        all.addAll(cashItems);
+        if (all.isEmpty()) {
+            return;
+        }
+        Object drivers = parsed.get("varianceDrivers");
+        if (!(drivers instanceof List<?> driverList) || driverList.isEmpty()) {
+            parsed.put("varianceDrivers", List.of(Map.of(
+                    "driver", "Amount mismatch",
+                    "count", all.size(),
+                    "amount", all.stream()
+                            .mapToDouble(r -> Math.abs(((Number) r.getOrDefault("varianceAmount", 0)).doubleValue()))
+                            .sum(),
+                    "items", all
+            )));
+            return;
+        }
+        Object first = driverList.get(0);
+        if (!(first instanceof Map<?, ?> driverMap)) {
+            return;
+        }
+        Map<String, Object> driver = new LinkedHashMap<>((Map<String, Object>) driverMap);
+        driver.put("items", all);
+        parsed.put("varianceDrivers", List.of(driver));
+    }
+
+    private List<Map<String, Object>> attachUnreconciledItemsToStages(
+            List<Map<String, Object>> stages,
+            List<Map<String, Object>> unreconciledItems
+    ) {
+        if (unreconciledItems == null || unreconciledItems.isEmpty()) {
+            return stages;
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> stage : stages) {
+            String stageKey = String.valueOf(stage.get("stageKey"));
+            if ("INVOICE".equals(stageKey)
+                    || "BILLING_SCHEDULE".equals(stageKey)
+                    || "PAYMENT_TRANSACTION".equals(stageKey)) {
+                Map<String, Object> copy = new LinkedHashMap<>(stage);
+                copy.put("unreconciledItems", unreconciledItems);
+                copy.put("unreconciledCount", unreconciledItems.size());
+                Object drill = copy.get("drillDown");
+                Map<String, Object> drillDown = drill instanceof Map<?, ?> m
+                        ? new LinkedHashMap<>((Map<String, Object>) m)
+                        : new LinkedHashMap<>();
+                drillDown.putIfAbsent("route", "DASHBOARD_MISMATCHES");
+                copy.put("drillDown", drillDown);
+                out.add(copy);
+            } else {
+                out.add(stage);
+            }
+        }
         return out;
     }
 
-    private long countSubscriptionBillingSchedulesInScope(Map<String, Object> filters) {
+    private List<Map<String, Object>> buildStatusBreakdown(int reconciledCount, int mismatchCount) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        rows.add(Map.of("status", "RECONCILED", "count", reconciledCount));
+        if (mismatchCount > 0) {
+            rows.add(Map.of("status", "UNRECONCILED", "count", mismatchCount));
+        }
+        return rows;
+    }
+
+    private static int scopeInvoiceMismatch(Map<String, Object> scopeKpis) {
+        return ((Number) scopeKpis.getOrDefault("unreconciledCount", 0)).intValue();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> scopeGlMetrics(Map<String, Object> glPack, String scopeKey) {
+        Object scoped = glPack.get(scopeKey);
+        if (scoped instanceof Map<?, ?> m) {
+            return (Map<String, Object>) m;
+        }
+        Object run = glPack.get("run");
+        if (run instanceof Map<?, ?> m) {
+            return (Map<String, Object>) m;
+        }
+        return glPack;
+    }
+
+    private Map<String, Object> computeScopeInvoicePaymentAgg(Map<String, Object> filters, boolean subscription) {
+        return computeScopeInvoicePaymentAgg(filters, Boolean.valueOf(subscription));
+    }
+
+    /**
+     * Per-invoice aggregates (avoids double-counting invoice amounts when multiple payment rows exist).
+     */
+    private Map<String, Object> computeScopeInvoicePaymentAgg(Map<String, Object> filters, Boolean subscriptionScope) {
         List<Object> args = new ArrayList<>();
         String where = buildInvoiceWhere(filters, args);
-        Long n = jdbc.queryForObject("""
-                SELECT COUNT(DISTINCT sbs.billing_schedule_id)
+        String scope = "";
+        if (subscriptionScope != null) {
+            scope = subscriptionScope
+                    ? (" AND " + SQL_INVOICE_IS_SUBSCRIPTION)
+                    : (" AND NOT (" + SQL_INVOICE_IS_SUBSCRIPTION + ")");
+        }
+        String invoiceFactsCte = """
+                WITH invoice_facts AS (
+                    SELECT
+                        i.invoice_id,
+                        MAX(i.total_amount) AS expected_amount,
+                        COALESCE(SUM(cpt.amount), 0)::numeric / 100.0 AS captured_amount
+                    FROM transactions.invoice i
+                    LEFT JOIN client_payments.client_payment_intent cpi ON cpi.invoice_id = i.invoice_id
+                    LEFT JOIN client_payments.client_payment_transaction cpt
+                        ON cpt.client_payment_intent_id = cpi.client_payment_intent_id
+                """ + where + scope + """
+                    GROUP BY i.invoice_id
+                )
+                """;
+        Map<String, Object> facts = jdbc.queryForMap(invoiceFactsCte + """
+                SELECT
+                    COUNT(*)::int AS total_invoices,
+                    COALESCE(SUM(expected_amount), 0) AS total_expected_amount,
+                    COALESCE(SUM(captured_amount), 0) AS total_actual_amount,
+                    COUNT(*) FILTER (
+                        WHERE ABS(expected_amount - captured_amount) > 0.01
+                    )::int AS mismatch_count
+                FROM invoice_facts
+                """, args.toArray());
+        Map<String, Object> paymentRows = jdbc.queryForMap("""
+                SELECT
+                    COUNT(DISTINCT cpi.client_payment_intent_id) AS intent_rows,
+                    COUNT(DISTINCT cpt.client_payment_transaction_id) AS txn_rows
                 FROM transactions.invoice i
-                JOIN client_subscription_billing.subscription_billing_schedule sbs ON sbs.invoice_id = i.invoice_id
                 LEFT JOIN client_payments.client_payment_intent cpi ON cpi.invoice_id = i.invoice_id
-                LEFT JOIN client_payments.client_payment_transaction cpt ON cpt.client_payment_intent_id = cpi.client_payment_intent_id
-                """ + where + (" AND " + SQL_INVOICE_IS_SUBSCRIPTION), Long.class, args.toArray());
-        return n == null ? 0L : n;
+                LEFT JOIN client_payments.client_payment_transaction cpt
+                    ON cpt.client_payment_intent_id = cpi.client_payment_intent_id
+                """ + where + scope, args.toArray());
+        Map<String, Object> out = new HashMap<>();
+        out.putAll(facts);
+        out.putAll(paymentRows);
+        return out;
+    }
+
+    /**
+     * Per {@code subscription_billing_schedule} totals for the billing-schedule pipeline tile.
+     */
+    private Map<String, Object> computeBillingScheduleAgg(Map<String, Object> filters) {
+        List<Object> args = new ArrayList<>();
+        String where = buildInvoiceWhere(filters, args);
+        String sql = """
+                WITH schedule_facts AS (
+                    SELECT
+                        sbs.billing_schedule_id,
+                        MAX(i.total_amount) AS expected_amount,
+                        COALESCE(SUM(cpt.amount), 0)::numeric / 100.0 AS captured_amount
+                    FROM client_subscription_billing.subscription_billing_schedule sbs
+                    JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
+                    LEFT JOIN client_payments.client_payment_intent cpi ON cpi.invoice_id = i.invoice_id
+                    LEFT JOIN client_payments.client_payment_transaction cpt
+                        ON cpt.client_payment_intent_id = cpi.client_payment_intent_id
+                """ + where + """
+                    GROUP BY sbs.billing_schedule_id
+                )
+                SELECT
+                    COUNT(*)::int AS schedule_count,
+                    COALESCE(SUM(expected_amount), 0) AS total_expected_amount,
+                    COALESCE(SUM(captured_amount), 0) AS total_actual_amount,
+                    COUNT(*) FILTER (
+                        WHERE ABS(expected_amount - captured_amount) <= 0.01
+                    )::int AS reconciled_schedule_count
+                FROM schedule_facts
+                """;
+        return jdbc.queryForMap(sql, args.toArray());
     }
 
     private Map<String, Object> buildKpiBlock(Map<String, Object> agg, String scopeHint) {
@@ -1755,21 +2101,28 @@ public class ReconciliationModuleRepository {
         return m;
     }
 
-    private List<Map<String, Object>> buildSubscriptionChainStages(Map<String, Object> agg, long billingScheduleCount) {
+    private List<Map<String, Object>> buildSubscriptionChainStages(Map<String, Object> agg, Map<String, Object> scheduleAgg) {
         int total = ((Number) agg.getOrDefault("total_invoices", 0)).intValue();
         int mismatch = ((Number) agg.getOrDefault("mismatch_count", 0)).intValue();
         double expected = ((Number) agg.getOrDefault("total_expected_amount", 0)).doubleValue();
         double actual = ((Number) agg.getOrDefault("total_actual_amount", 0)).doubleValue();
         int intents = ((Number) agg.getOrDefault("intent_rows", 0)).intValue();
         int txns = ((Number) agg.getOrDefault("txn_rows", 0)).intValue();
-        double paidPct = total == 0 ? 0.0 : (total - mismatch) * 100.0 / total;
+        double paidPct = reconciliationPaidPct(total, mismatch);
+        int scheduleCount = toInt(scheduleAgg.get("schedule_count"));
+        int reconciledSchedules = toInt(scheduleAgg.get("reconciled_schedule_count"));
+        int scheduleMismatch = Math.max(0, scheduleCount - reconciledSchedules);
+        double scheduleExpected = ((Number) scheduleAgg.getOrDefault("total_expected_amount", 0)).doubleValue();
+        double scheduleActual = ((Number) scheduleAgg.getOrDefault("total_actual_amount", 0)).doubleValue();
+        double schedulePaidPct = reconciliationPaidPct(scheduleCount, scheduleMismatch);
         List<Map<String, Object>> stages = new ArrayList<>();
-        stages.add(chainStage("BILLING_SCHEDULE", 1, "Billing Schedule", billingScheduleCount, 0, 0, 0, 100.0));
+        stages.add(chainStage("BILLING_SCHEDULE", 1, "Billing Schedule", scheduleCount, scheduleMismatch,
+                scheduleExpected, scheduleActual, schedulePaidPct));
         stages.add(chainStage("INVOICE", 2, "Invoice", total, mismatch, expected, actual, paidPct));
-        stages.add(chainStage("PAYMENT_INTENT", 3, "Payment Intent", intents, 0, expected, actual, paidPct));
+        stages.add(chainStage("PAYMENT_INTENT", 3, "Payment Intent", intents, mismatch, expected, actual, paidPct));
         stages.add(chainStage("PAYMENT_TRANSACTION", 4, "Payment Transaction", txns, mismatch, expected, actual, paidPct));
-        stages.add(chainStage("GATEWAY", 5, "Gateway", txns, 0, expected, actual, paidPct));
-        stages.add(chainStage("SETTLEMENT_BANK", 6, "Settlement (Bank)", txns, 0, expected, actual, paidPct));
+        stages.add(chainStage("GATEWAY", 5, "Gateway", txns, mismatch, expected, actual, paidPct));
+        stages.add(chainStage("SETTLEMENT_BANK", 6, "Settlement (Bank)", txns, mismatch, expected, actual, paidPct));
         stages.add(chainStage("REFUND", 7, "Refunds", 0, 0, 0, 0, 100.0));
         stages.add(chainStage("GL_POSTING", 8, "GL Posting", total, 0, expected, actual, paidPct));
         return stages;
@@ -1782,10 +2135,10 @@ public class ReconciliationModuleRepository {
         double actual = ((Number) agg.getOrDefault("total_actual_amount", 0)).doubleValue();
         int intents = ((Number) agg.getOrDefault("intent_rows", 0)).intValue();
         int txns = ((Number) agg.getOrDefault("txn_rows", 0)).intValue();
-        double paidPct = total == 0 ? 0.0 : (total - mismatch) * 100.0 / total;
+        double paidPct = reconciliationPaidPct(total, mismatch);
         List<Map<String, Object>> stages = new ArrayList<>();
         stages.add(chainStage("INVOICE", 1, "Invoice", total, mismatch, expected, actual, paidPct));
-        stages.add(chainStage("PAYMENT_INTENT", 2, "Payment Intent", intents, 0, expected, actual, paidPct));
+        stages.add(chainStage("PAYMENT_INTENT", 2, "Payment Intent", intents, mismatch, expected, actual, paidPct));
         stages.add(chainStage("PAYMENT_TRANSACTION", 3, "Payment Transaction", txns, mismatch, expected, actual, paidPct));
         stages.add(chainStage("REFUND", 4, "Refund", 0, 0, 0, 0, 100.0));
         stages.add(chainStage("GL_POSTING", 5, "GL Posting", total, 0, expected, actual, paidPct));
@@ -1823,10 +2176,96 @@ public class ReconciliationModuleRepository {
         List<Map<String, Object>> metrics = new ArrayList<>();
         metrics.add(metricRow("Volume", countMetric, countMetric, emphasis));
         metrics.add(metricRow("Expected", expected, expected, "NEUTRAL"));
+        String amountEmphasis = Math.abs(expected - actual) > 0.01 ? "WARNING" : "NEUTRAL";
+        metrics.add(metricRow("Actual", actual, actual, amountEmphasis));
         metrics.add(metricRow("Paid %", paidPct, paidPct, emphasis));
+        tile.put("expectedAmount", expected);
+        tile.put("actualAmount", actual);
+        tile.put("varianceAmount", expected - actual);
         tile.put("metrics", metrics);
         tile.put("drillDown", Map.of("route", "WORKSPACE_LIST", "filters", Map.of("stage", stageKey)));
         return tile;
+    }
+
+    /**
+     * Share of units (invoices, schedules, payment txns) whose expected amount matches captured payment within {@code 0.01}.
+     */
+    private static double reconciliationPaidPct(int unitCount, int mismatchCount) {
+        if (unitCount <= 0) {
+            return 0.0;
+        }
+        return Math.max(0.0, (unitCount - mismatchCount) * 100.0 / unitCount);
+    }
+
+    private static List<Map<String, Object>> settlementBankMatchesFromIntents(List<Map<String, Object>> intentPayloads) {
+        List<Map<String, Object>> matches = new ArrayList<>();
+        for (Map<String, Object> intentPayload : intentPayloads) {
+            Object txns = intentPayload.get("paymentTransactions");
+            if (!(txns instanceof List<?> txnList)) {
+                continue;
+            }
+            for (Object txnObj : txnList) {
+                if (!(txnObj instanceof Map<?, ?> txnMap)) {
+                    continue;
+                }
+                Object bankMatches = txnMap.get("settlementBankMatches");
+                if (!(bankMatches instanceof List<?> bankList)) {
+                    continue;
+                }
+                for (Object row : bankList) {
+                    if (row instanceof Map<?, ?> m) {
+                        matches.add((Map<String, Object>) m);
+                    }
+                }
+            }
+        }
+        return matches;
+    }
+
+    private Map<String, Object> buildInvoiceAmountReconciliation(
+            Map<String, Object> invoice,
+            List<Map<String, Object>> intentPayloads
+    ) {
+        double expected = invoice.get("totalAmount") == null
+                ? 0.0
+                : ((Number) invoice.get("totalAmount")).doubleValue();
+        double captured = 0.0;
+        for (Map<String, Object> intentPayload : intentPayloads) {
+            Object txns = intentPayload.get("paymentTransactions");
+            if (!(txns instanceof List<?> txnList)) {
+                continue;
+            }
+            for (Object txnObj : txnList) {
+                if (!(txnObj instanceof Map<?, ?> txnMap)) {
+                    continue;
+                }
+                Object amt = txnMap.get("amount");
+                if (amt instanceof Number n) {
+                    captured += n.doubleValue() / 100.0;
+                }
+            }
+        }
+        double variance = expected - captured;
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("expectedAmount", expected);
+        out.put("actualAmount", captured);
+        out.put("varianceAmount", variance);
+        out.put("reconciled", Math.abs(variance) <= 0.01);
+        return out;
+    }
+
+    private static int toInt(Object value) {
+        if (value == null) {
+            return 0;
+        }
+        if (value instanceof Number n) {
+            return n.intValue();
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value).trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     private Map<String, Object> metricRow(String label, double displayValue, double valueRaw, String emphasis) {
@@ -1959,10 +2398,46 @@ public class ReconciliationModuleRepository {
             });
             parsed.putIfAbsent("hint", "OK");
             enrichDashboardLayoutV2FromRunIfMissing(recoRunId, parsed);
-            patchGlPostingChainStagesInSummary(parsed, computeGlPostingMetricsForRun(recoRunId));
+            patchSubscriptionPipelineStagesFromRun(recoRunId, parsed);
+            patchUnreconciledItemsOnDashboard(recoRunId, parsed);
+            patchGlPostingChainStagesInSummary(parsed, computeGlPostingMetricsPackForRun(recoRunId));
             return parsed;
         } catch (JsonProcessingException e) {
             return emptyFinancialHealthSummary("RUN_SUMMARY_INVALID");
+        }
+    }
+
+    /**
+     * Refreshes subscription pipeline tiles (billing schedule + payment stages) from run filters so
+     * persisted snapshots are not stuck with legacy placeholders (e.g. billing schedule expected = 0).
+     */
+    @SuppressWarnings("unchecked")
+    private void patchSubscriptionPipelineStagesFromRun(String recoRunId, Map<String, Object> parsed) {
+        Object scope = parsed.get("reconciliationScope");
+        if (!(scope instanceof Map<?, ?> scopeMap)) {
+            return;
+        }
+        Object sub = scopeMap.get("subscription");
+        if (!(sub instanceof Map<?, ?> subMap)) {
+            return;
+        }
+        try {
+            String fj = jdbc.queryForObject("""
+                    SELECT filters_json::text FROM reconciliation.reconciliation_run WHERE run_reference_code = ?
+                    """, String.class, recoRunId);
+            Map<String, Object> filterMap = parseRunFiltersJson(fj);
+            Map<String, Object> subAgg = computeScopeInvoicePaymentAgg(filterMap, true);
+            Map<String, Object> scheduleAgg = computeBillingScheduleAgg(filterMap);
+            List<Map<String, Object>> rebuilt = buildSubscriptionChainStages(subAgg, scheduleAgg);
+            Map<String, Object> glPack = computeGlPostingMetricsPackForRun(recoRunId);
+            Map<String, Object> subScope = (Map<String, Object>) subMap;
+            subScope.put("chainStages", withGlPostingStage(
+                    rebuilt,
+                    8,
+                    enrichScopeGlWithInvoiceMismatch(scopeGlMetrics(glPack, "subscription"), subScope),
+                    scopeInvoiceMismatch(kpisFromScope(subScope))));
+        } catch (Exception ignored) {
+            // keep snapshot stages
         }
     }
 
@@ -1983,7 +2458,7 @@ public class ReconciliationModuleRepository {
             parsed.put("reconciliationScope", live.get("reconciliationScope"));
             parsed.put("varianceByReconciliationType", live.get("varianceByReconciliationType"));
             parsed.put("meta", live.get("meta"));
-            patchGlPostingChainStagesInSummary(parsed, computeGlPostingMetricsForFilters(filterMap));
+            patchGlPostingChainStagesInSummary(parsed, computeGlPostingMetricsPackForFilters(filterMap));
         } catch (Exception ignored) {
             // leave legacy payload if recompute fails
         }
@@ -2046,7 +2521,8 @@ public class ReconciliationModuleRepository {
                 (UUID) r.get("reconciliation_run_id"),
                 (UUID) r.get("financial_period_id"),
                 (UUID) r.get("level_id"),
-                r.get("period_code") == null ? null : String.valueOf(r.get("period_code")));
+                r.get("period_code") == null ? null : String.valueOf(r.get("period_code")),
+                null);
     }
 
     private Map<String, Object> computeGlPostingMetricsForFilters(Map<String, Object> filters) {
@@ -2056,7 +2532,8 @@ public class ReconciliationModuleRepository {
                 null,
                 financialPeriodId,
                 resolveLevelIdFromFilters(filters),
-                periodCode);
+                periodCode,
+                null);
     }
 
     private Map<String, Object> emptyGlPostingMetrics() {
@@ -2066,18 +2543,135 @@ public class ReconciliationModuleRepository {
         m.put("missingMappingLines", 0);
         m.put("unbalancedPairCount", 0);
         m.put("linkedToRunCount", 0L);
+        m.put("paymentTxnCount", 0L);
+        m.put("missingGlPairs", 0);
+        m.put("glCoveragePct", 0.0);
         return m;
+    }
+
+    public Map<String, Object> computeGlPostingMetricsPackForRun(String runReferenceCode) {
+        if (runReferenceCode == null || runReferenceCode.isBlank()) {
+            return emptyGlPostingPack();
+        }
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT
+                    rr.reconciliation_run_id,
+                    rr.financial_period_id,
+                    rr.level_id,
+                    COALESCE(fp.period_code, rr.filters_json->>'financialPeriod') AS period_code,
+                    rr.filters_json::text AS filters_json_text
+                FROM reconciliation.reconciliation_run rr
+                LEFT JOIN reconciliation.financial_period fp ON fp.financial_period_id = rr.financial_period_id
+                WHERE rr.run_reference_code = ?
+                """, runReferenceCode.trim());
+        if (rows.isEmpty()) {
+            return emptyGlPostingPack();
+        }
+        Map<String, Object> row = rows.get(0);
+        Map<String, Object> filterMap = parseRunFiltersJson(row.get("filters_json_text"));
+        return buildGlPostingMetricsPack(
+                (UUID) row.get("reconciliation_run_id"),
+                (UUID) row.get("financial_period_id"),
+                (UUID) row.get("level_id"),
+                row.get("period_code") == null ? null : String.valueOf(row.get("period_code")),
+                filterMap);
+    }
+
+    private Map<String, Object> computeGlPostingMetricsPackForFilters(Map<String, Object> filters) {
+        String periodCode = asString(filters.get("financialPeriod"));
+        UUID financialPeriodId = resolveOrEnsureFinancialPeriodId(periodCode);
+        return buildGlPostingMetricsPack(
+                null,
+                financialPeriodId,
+                resolveLevelIdFromFilters(filters),
+                periodCode,
+                filters);
+    }
+
+    private Map<String, Object> emptyGlPostingPack() {
+        Map<String, Object> empty = emptyGlPostingMetrics();
+        Map<String, Object> pack = new LinkedHashMap<>();
+        pack.put("run", new LinkedHashMap<>(empty));
+        pack.put("subscription", new LinkedHashMap<>(empty));
+        pack.put("cash", new LinkedHashMap<>(empty));
+        return pack;
+    }
+
+    private Map<String, Object> buildGlPostingMetricsPack(
+            UUID reconciliationRunId,
+            UUID financialPeriodId,
+            UUID levelId,
+            String periodCode,
+            Map<String, Object> filters
+    ) {
+        Map<String, Object> runMetrics = enrichGlPostingMetrics(
+                computeGlPostingMetrics(reconciliationRunId, financialPeriodId, levelId, periodCode, null),
+                countPaymentTransactionsInScope(filters, null),
+                0);
+        Map<String, Object> subMetrics = enrichGlPostingMetrics(
+                computeGlPostingMetrics(reconciliationRunId, financialPeriodId, levelId, periodCode, true),
+                countPaymentTransactionsInScope(filters, true),
+                0);
+        Map<String, Object> cashMetrics = enrichGlPostingMetrics(
+                computeGlPostingMetrics(reconciliationRunId, financialPeriodId, levelId, periodCode, false),
+                countPaymentTransactionsInScope(filters, false),
+                0);
+        Map<String, Object> pack = new LinkedHashMap<>();
+        pack.put("run", runMetrics);
+        pack.put("subscription", subMetrics);
+        pack.put("cash", cashMetrics);
+        return pack;
+    }
+
+    private Map<String, Object> enrichGlPostingMetrics(
+            Map<String, Object> base,
+            long paymentTxnCount,
+            int invoiceAmountMismatchCount
+    ) {
+        Map<String, Object> out = new LinkedHashMap<>(base);
+        long pairs = ((Number) out.getOrDefault("glPairCount", 0L)).longValue();
+        long missingGlPairs = Math.max(0L, paymentTxnCount - pairs);
+        out.put("paymentTxnCount", paymentTxnCount);
+        out.put("missingGlPairs", missingGlPairs);
+        out.put("glCoveragePct", paymentTxnCount == 0
+                ? (pairs > 0 ? 100.0 : 0.0)
+                : Math.min(100.0, pairs * 100.0 / paymentTxnCount));
+        out.put("invoiceAmountMismatchCount", invoiceAmountMismatchCount);
+        return out;
+    }
+
+    private long countPaymentTransactionsInScope(Map<String, Object> filters, Boolean subscriptionScope) {
+        List<Object> args = new ArrayList<>();
+        String where = buildInvoiceWhere(filters, args);
+        String scope = "";
+        if (subscriptionScope != null) {
+            scope = subscriptionScope
+                    ? (" AND " + SQL_INVOICE_IS_SUBSCRIPTION)
+                    : (" AND NOT (" + SQL_INVOICE_IS_SUBSCRIPTION + ")");
+        }
+        Long n = jdbc.queryForObject("""
+                SELECT COUNT(DISTINCT cpt.client_payment_transaction_id)
+                FROM transactions.invoice i
+                JOIN client_payments.client_payment_intent cpi ON cpi.invoice_id = i.invoice_id
+                JOIN client_payments.client_payment_transaction cpt
+                    ON cpt.client_payment_intent_id = cpi.client_payment_intent_id
+                """ + where + scope, Long.class, args.toArray());
+        return n == null ? 0L : n;
     }
 
     private Map<String, Object> computeGlPostingMetrics(
             UUID reconciliationRunId,
             UUID financialPeriodId,
             UUID levelId,
-            String periodCode
+            String periodCode,
+            Boolean subscriptionScope
     ) {
         List<Object> args = new ArrayList<>();
         StringBuilder where = new StringBuilder(" WHERE 1=1 ");
         appendGlEntryScopeWhere(where, args, reconciliationRunId, financialPeriodId, levelId, periodCode);
+        if (subscriptionScope != null) {
+            appendGlEntryInvoiceClassificationWhere(where, subscriptionScope);
+        }
 
         Map<String, Object> counts = jdbc.queryForMap("""
                 SELECT
@@ -2106,6 +2700,29 @@ public class ReconciliationModuleRepository {
         out.put("unbalancedPairCount", unbalanced == null ? 0 : unbalanced);
         out.put("linkedToRunCount", counts.getOrDefault("linked_to_run_count", 0L));
         return out;
+    }
+
+    /**
+     * Restrict {@code gl_entry} rows to those tied to invoices in the subscription or cash scope.
+     */
+    private void appendGlEntryInvoiceClassificationWhere(StringBuilder sql, boolean subscription) {
+        String subExists = """
+                 AND EXISTS (
+                    SELECT 1
+                    FROM client_payments.client_payment_transaction cpt
+                    JOIN client_payments.client_payment_intent cpi
+                        ON cpi.client_payment_intent_id = cpt.client_payment_intent_id
+                    JOIN transactions.invoice i ON i.invoice_id = cpi.invoice_id
+                    WHERE (
+                        ge.entity_id = i.invoice_id
+                        OR ge.entity_reference_code = i.invoice_number
+                        OR ge.entity_reference_code = cpt.client_payment_transaction_id::text
+                        OR ge.entity_reference_code LIKE 'PAY-CPT-' || cpt.client_payment_transaction_id::text || '-%%'
+                    )
+                    AND %s
+                 )
+                """.formatted(subscription ? SQL_INVOICE_IS_SUBSCRIPTION : ("NOT (" + SQL_INVOICE_IS_SUBSCRIPTION + ")"));
+        sql.append(subExists);
     }
 
     private void appendGlEntryScopeWhere(
@@ -2178,7 +2795,7 @@ public class ReconciliationModuleRepository {
     }
 
     @SuppressWarnings("unchecked")
-    private void patchGlPostingChainStagesInSummary(Map<String, Object> parsed, Map<String, Object> glMetrics) {
+    private void patchGlPostingChainStagesInSummary(Map<String, Object> parsed, Map<String, Object> glPack) {
         Object scope = parsed.get("reconciliationScope");
         if (!(scope instanceof Map<?, ?> scopeMap)) {
             return;
@@ -2186,17 +2803,48 @@ public class ReconciliationModuleRepository {
         Object sub = scopeMap.get("subscription");
         if (sub instanceof Map<?, ?> subMap) {
             Map<String, Object> subScope = (Map<String, Object>) subMap;
-            subScope.put("chainStages", withGlPostingStage(chainStagesFromScope(subScope), 8, glMetrics));
+            Map<String, Object> subGl = enrichScopeGlWithInvoiceMismatch(
+                    scopeGlMetrics(glPack, "subscription"), subScope);
+            subScope.put("chainStages", withGlPostingStage(
+                    chainStagesFromScope(subScope), 8, subGl, scopeInvoiceMismatch(kpisFromScope(subScope))));
         }
         Object cash = scopeMap.get("cash");
         if (cash instanceof Map<?, ?> cashMap) {
             Map<String, Object> cashScope = (Map<String, Object>) cashMap;
-            cashScope.put("chainStages", withGlPostingStage(chainStagesFromScope(cashScope), 5, glMetrics));
+            Map<String, Object> cashGl = enrichScopeGlWithInvoiceMismatch(
+                    scopeGlMetrics(glPack, "cash"), cashScope);
+            cashScope.put("chainStages", withGlPostingStage(
+                    chainStagesFromScope(cashScope), 5, cashGl, scopeInvoiceMismatch(kpisFromScope(cashScope))));
         }
         Object meta = parsed.get("meta");
         if (meta instanceof Map<?, ?> metaMap) {
-            ((Map<String, Object>) metaMap).put("glPosting", glMetrics);
+            ((Map<String, Object>) metaMap).put("glPosting", glPack);
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> kpisFromScope(Map<String, Object> scopePart) {
+        Object kpis = scopePart.get("kpis");
+        if (kpis instanceof Map<?, ?> m) {
+            return (Map<String, Object>) m;
+        }
+        return Map.of();
+    }
+
+    private Map<String, Object> enrichScopeGlWithInvoiceMismatch(
+            Map<String, Object> glMetrics,
+            Map<String, Object> scopePart
+    ) {
+        int invoiceMismatch = scopeInvoiceMismatch(kpisFromScope(scopePart));
+        Map<String, Object> out = new LinkedHashMap<>(glMetrics);
+        out.put("invoiceAmountMismatchCount", invoiceMismatch);
+        long paymentTxnCount = ((Number) out.getOrDefault("paymentTxnCount", 0L)).longValue();
+        long pairs = ((Number) out.getOrDefault("glPairCount", 0L)).longValue();
+        out.put("missingGlPairs", Math.max(0L, paymentTxnCount - pairs));
+        out.put("glCoveragePct", paymentTxnCount == 0
+                ? (pairs > 0 ? 100.0 : 0.0)
+                : Math.min(100.0, pairs * 100.0 / paymentTxnCount));
+        return out;
     }
 
     @SuppressWarnings("unchecked")
@@ -2217,34 +2865,70 @@ public class ReconciliationModuleRepository {
     private List<Map<String, Object>> withGlPostingStage(
             List<Map<String, Object>> stages,
             int order,
-            Map<String, Object> glMetrics
+            Map<String, Object> glMetrics,
+            int invoiceAmountMismatchCount
     ) {
         List<Map<String, Object>> out = new ArrayList<>();
         boolean replaced = false;
         for (Map<String, Object> stage : stages) {
             if ("GL_POSTING".equals(stage.get("stageKey"))) {
-                out.add(buildGlPostingChainStage(order, "GL Posting", glMetrics));
+                out.add(buildGlPostingChainStage(order, "GL Posting", glMetrics, invoiceAmountMismatchCount));
                 replaced = true;
             } else {
                 out.add(stage);
             }
         }
         if (!replaced) {
-            out.add(buildGlPostingChainStage(order, "GL Posting", glMetrics));
+            out.add(buildGlPostingChainStage(order, "GL Posting", glMetrics, invoiceAmountMismatchCount));
         }
         return out;
     }
 
-    private Map<String, Object> buildGlPostingChainStage(int order, String title, Map<String, Object> glMetrics) {
-        long lines = ((Number) glMetrics.getOrDefault("glLineCount", 0L)).longValue();
+    private Map<String, Object> buildGlPostingChainStage(
+            int order,
+            String title,
+            Map<String, Object> glMetrics,
+            int invoiceAmountMismatchCount
+    ) {
         long pairs = ((Number) glMetrics.getOrDefault("glPairCount", 0L)).longValue();
-        int missing = ((Number) glMetrics.getOrDefault("missingMappingLines", 0)).intValue();
+        long paymentTxnCount = ((Number) glMetrics.getOrDefault("paymentTxnCount", 0L)).longValue();
+        int missingMapping = ((Number) glMetrics.getOrDefault("missingMappingLines", 0)).intValue();
         int unbalanced = ((Number) glMetrics.getOrDefault("unbalancedPairCount", 0)).intValue();
-        int mismatch = missing + unbalanced;
-        long volume = pairs > 0 ? pairs : (lines > 0 ? Math.max(1L, lines / 2) : 0L);
-        double paidPct = volume == 0 ? 0.0 : Math.max(0.0, (volume - mismatch) * 100.0 / volume);
-        Map<String, Object> stage = chainStage("GL_POSTING", order, title, volume, mismatch, 0, 0, paidPct);
-        stage.put("glPosting", glMetrics);
+        int missingGlPairs = ((Number) glMetrics.getOrDefault("missingGlPairs", 0)).intValue();
+        double coveragePct = ((Number) glMetrics.getOrDefault("glCoveragePct", 0.0)).doubleValue();
+
+        int mismatch = missingMapping + unbalanced + missingGlPairs
+                + (invoiceAmountMismatchCount > 0 ? invoiceAmountMismatchCount : 0);
+        long volume = paymentTxnCount > 0 ? paymentTxnCount : (pairs > 0 ? pairs : 0L);
+
+        String status;
+        if (mismatch == 0 && volume > 0 && coveragePct >= 99.99) {
+            status = "MATCHED";
+        } else if (volume == 0 && pairs == 0) {
+            status = "MATCHED";
+        } else if (mismatch >= volume && volume > 0) {
+            status = "MISMATCH";
+        } else {
+            status = "PARTIAL";
+        }
+
+        Map<String, Object> stage = new LinkedHashMap<>();
+        stage.put("stageKey", "GL_POSTING");
+        stage.put("order", order);
+        stage.put("title", title);
+        stage.put("status", status);
+        stage.put("statusDisplay", humanizeStatus(status));
+        stage.put("mismatch", mismatch);
+        stage.put("mismatchPct", volume == 0 ? 0.0 : mismatch * 100.0 / volume);
+        String emphasis = mismatch > 0 ? "DANGER" : "NEUTRAL";
+        List<Map<String, Object>> metrics = new ArrayList<>();
+        metrics.add(metricRow("GL pairs", pairs, pairs, emphasis));
+        metrics.add(metricRow("Payments", paymentTxnCount, paymentTxnCount, emphasis));
+        metrics.add(metricRow("Coverage %", coveragePct, coveragePct, emphasis));
+        stage.put("metrics", metrics);
+        Map<String, Object> glSnapshot = new LinkedHashMap<>(glMetrics);
+        glSnapshot.put("invoiceAmountMismatchCount", invoiceAmountMismatchCount);
+        stage.put("glPosting", glSnapshot);
         stage.put("drillDown", Map.of(
                 "route", "ACCOUNTING_JOURNAL",
                 "filters", Map.of("stage", "GL_POSTING")
@@ -4332,7 +5016,7 @@ public class ReconciliationModuleRepository {
                 "totalCount", cashTotal,
                 "items", enrichCashChains(recoRunId, runUuid, runFinancialPeriodId, runLevelId, runPeriodCode, cashInvoices)
         ));
-        out.put("glPosting", computeGlPostingMetrics(runUuid, runFinancialPeriodId, runLevelId, runPeriodCode));
+        out.put("glPosting", computeGlPostingMetricsPackForRun(recoRunId));
         return out;
     }
 
@@ -4580,7 +5264,9 @@ public class ReconciliationModuleRepository {
             chain.put("paymentIntents", intentPayloads);
             chain.put("subscriptionBillingHistory", invKey == null ? List.of() : historyByInvoice.getOrDefault(invKey, List.of()));
             chain.put("refunds", invKey == null ? List.of() : refundsByInvoice.getOrDefault(invKey, List.of()));
-            chain.put("glPosting", Map.of("entries", invKey == null ? List.of() : glByInvoice.getOrDefault(invKey, List.of())));
+            List<Map<String, Object>> glEntries = invKey == null ? List.of() : glByInvoice.getOrDefault(invKey, List.of());
+            chain.put("glPosting", Map.of("entries", glEntries));
+            chain.put("amountReconciliation", buildInvoiceAmountReconciliation(invoiceDetail, intentPayloads));
             chain.put("runSnapshots", invKey == null ? List.of() : snapshotsByInvoice.getOrDefault(invKey, List.of()));
             chain.put("stages", buildStageSummaries(subscription, root, invoiceDetail, intentPayloads,
                     invKey == null ? List.of() : refundsByInvoice.getOrDefault(invKey, List.of()),
@@ -4614,10 +5300,7 @@ public class ReconciliationModuleRepository {
                         .map(o -> ((Map<?, ?>) o).get("gateway"))
                         .toList()));
         stages.add(Map.of("stageKey", "SETTLEMENT_BANK", "title", "Settlement (Bank)",
-                "detail", intentPayloads.stream()
-                        .flatMap(m -> ((List<?>) m.getOrDefault("paymentTransactions", List.of())).stream())
-                        .map(o -> ((Map<?, ?>) o).get("settlementBankMatches"))
-                        .toList()));
+                "detail", settlementBankMatchesFromIntents(intentPayloads)));
         stages.add(Map.of("stageKey", "REFUND", "title", "Refunds", "detail", refunds));
         stages.add(Map.of("stageKey", "GL_POSTING", "title", "GL Posting", "detail", glEntries));
         return stages;
