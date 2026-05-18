@@ -22,6 +22,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Repository
 public class ReconciliationModuleRepository {
@@ -205,9 +206,30 @@ public class ReconciliationModuleRepository {
         Map<String, Object> root = subscription
                 ? loadSubscriptionScheduleRootForInvoice(invoiceId)
                 : loadCashInvoiceRootForInvoice(invoiceId);
+        UUID runFinancialPeriodId = null;
+        UUID runLevelId = null;
+        String runPeriodCode = null;
+        if (recoRunId != null && !recoRunId.isBlank()) {
+            List<Map<String, Object>> scopeRows = jdbc.queryForList("""
+                    SELECT rr.financial_period_id, rr.level_id,
+                           COALESCE(fp.period_code, rr.filters_json->>'financialPeriod') AS period_code
+                    FROM reconciliation.reconciliation_run rr
+                    LEFT JOIN reconciliation.financial_period fp ON fp.financial_period_id = rr.financial_period_id
+                    WHERE rr.run_reference_code = ?
+                    """, recoRunId.trim());
+            if (!scopeRows.isEmpty()) {
+                runFinancialPeriodId = (UUID) scopeRows.get(0).get("financial_period_id");
+                runLevelId = (UUID) scopeRows.get(0).get("level_id");
+                Object pc = scopeRows.get(0).get("period_code");
+                runPeriodCode = pc == null ? null : String.valueOf(pc);
+            }
+        }
         List<Map<String, Object>> chains = assembleChains(
                 recoRunId == null ? "" : recoRunId,
                 runUuid,
+                runFinancialPeriodId,
+                runLevelId,
+                runPeriodCode,
                 List.of(root),
                 List.of(invoiceId),
                 subscription);
@@ -1010,6 +1032,7 @@ public class ReconciliationModuleRepository {
         filterMap.remove("recoRunId");
         enrichRunCatalogFields(filterMap);
         UUID financialPeriodId = resolveOrEnsureFinancialPeriodId(asString(filterMap.get("financialPeriod")));
+        UUID levelId = resolveLevelIdFromFilters(filterMap);
         UUID locationId = firstLocationIdFromFilters(filterMap);
         UUID tenantUuid = parseOptionalUuid(tenantId);
         UUID requestedByUuid = parseOptionalUuid(requestedBy);
@@ -1030,11 +1053,11 @@ public class ReconciliationModuleRepository {
                     ?,
                     ?,
                     ?,
-                    NULL,
+                    ?,
                     ?::jsonb,
                     now(), now(), now()
                 )
-                """, refCode, runType, triggerMode == null ? "MANUAL" : triggerMode.toUpperCase(), tenantUuid, requestedByUuid, financialPeriodId, toJson(filterMap));
+                """, refCode, runType, triggerMode == null ? "MANUAL" : triggerMode.toUpperCase(), tenantUuid, requestedByUuid, financialPeriodId, levelId, toJson(filterMap));
         UUID runUuid = getRunInternalIdByReferenceCode(refCode);
         try {
             Map<String, Object> summary = computeDashboardSummaryLive(filterMap);
@@ -1059,6 +1082,8 @@ public class ReconciliationModuleRepository {
             if (!deferExceptionLifecycle) {
                 out.putAll(syncExceptionsWithMismatchSnapshots(runUuid, refCode, tenantUuid, null, null));
             }
+            int glLinked = linkGlEntriesToRun(refCode);
+            out.put("glEntriesLinked", glLinked);
             return out;
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("Failed to persist run summary", e);
@@ -1629,8 +1654,11 @@ public class ReconciliationModuleRepository {
 
         Map<String, Object> subKpis = buildKpiBlock(subAgg, "SUBSCRIPTION");
         Map<String, Object> cashKpis = buildKpiBlock(cashAgg, "CASH");
-        List<Map<String, Object>> subStages = buildSubscriptionChainStages(subAgg, scheduleCount);
-        List<Map<String, Object>> cashStages = buildCashChainStages(cashAgg);
+        Map<String, Object> glMetrics = computeGlPostingMetricsForFilters(filters);
+        List<Map<String, Object>> subStages = withGlPostingStage(
+                buildSubscriptionChainStages(subAgg, scheduleCount), 8, glMetrics);
+        List<Map<String, Object>> cashStages = withGlPostingStage(
+                buildCashChainStages(cashAgg), 5, glMetrics);
 
         int driverLimit = parsePositiveInt(filters.get("varianceDriverLimit"), 5);
         boolean includeChart = parseBooleanDefault(filters.get("includeVarianceChart"), true);
@@ -1649,14 +1677,15 @@ public class ReconciliationModuleRepository {
                 "cash", Map.of("kpis", cashKpis, "chainStages", cashStages)
         ));
         summary.put("varianceByReconciliationType", varianceByType);
-        summary.put("meta", Map.of(
-                "dashboardLayoutVersion", 2,
-                "dashboardLayoutSpecVersion", "1.0",
-                "varianceDriverLimit", driverLimit,
-                "includeVarianceChart", includeChart,
-                "subscriptionCashClassification", "SUBSCRIPTION = invoice_id in client_subscription_billing.subscription_billing_schedule; else CASH",
-                "invoiceStatusScope", List.of("ISSUED", "PARTIALLY_PAID", "PAID", "DUE")
-        ));
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("dashboardLayoutVersion", 2);
+        meta.put("dashboardLayoutSpecVersion", "1.0");
+        meta.put("varianceDriverLimit", driverLimit);
+        meta.put("includeVarianceChart", includeChart);
+        meta.put("subscriptionCashClassification", "SUBSCRIPTION = invoice_id in client_subscription_billing.subscription_billing_schedule; else CASH");
+        meta.put("invoiceStatusScope", List.of("ISSUED", "PARTIALLY_PAID", "PAID", "DUE"));
+        meta.put("glPosting", glMetrics);
+        summary.put("meta", meta);
         return summary;
     }
 
@@ -1930,6 +1959,7 @@ public class ReconciliationModuleRepository {
             });
             parsed.putIfAbsent("hint", "OK");
             enrichDashboardLayoutV2FromRunIfMissing(recoRunId, parsed);
+            patchGlPostingChainStagesInSummary(parsed, computeGlPostingMetricsForRun(recoRunId));
             return parsed;
         } catch (JsonProcessingException e) {
             return emptyFinancialHealthSummary("RUN_SUMMARY_INVALID");
@@ -1953,9 +1983,273 @@ public class ReconciliationModuleRepository {
             parsed.put("reconciliationScope", live.get("reconciliationScope"));
             parsed.put("varianceByReconciliationType", live.get("varianceByReconciliationType"));
             parsed.put("meta", live.get("meta"));
+            patchGlPostingChainStagesInSummary(parsed, computeGlPostingMetricsForFilters(filterMap));
         } catch (Exception ignored) {
             // leave legacy payload if recompute fails
         }
+    }
+
+    /**
+     * After a run completes, attach payment-posted {@code gl_entry} rows that share the run's financial period
+     * and level but were inserted with {@code reconciliation_run_id} null by an external posting process.
+     */
+    public int linkGlEntriesToRun(String runReferenceCode) {
+        if (runReferenceCode == null || runReferenceCode.isBlank()) {
+            return 0;
+        }
+        return jdbc.update("""
+                UPDATE reconciliation.gl_entry ge
+                SET reconciliation_run_id = rr.reconciliation_run_id,
+                    modified_on = now()
+                FROM reconciliation.reconciliation_run rr
+                WHERE rr.run_reference_code = ?
+                  AND ge.reconciliation_run_id IS NULL
+                  AND ge.financial_period_id IS NOT DISTINCT FROM rr.financial_period_id
+                  AND (
+                        ge.level_id IS NULL
+                        OR rr.level_id IS NULL
+                        OR ge.level_id IS NOT DISTINCT FROM rr.level_id
+                  )
+                """, runReferenceCode.trim());
+    }
+
+    private UUID resolveLevelIdFromFilters(Map<String, Object> filterMap) {
+        if (filterMap == null) {
+            return null;
+        }
+        UUID id = parseOptionalUuid(asString(filterMap.get("locationLevelId")));
+        if (id == null) {
+            id = parseOptionalUuid(asString(filterMap.get("location_level_id")));
+        }
+        return id;
+    }
+
+    public Map<String, Object> computeGlPostingMetricsForRun(String runReferenceCode) {
+        if (runReferenceCode == null || runReferenceCode.isBlank()) {
+            return emptyGlPostingMetrics();
+        }
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT
+                    rr.reconciliation_run_id,
+                    rr.financial_period_id,
+                    rr.level_id,
+                    COALESCE(fp.period_code, rr.filters_json->>'financialPeriod') AS period_code
+                FROM reconciliation.reconciliation_run rr
+                LEFT JOIN reconciliation.financial_period fp ON fp.financial_period_id = rr.financial_period_id
+                WHERE rr.run_reference_code = ?
+                """, runReferenceCode.trim());
+        if (rows.isEmpty()) {
+            return emptyGlPostingMetrics();
+        }
+        Map<String, Object> r = rows.get(0);
+        return computeGlPostingMetrics(
+                (UUID) r.get("reconciliation_run_id"),
+                (UUID) r.get("financial_period_id"),
+                (UUID) r.get("level_id"),
+                r.get("period_code") == null ? null : String.valueOf(r.get("period_code")));
+    }
+
+    private Map<String, Object> computeGlPostingMetricsForFilters(Map<String, Object> filters) {
+        String periodCode = asString(filters.get("financialPeriod"));
+        UUID financialPeriodId = resolveOrEnsureFinancialPeriodId(periodCode);
+        return computeGlPostingMetrics(
+                null,
+                financialPeriodId,
+                resolveLevelIdFromFilters(filters),
+                periodCode);
+    }
+
+    private Map<String, Object> emptyGlPostingMetrics() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("glLineCount", 0L);
+        m.put("glPairCount", 0L);
+        m.put("missingMappingLines", 0);
+        m.put("unbalancedPairCount", 0);
+        m.put("linkedToRunCount", 0L);
+        return m;
+    }
+
+    private Map<String, Object> computeGlPostingMetrics(
+            UUID reconciliationRunId,
+            UUID financialPeriodId,
+            UUID levelId,
+            String periodCode
+    ) {
+        List<Object> args = new ArrayList<>();
+        StringBuilder where = new StringBuilder(" WHERE 1=1 ");
+        appendGlEntryScopeWhere(where, args, reconciliationRunId, financialPeriodId, levelId, periodCode);
+
+        Map<String, Object> counts = jdbc.queryForMap("""
+                SELECT
+                    COUNT(*)::bigint AS gl_line_count,
+                    COUNT(*) FILTER (WHERE ge.gl_mapping_rule_id IS NULL)::int AS missing_mapping_lines,
+                    COUNT(DISTINCT regexp_replace(ge.gl_entry_reference_code, '-(DR|CR)$', ''))::bigint AS gl_pair_count,
+                    COUNT(*) FILTER (WHERE ge.reconciliation_run_id IS NOT NULL)::bigint AS linked_to_run_count
+                FROM reconciliation.gl_entry ge
+                """ + where, args.toArray());
+
+        List<Object> ubArgs = new ArrayList<>(args);
+        Integer unbalanced = jdbc.queryForObject("""
+                SELECT COUNT(*)::int FROM (
+                    SELECT regexp_replace(ge.gl_entry_reference_code, '-(DR|CR)$', '') AS pair_key
+                    FROM reconciliation.gl_entry ge
+                """ + where + """
+                    GROUP BY pair_key
+                    HAVING ABS(COALESCE(SUM(ge.debit_amount), 0) - COALESCE(SUM(ge.credit_amount), 0)) > 0.01
+                ) unbalanced_pairs
+                """, Integer.class, ubArgs.toArray());
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("glLineCount", counts.getOrDefault("gl_line_count", 0L));
+        out.put("glPairCount", counts.getOrDefault("gl_pair_count", 0L));
+        out.put("missingMappingLines", counts.getOrDefault("missing_mapping_lines", 0));
+        out.put("unbalancedPairCount", unbalanced == null ? 0 : unbalanced);
+        out.put("linkedToRunCount", counts.getOrDefault("linked_to_run_count", 0L));
+        return out;
+    }
+
+    private void appendGlEntryScopeWhere(
+            StringBuilder sql,
+            List<Object> args,
+            UUID reconciliationRunId,
+            UUID financialPeriodId,
+            UUID levelId,
+            String periodCode
+    ) {
+        String period = periodCode == null ? "" : periodCode.trim();
+        if (reconciliationRunId != null) {
+            sql.append("""
+                     AND (
+                        ge.reconciliation_run_id = ?
+                        OR (
+                            ge.reconciliation_run_id IS NULL
+                            AND (
+                                ge.financial_period_id IS NOT DISTINCT FROM ?
+                                OR (
+                                    ? <> ''
+                                    AND EXISTS (
+                                        SELECT 1
+                                        FROM reconciliation.financial_period fp_scope
+                                        WHERE fp_scope.financial_period_id = ge.financial_period_id
+                                          AND fp_scope.period_code = ?
+                                    )
+                                )
+                            )
+                            AND (
+                                ?::uuid IS NULL
+                                OR ge.level_id IS NULL
+                                OR ge.level_id IS NOT DISTINCT FROM ?::uuid
+                            )
+                        )
+                     )
+                    """);
+            args.add(reconciliationRunId);
+            args.add(financialPeriodId);
+            args.add(period);
+            args.add(period);
+            args.add(levelId);
+            args.add(levelId);
+            return;
+        }
+        sql.append("""
+                 AND (
+                    ge.financial_period_id IS NOT DISTINCT FROM ?
+                    OR (
+                        ? <> ''
+                        AND EXISTS (
+                            SELECT 1
+                            FROM reconciliation.financial_period fp_scope
+                            WHERE fp_scope.financial_period_id = ge.financial_period_id
+                              AND fp_scope.period_code = ?
+                        )
+                    )
+                 )
+                 AND (
+                    ?::uuid IS NULL
+                    OR ge.level_id IS NULL
+                    OR ge.level_id IS NOT DISTINCT FROM ?::uuid
+                 )
+                """);
+        args.add(financialPeriodId);
+        args.add(period);
+        args.add(period);
+        args.add(levelId);
+        args.add(levelId);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void patchGlPostingChainStagesInSummary(Map<String, Object> parsed, Map<String, Object> glMetrics) {
+        Object scope = parsed.get("reconciliationScope");
+        if (!(scope instanceof Map<?, ?> scopeMap)) {
+            return;
+        }
+        Object sub = scopeMap.get("subscription");
+        if (sub instanceof Map<?, ?> subMap) {
+            Map<String, Object> subScope = (Map<String, Object>) subMap;
+            subScope.put("chainStages", withGlPostingStage(chainStagesFromScope(subScope), 8, glMetrics));
+        }
+        Object cash = scopeMap.get("cash");
+        if (cash instanceof Map<?, ?> cashMap) {
+            Map<String, Object> cashScope = (Map<String, Object>) cashMap;
+            cashScope.put("chainStages", withGlPostingStage(chainStagesFromScope(cashScope), 5, glMetrics));
+        }
+        Object meta = parsed.get("meta");
+        if (meta instanceof Map<?, ?> metaMap) {
+            ((Map<String, Object>) metaMap).put("glPosting", glMetrics);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> chainStagesFromScope(Map<String, Object> scopePart) {
+        Object raw = scopePart.get("chainStages");
+        if (raw instanceof List<?> list) {
+            List<Map<String, Object>> stages = new ArrayList<>();
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> m) {
+                    stages.add((Map<String, Object>) m);
+                }
+            }
+            return stages;
+        }
+        return List.of();
+    }
+
+    private List<Map<String, Object>> withGlPostingStage(
+            List<Map<String, Object>> stages,
+            int order,
+            Map<String, Object> glMetrics
+    ) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        boolean replaced = false;
+        for (Map<String, Object> stage : stages) {
+            if ("GL_POSTING".equals(stage.get("stageKey"))) {
+                out.add(buildGlPostingChainStage(order, "GL Posting", glMetrics));
+                replaced = true;
+            } else {
+                out.add(stage);
+            }
+        }
+        if (!replaced) {
+            out.add(buildGlPostingChainStage(order, "GL Posting", glMetrics));
+        }
+        return out;
+    }
+
+    private Map<String, Object> buildGlPostingChainStage(int order, String title, Map<String, Object> glMetrics) {
+        long lines = ((Number) glMetrics.getOrDefault("glLineCount", 0L)).longValue();
+        long pairs = ((Number) glMetrics.getOrDefault("glPairCount", 0L)).longValue();
+        int missing = ((Number) glMetrics.getOrDefault("missingMappingLines", 0)).intValue();
+        int unbalanced = ((Number) glMetrics.getOrDefault("unbalancedPairCount", 0)).intValue();
+        int mismatch = missing + unbalanced;
+        long volume = pairs > 0 ? pairs : (lines > 0 ? Math.max(1L, lines / 2) : 0L);
+        double paidPct = volume == 0 ? 0.0 : Math.max(0.0, (volume - mismatch) * 100.0 / volume);
+        Map<String, Object> stage = chainStage("GL_POSTING", order, title, volume, mismatch, 0, 0, paidPct);
+        stage.put("glPosting", glMetrics);
+        stage.put("drillDown", Map.of(
+                "route", "ACCOUNTING_JOURNAL",
+                "filters", Map.of("stage", "GL_POSTING")
+        ));
+        return stage;
     }
 
     private List<Map<String, Object>> getDashboardMismatchesFromRun(String recoRunId, Map<String, Object> filters, int page, int pageSize) {
@@ -3070,30 +3364,36 @@ public class ReconciliationModuleRepository {
                 WHERE 1=1
                 """);
         UUID tenantUuid = parseOptionalUuid(tenantId);
+        String runRef = recoRunId == null || recoRunId.isBlank() ? null : recoRunId.trim();
+        boolean runScoped = runRef != null;
         if (tenantUuid != null) {
-            sql.append("""
-                     AND (
-                        gc.application_id IS NOT DISTINCT FROM ?
-                        OR gmr.application_id IS NOT DISTINCT FROM ?
-                        OR rr.application_id IS NOT DISTINCT FROM ?
-                     )
-                    """);
-            args.add(tenantUuid);
-            args.add(tenantUuid);
-            args.add(tenantUuid);
+            if (runScoped) {
+                sql.append("""
+                         AND EXISTS (
+                            SELECT 1 FROM reconciliation.reconciliation_run rr_tenant
+                            WHERE rr_tenant.run_reference_code = ?
+                              AND rr_tenant.application_id IS NOT DISTINCT FROM ?
+                         )
+                        """);
+                args.add(runRef);
+                args.add(tenantUuid);
+            } else {
+                sql.append("""
+                         AND (
+                            gc.application_id IS NOT DISTINCT FROM ?
+                            OR gmr.application_id IS NOT DISTINCT FROM ?
+                            OR rr.application_id IS NOT DISTINCT FROM ?
+                         )
+                        """);
+                args.add(tenantUuid);
+                args.add(tenantUuid);
+                args.add(tenantUuid);
+            }
         }
-        if (period != null && !period.isBlank()) {
-            sql.append(" AND fp.period_code = ? ");
-            args.add(period.trim());
+        if (runScoped) {
+            appendJournalRunScopeFilter(sql, args, runRef);
         }
-        if (recoRunId != null && !recoRunId.isBlank()) {
-            sql.append("""
-                     AND ge.reconciliation_run_id = (
-                        SELECT reconciliation_run_id FROM reconciliation.reconciliation_run WHERE run_reference_code = ?
-                    )
-                    """);
-            args.add(recoRunId);
-        }
+        appendJournalPeriodFilter(sql, args, period, runScoped);
         List<String> accounts = glAccountCodes == null ? List.of() : glAccountCodes.stream().filter(s -> s != null && !s.isBlank()).toList();
         if (!accounts.isEmpty()) {
             sql.append(" AND gc.gl_code IN (");
@@ -3123,6 +3423,13 @@ public class ReconciliationModuleRepository {
         pageArgs.add(offset);
         sql.append(" ORDER BY ge.created_on DESC LIMIT ? OFFSET ? ");
         List<Map<String, Object>> items = jdbc.queryForList(sql.toString(), pageArgs.toArray());
+        if (runScoped) {
+            for (Map<String, Object> item : items) {
+                if (item.get("recoRunId") == null) {
+                    item.put("recoRunId", runRef);
+                }
+            }
+        }
 
         Map<String, Object> meta = new LinkedHashMap<>();
         meta.put("total", total);
@@ -3136,18 +3443,172 @@ public class ReconciliationModuleRepository {
         return out;
     }
 
-    public List<Map<String, Object>> validateJournal(List<String> journalIds) {
+    /**
+     * Match entries posted directly on the run, or (common for payment-posted GL) entries with
+     * {@code reconciliation_run_id} null but same financial period / period code / level as the run.
+     */
+    private void appendJournalRunScopeFilter(StringBuilder sql, List<Object> args, String runRef) {
+        sql.append("""
+                 AND EXISTS (
+                    SELECT 1
+                    FROM reconciliation.reconciliation_run rr_scope
+                    LEFT JOIN reconciliation.financial_period fp_scope
+                        ON fp_scope.financial_period_id = rr_scope.financial_period_id
+                    WHERE rr_scope.run_reference_code = ?
+                      AND (
+                        ge.reconciliation_run_id = rr_scope.reconciliation_run_id
+                        OR (
+                            ge.reconciliation_run_id IS NULL
+                            AND (
+                                ge.financial_period_id IS NOT DISTINCT FROM rr_scope.financial_period_id
+                                OR (
+                                    fp.period_code IS NOT NULL
+                                    AND (
+                                        fp.period_code = fp_scope.period_code
+                                        OR fp.period_code = COALESCE(rr_scope.filters_json->>'financialPeriod', '')
+                                    )
+                                )
+                            )
+                            AND (
+                                ge.level_id IS NULL
+                                OR rr_scope.level_id IS NULL
+                                OR ge.level_id IS NOT DISTINCT FROM rr_scope.level_id
+                            )
+                        )
+                      )
+                 )
+                """);
+        args.add(runRef);
+    }
+
+    /**
+     * Period may live on {@code gl_entry.financial_period_id} or only on the linked reconciliation run
+     * ({@code financial_period.period_code} / {@code filters_json.financialPeriod}) when entry period is null.
+     */
+    private void appendJournalPeriodFilter(StringBuilder sql, List<Object> args, String period, boolean runScoped) {
+        if (period == null || period.isBlank()) {
+            return;
+        }
+        String periodCode = period.trim();
+        if (runScoped) {
+            // Run scope (appendJournalRunScopeFilter) already aligns period via financial_period_id / period_code.
+            sql.append(" AND (fp.period_code = ? OR fp.period_code IS NULL) ");
+            args.add(periodCode);
+            return;
+        }
+        sql.append("""
+                 AND (
+                    fp.period_code = ?
+                    OR (
+                        fp.period_code IS NULL
+                        AND EXISTS (
+                            SELECT 1
+                            FROM reconciliation.reconciliation_run rr_per
+                            LEFT JOIN reconciliation.financial_period fp_run
+                                ON fp_run.financial_period_id = rr_per.financial_period_id
+                            WHERE rr_per.reconciliation_run_id = ge.reconciliation_run_id
+                              AND (
+                                fp_run.period_code = ?
+                                OR COALESCE(rr_per.filters_json->>'financialPeriod', '') = ?
+                              )
+                        )
+                    )
+                 )
+                """);
+        args.add(periodCode);
+        args.add(periodCode);
+        args.add(periodCode);
+    }
+
+    /**
+     * Validates DR/CR journal pairs: sums debits and credits for all lines sharing the same
+     * pair key ({@code regexp_replace(gl_entry_reference_code, '-(DR|CR)$', '')}).
+     * When {@code applyPostingStatus} is true, balanced pairs → {@code POSTED}, else → {@code UNBALANCED}
+     * on all lines in the pair ({@code lu_gl_posting_status}).
+     */
+    public List<Map<String, Object>> validateJournal(List<String> journalIds, boolean applyPostingStatus) {
         if (journalIds == null || journalIds.isEmpty()) {
             return List.of();
         }
-        String placeholders = journalIds.stream().map(i -> "?").reduce((a, b) -> a + "," + b).orElse("?");
-        return jdbc.queryForList("""
+        List<String> requested = journalIds.stream()
+                .filter(s -> s != null && !s.isBlank())
+                .map(String::trim)
+                .toList();
+        if (requested.isEmpty()) {
+            return List.of();
+        }
+        LinkedHashSet<String> pairKeys = new LinkedHashSet<>();
+        for (String id : requested) {
+            pairKeys.add(journalPairKey(id));
+        }
+        String placeholders = pairKeys.stream().map(i -> "?").collect(Collectors.joining(","));
+        List<Map<String, Object>> lines = jdbc.queryForList("""
                 SELECT
-                    gl_entry_reference_code AS "journalId",
-                    CASE WHEN COALESCE(debit_amount,0)=COALESCE(credit_amount,0) THEN 'BALANCED' ELSE 'UNBALANCED' END AS "validationStatus"
-                FROM reconciliation.gl_entry
-                WHERE gl_entry_reference_code IN (%s)
-                """.formatted(placeholders), journalIds.toArray());
+                    regexp_replace(ge.gl_entry_reference_code, '-(DR|CR)$', '') AS pair_key,
+                    COALESCE(ge.debit_amount, 0) AS debit_amount,
+                    COALESCE(ge.credit_amount, 0) AS credit_amount
+                FROM reconciliation.gl_entry ge
+                WHERE regexp_replace(ge.gl_entry_reference_code, '-(DR|CR)$', '') IN (%s)
+                   OR ge.gl_entry_reference_code IN (%s)
+                """.formatted(placeholders, placeholders),
+                Stream.concat(pairKeys.stream(), pairKeys.stream()).toArray());
+        Map<String, double[]> totalsByPair = new LinkedHashMap<>();
+        for (Map<String, Object> line : lines) {
+            String pairKey = String.valueOf(line.get("pair_key"));
+            double[] totals = totalsByPair.computeIfAbsent(pairKey, k -> new double[2]);
+            totals[0] += ((Number) line.get("debit_amount")).doubleValue();
+            totals[1] += ((Number) line.get("credit_amount")).doubleValue();
+        }
+        Set<String> appliedPairs = new LinkedHashSet<>();
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (String id : requested) {
+            String pairKey = journalPairKey(id);
+            double[] totals = totalsByPair.get(pairKey);
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("journalId", id);
+            if (totals == null) {
+                row.put("validationStatus", "NOT_FOUND");
+            } else {
+                boolean balanced = Math.abs(totals[0] - totals[1]) <= 0.01;
+                String validationStatus = balanced ? "BALANCED" : "UNBALANCED";
+                row.put("validationStatus", validationStatus);
+                if (applyPostingStatus) {
+                    String postingStatus = balanced ? "POSTED" : "UNBALANCED";
+                    row.put("postingStatus", postingStatus);
+                    if (appliedPairs.add(pairKey)) {
+                        row.put("linesUpdated", applyGlPostingStatusForPair(pairKey, postingStatus));
+                    }
+                }
+            }
+            out.add(row);
+        }
+        return out;
+    }
+
+    /**
+     * Sets {@code gl_posting_status_id} for every line in a DR/CR pair. {@code POSTED} sets {@code posted_at = now()};
+     * {@code UNBALANCED} clears {@code posted_at}.
+     */
+    private int applyGlPostingStatusForPair(String pairKey, String postingStatusCode) {
+        boolean markPosted = "POSTED".equalsIgnoreCase(postingStatusCode);
+        return jdbc.update("""
+                UPDATE reconciliation.gl_entry ge
+                SET gl_posting_status_id = (
+                        SELECT gl_posting_status_id
+                        FROM reconciliation.lu_gl_posting_status
+                        WHERE UPPER(code) = UPPER(?)
+                          AND is_active = true
+                        LIMIT 1
+                    ),
+                    posted_at = CASE WHEN ? THEN now() ELSE NULL END,
+                    modified_on = now()
+                WHERE regexp_replace(ge.gl_entry_reference_code, '-(DR|CR)$', '') = ?
+                   OR ge.gl_entry_reference_code = ?
+                """, postingStatusCode, markPosted, pairKey, pairKey);
+    }
+
+    private static String journalPairKey(String journalId) {
+        return journalId.replaceAll("-(DR|CR)$", "");
     }
 
     public String saveBankStatement(String fileName, String bankAccountId, String fromDate, String toDate, String format) {
@@ -3828,9 +4289,21 @@ public class ReconciliationModuleRepository {
         out.put("run", runHeader);
         out.put("filters", filters);
 
-        UUID runUuid = jdbc.queryForObject(
-                "SELECT reconciliation_run_id FROM reconciliation.reconciliation_run WHERE run_reference_code = ?",
-                UUID.class, recoRunId);
+        List<Map<String, Object>> runScopeRows = jdbc.queryForList("""
+                SELECT
+                    rr.reconciliation_run_id,
+                    rr.financial_period_id,
+                    rr.level_id,
+                    COALESCE(fp.period_code, rr.filters_json->>'financialPeriod') AS period_code
+                FROM reconciliation.reconciliation_run rr
+                LEFT JOIN reconciliation.financial_period fp ON fp.financial_period_id = rr.financial_period_id
+                WHERE rr.run_reference_code = ?
+                """, recoRunId);
+        UUID runUuid = runScopeRows.isEmpty() ? null : (UUID) runScopeRows.get(0).get("reconciliation_run_id");
+        UUID runFinancialPeriodId = runScopeRows.isEmpty() ? null : (UUID) runScopeRows.get(0).get("financial_period_id");
+        UUID runLevelId = runScopeRows.isEmpty() ? null : (UUID) runScopeRows.get(0).get("level_id");
+        String runPeriodCode = runScopeRows.isEmpty() || runScopeRows.get(0).get("period_code") == null
+                ? null : String.valueOf(runScopeRows.get(0).get("period_code"));
 
         List<Object> scopeArgs = new ArrayList<>();
         String invoiceScopeWhere = buildInvoiceWhere(filters, scopeArgs);
@@ -3847,7 +4320,7 @@ public class ReconciliationModuleRepository {
                 "page", sp,
                 "pageSize", ss,
                 "totalCount", subTotal,
-                "items", enrichSubscriptionChains(recoRunId, runUuid, subRoots)
+                "items", enrichSubscriptionChains(recoRunId, runUuid, runFinancialPeriodId, runLevelId, runPeriodCode, subRoots)
         ));
 
         long cashTotal = countCashInvoicesInScope(invoiceFrom, invoiceScopeWhere, scopeArgs);
@@ -3857,8 +4330,9 @@ public class ReconciliationModuleRepository {
                 "page", cp,
                 "pageSize", cs,
                 "totalCount", cashTotal,
-                "items", enrichCashChains(recoRunId, runUuid, cashInvoices)
+                "items", enrichCashChains(recoRunId, runUuid, runFinancialPeriodId, runLevelId, runPeriodCode, cashInvoices)
         ));
+        out.put("glPosting", computeGlPostingMetrics(runUuid, runFinancialPeriodId, runLevelId, runPeriodCode));
         return out;
     }
 
@@ -3969,7 +4443,14 @@ public class ReconciliationModuleRepository {
         return jdbc.queryForList(sql, qargs.toArray());
     }
 
-    private List<Map<String, Object>> enrichSubscriptionChains(String recoRunId, UUID runUuid, List<Map<String, Object>> roots) {
+    private List<Map<String, Object>> enrichSubscriptionChains(
+            String recoRunId,
+            UUID runUuid,
+            UUID runFinancialPeriodId,
+            UUID runLevelId,
+            String runPeriodCode,
+            List<Map<String, Object>> roots
+    ) {
         if (roots.isEmpty()) {
             return List.of();
         }
@@ -3978,10 +4459,17 @@ public class ReconciliationModuleRepository {
                 .filter(Objects::nonNull)
                 .distinct()
                 .toList();
-        return assembleChains(recoRunId, runUuid, roots, invoiceIds, true);
+        return assembleChains(recoRunId, runUuid, runFinancialPeriodId, runLevelId, runPeriodCode, roots, invoiceIds, true);
     }
 
-    private List<Map<String, Object>> enrichCashChains(String recoRunId, UUID runUuid, List<Map<String, Object>> invoiceRows) {
+    private List<Map<String, Object>> enrichCashChains(
+            String recoRunId,
+            UUID runUuid,
+            UUID runFinancialPeriodId,
+            UUID runLevelId,
+            String runPeriodCode,
+            List<Map<String, Object>> invoiceRows
+    ) {
         if (invoiceRows.isEmpty()) {
             return List.of();
         }
@@ -3990,12 +4478,15 @@ public class ReconciliationModuleRepository {
                 .filter(Objects::nonNull)
                 .distinct()
                 .toList();
-        return assembleChains(recoRunId, runUuid, invoiceRows, invoiceIds, false);
+        return assembleChains(recoRunId, runUuid, runFinancialPeriodId, runLevelId, runPeriodCode, invoiceRows, invoiceIds, false);
     }
 
     private List<Map<String, Object>> assembleChains(
             String recoRunId,
             UUID runUuid,
+            UUID runFinancialPeriodId,
+            UUID runLevelId,
+            String runPeriodCode,
             List<Map<String, Object>> rootRows,
             List<UUID> invoiceIds,
             boolean subscription
@@ -4008,6 +4499,7 @@ public class ReconciliationModuleRepository {
                 .filter(Objects::nonNull)
                 .collect(Collectors.toCollection(LinkedHashSet::new));
         Map<String, List<Map<String, Object>>> txnsByIntent = loadTxnsGrouped(intentIds);
+        Map<String, String> paymentTxnIdToInvoiceKey = paymentTxnIdToInvoiceKey(intentsByInvoice, txnsByIntent);
         Set<String> gatewayRefs = txnsByIntent.values().stream()
                 .flatMap(List::stream)
                 .map(m -> m.get("payment_gateway_order_id"))
@@ -4017,7 +4509,8 @@ public class ReconciliationModuleRepository {
                 .collect(Collectors.toCollection(LinkedHashSet::new));
         Map<String, List<Map<String, Object>>> historyByInvoice = loadBillingHistoryGrouped(invoiceIds);
         Map<String, List<Map<String, Object>>> refundsByInvoice = loadRefundsGrouped(recoRunId, invoiceIds, invoiceNumberToId);
-        Map<String, List<Map<String, Object>>> glByInvoice = loadGlGrouped(runUuid, invoiceIds, invoiceNumberToId);
+        Map<String, List<Map<String, Object>>> glByInvoice = loadGlGrouped(
+                runUuid, runFinancialPeriodId, runLevelId, runPeriodCode, invoiceIds, invoiceNumberToId, paymentTxnIdToInvoiceKey);
         Map<String, List<Map<String, Object>>> snapshotsByInvoice = loadSnapshotsGrouped(recoRunId, invoiceIds, invoiceNumberToId);
         Map<String, List<Map<String, Object>>> bankByGatewayRef = loadBankMatchesGrouped(gatewayRefs);
 
@@ -4285,54 +4778,140 @@ public class ReconciliationModuleRepository {
         return byInv;
     }
 
+    private Map<String, String> paymentTxnIdToInvoiceKey(
+            Map<String, List<Map<String, Object>>> intentsByInvoice,
+            Map<String, List<Map<String, Object>>> txnsByIntent
+    ) {
+        Map<String, String> map = new LinkedHashMap<>();
+        for (Map.Entry<String, List<Map<String, Object>>> invEntry : intentsByInvoice.entrySet()) {
+            String invKey = invEntry.getKey();
+            for (Map<String, Object> intent : invEntry.getValue()) {
+                Object intentId = intent.get("client_payment_intent_id");
+                if (intentId == null) {
+                    continue;
+                }
+                String ik = String.valueOf(intentId);
+                for (Map<String, Object> txn : txnsByIntent.getOrDefault(ik, List.of())) {
+                    Object txnId = txn.get("client_payment_transaction_id");
+                    if (txnId != null) {
+                        map.put(String.valueOf(txnId), invKey);
+                    }
+                }
+            }
+        }
+        return map;
+    }
+
+    private String resolveGlEntryInvoiceKey(
+            Map<String, Object> row,
+            Map<String, String> invoiceNumberToId,
+            Map<String, String> paymentTxnIdToInvoiceKey
+    ) {
+        Object eid = row.get("entityUuid");
+        if (eid != null) {
+            return String.valueOf(eid);
+        }
+        String erc = row.get("entityReferenceCode") == null ? null : String.valueOf(row.get("entityReferenceCode"));
+        if (erc == null || erc.isBlank()) {
+            return null;
+        }
+        String byNumber = invoiceNumberToId.get(erc);
+        if (byNumber != null) {
+            return byNumber;
+        }
+        String byTxn = paymentTxnIdToInvoiceKey.get(erc);
+        if (byTxn != null) {
+            return byTxn;
+        }
+        if (erc.startsWith("PAY-CPT-")) {
+            String core = erc.replaceFirst("^PAY-CPT-", "").replaceFirst("-(DR|CR)$", "");
+            return paymentTxnIdToInvoiceKey.get(core);
+        }
+        return null;
+    }
+
     private Map<String, List<Map<String, Object>>> loadGlGrouped(
             UUID runUuid,
+            UUID runFinancialPeriodId,
+            UUID runLevelId,
+            String runPeriodCode,
             List<UUID> invoiceIds,
-            Map<String, String> invoiceNumberToId
+            Map<String, String> invoiceNumberToId,
+            Map<String, String> paymentTxnIdToInvoiceKey
     ) {
-        if (invoiceIds.isEmpty() || runUuid == null) {
+        if (invoiceIds.isEmpty()) {
             return Map.of();
         }
         String inList = invoiceIds.stream().map(u -> "'" + u + "'").collect(Collectors.joining(","));
-        String sql = "SELECT "
-                + "ge.gl_entry_reference_code AS \"glEntryId\", "
-                + "et.code AS \"entityType\", "
-                + "ge.entity_id::text AS entity_id, "
-                + "ge.entity_reference_code AS \"entityReferenceCode\", "
-                + "gc.gl_code AS \"glAccountCode\", "
-                + "gc.description AS \"glAccountName\", "
-                + "pcur.currency_code AS \"currencyCode\", "
-                + "ge.debit_amount AS \"debitAmount\", "
-                + "ge.credit_amount AS \"creditAmount\", "
-                + "gps.code AS \"postingStatus\", "
-                + "ge.posting_reference AS \"postingReference\", "
-                + "ge.posted_at AS \"postedAt\", "
-                + "ge.created_on AS \"createdOn\" "
-                + "FROM reconciliation.gl_entry ge "
-                + "JOIN reconciliation.lu_gl_posting_status gps ON gps.gl_posting_status_id = ge.gl_posting_status_id "
-                + "LEFT JOIN reconciliation.lu_reconciliation_entity_type et ON et.reconciliation_entity_type_id = ge.entity_type_id "
-                + "LEFT JOIN finance.gl_code gc ON gc.gl_code_id = ge.gl_code_id "
-                + "LEFT JOIN payment_gateway.lu_payment_gateway_currency_type pcur ON pcur.payment_gateway_currency_type_id = ge.payment_currency_type_id "
-                + "WHERE ge.reconciliation_run_id = ?::uuid "
-                + "AND (ge.entity_id IN (" + inList + ") "
-                + "OR ge.entity_reference_code IN (SELECT invoice_number FROM transactions.invoice WHERE invoice_id IN (" + inList + ")))";
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, runUuid);
+        List<Object> args = new ArrayList<>();
+        StringBuilder where = new StringBuilder(" WHERE 1=1 ");
+        appendGlEntryScopeWhere(where, args, runUuid, runFinancialPeriodId, runLevelId, runPeriodCode);
+        where.append("""
+                 AND (
+                    ge.entity_id IN (%s)
+                    OR ge.entity_reference_code IN (
+                        SELECT invoice_number FROM transactions.invoice WHERE invoice_id IN (%s)
+                    )
+                    OR ge.entity_reference_code IN (
+                        SELECT cpt.client_payment_transaction_id::text
+                        FROM client_payments.client_payment_transaction cpt
+                        JOIN client_payments.client_payment_intent cpi
+                          ON cpi.client_payment_intent_id = cpt.client_payment_intent_id
+                        WHERE cpi.invoice_id IN (%s)
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM client_payments.client_payment_transaction cpt
+                        JOIN client_payments.client_payment_intent cpi
+                          ON cpi.client_payment_intent_id = cpt.client_payment_intent_id
+                        WHERE cpi.invoice_id IN (%s)
+                          AND (
+                            ge.entity_reference_code = cpt.client_payment_transaction_id::text
+                            OR ge.entity_reference_code LIKE 'PAY-CPT-' || cpt.client_payment_transaction_id::text || '-%%'
+                          )
+                    )
+                 )
+                """.formatted(inList, inList, inList, inList));
+
+        String sql = """
+                SELECT
+                    ge.gl_entry_reference_code AS "journalId",
+                    CAST(ge.gl_entry_id AS text) AS "glEntryId",
+                    ge.entity_reference_code AS "entityReferenceCode",
+                    CAST(ge.entity_id AS text) AS "entityUuid",
+                    et.code AS "entityType",
+                    gc.gl_code AS "glAccountCode",
+                    gc.description AS "glAccountName",
+                    CAST(ge.gl_mapping_rule_id AS text) AS "glMappingRuleId",
+                    gmr.mapping_code AS "glMappingRuleCode",
+                    gmr.mapping_name AS "glMappingRuleName",
+                    jt.code AS "journalType",
+                    pcur.currency_code AS "currencyCode",
+                    ge.debit_amount AS "debitAmount",
+                    ge.credit_amount AS "creditAmount",
+                    COALESCE(gps.code, 'UNKNOWN') AS "postingStatus",
+                    ge.posting_reference AS "postingReference",
+                    ge.posted_at AS "postedAt",
+                    ge.created_on AS "createdOn"
+                FROM reconciliation.gl_entry ge
+                INNER JOIN finance.gl_code gc ON gc.gl_code_id = ge.gl_code_id
+                LEFT JOIN reconciliation.lu_gl_posting_status gps ON gps.gl_posting_status_id = ge.gl_posting_status_id
+                LEFT JOIN reconciliation.lu_reconciliation_entity_type et ON et.reconciliation_entity_type_id = ge.entity_type_id
+                LEFT JOIN reconciliation.gl_mapping_rule gmr ON gmr.gl_mapping_rule_id = ge.gl_mapping_rule_id
+                LEFT JOIN reconciliation.lu_journal_type jt ON jt.journal_type_id = ge.journal_type_id
+                LEFT JOIN payment_gateway.lu_payment_gateway_currency_type pcur
+                  ON pcur.payment_gateway_currency_type_id = ge.payment_currency_type_id
+                """ + where;
+        List<Map<String, Object>> rows = jdbc.queryForList(sql, args.toArray());
         Map<String, List<Map<String, Object>>> byInv = new LinkedHashMap<>();
         for (UUID id : invoiceIds) {
             byInv.put(id.toString(), new ArrayList<>());
         }
         for (Map<String, Object> r : rows) {
-            Object eid = r.get("entity_id");
-            if (eid != null && byInv.containsKey(String.valueOf(eid))) {
-                byInv.get(String.valueOf(eid)).add(r);
-                continue;
-            }
-            String erc = r.get("entityReferenceCode") == null ? null : String.valueOf(r.get("entityReferenceCode"));
-            if (erc != null) {
-                String k = invoiceNumberToId.get(erc);
-                if (k != null) {
-                    byInv.computeIfAbsent(k, x -> new ArrayList<>()).add(r);
-                }
+            String key = resolveGlEntryInvoiceKey(r, invoiceNumberToId, paymentTxnIdToInvoiceKey);
+            r.remove("entityUuid");
+            if (key != null) {
+                byInv.computeIfAbsent(key, k -> new ArrayList<>()).add(r);
             }
         }
         return byInv;

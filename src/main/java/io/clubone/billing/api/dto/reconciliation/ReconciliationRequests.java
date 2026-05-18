@@ -58,8 +58,13 @@ public final class ReconciliationRequests {
     }
 
     public record JournalValidateRequest(
-            @NotEmpty List<String> journalIds
+            @NotEmpty List<String> journalIds,
+            /** When true (default), balanced pairs are marked POSTED; unbalanced pairs are marked UNBALANCED. */
+            Boolean applyPostingStatus
     ) {
+        public boolean shouldApplyPostingStatus() {
+            return applyPostingStatus == null || applyPostingStatus;
+        }
     }
 
     public record TriggerBankReconcileRequest(

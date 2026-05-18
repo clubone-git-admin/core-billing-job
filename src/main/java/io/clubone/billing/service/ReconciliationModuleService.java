@@ -239,7 +239,7 @@ public class ReconciliationModuleService {
 
     @Transactional
     public Map<String, Object> validateJournal(ReconciliationRequests.JournalValidateRequest request) {
-        return Map.of("items", repository.validateJournal(request.journalIds()));
+        return Map.of("items", repository.validateJournal(request.journalIds(), request.shouldApplyPostingStatus()));
     }
 
     @Transactional
