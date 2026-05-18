@@ -1747,7 +1747,8 @@ public class ReconciliationModuleRepository {
         String scheduleLateral = subscriptionScope
                 ? """
                  LEFT JOIN LATERAL (
-                    SELECT sbs.billing_schedule_id, sbs.schedule_label
+                    SELECT sbs.billing_schedule_id,
+                           COALESCE(sbs.label, sbs.period_label) AS schedule_label
                     FROM client_subscription_billing.subscription_billing_schedule sbs
                     WHERE sbs.invoice_id = f.invoice_id
                     ORDER BY sbs.billing_schedule_id
