@@ -5713,26 +5713,36 @@ public class ReconciliationModuleRepository {
         if (gatewayRefs.isEmpty()) {
             return Map.of();
         }
+        List<String> refList = new ArrayList<>(gatewayRefs);
+        String placeholders = String.join(",", java.util.Collections.nCopies(refList.size(), "?"));
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT"
+                + "    brm.bank_reconciliation_match_id::text AS \"matchId\","
+                + "    br.bank_reconciliation_ref_code AS \"bankReconcileRunId\","
+                + "    brm.bank_entry_reference AS \"bankEntryReference\","
+                + "    brm.system_transaction_reference AS \"systemTransactionReference\","
+                + "    brm.variance_amount AS \"varianceAmount\","
+                + "    bmt.code AS \"matchType\","
+                + "    brm.notes AS \"notes\","
+                + "    brm.created_on AS \"createdAt\""
+                + " FROM reconciliation.bank_reconciliation_match brm"
+                + " JOIN reconciliation.bank_reconciliation br"
+                + "   ON br.bank_reconciliation_id = brm.bank_reconciliation_id"
+                + " JOIN reconciliation.lu_bank_match_type bmt"
+                + "   ON bmt.bank_match_type_id = brm.bank_match_type_id"
+                + " WHERE brm.system_transaction_reference IN (" + placeholders + ")"
+                + " ORDER BY brm.system_transaction_reference, brm.created_on DESC"
+                + " LIMIT 500",
+                refList.toArray());
         Map<String, List<Map<String, Object>>> out = new LinkedHashMap<>();
         for (String ref : gatewayRefs) {
-            List<Map<String, Object>> rows = jdbc.queryForList("""
-                    SELECT
-                        brm.bank_reconciliation_match_id::text AS "matchId",
-                        br.bank_reconciliation_ref_code AS "bankReconcileRunId",
-                        brm.bank_entry_reference AS "bankEntryReference",
-                        brm.system_transaction_reference AS "systemTransactionReference",
-                        brm.variance_amount AS "varianceAmount",
-                        bmt.code AS "matchType",
-                        brm.notes AS "notes",
-                        brm.created_on AS "createdAt"
-                    FROM reconciliation.bank_reconciliation_match brm
-                    JOIN reconciliation.bank_reconciliation br ON br.bank_reconciliation_id = brm.bank_reconciliation_id
-                    JOIN reconciliation.lu_bank_match_type bmt ON bmt.bank_match_type_id = brm.bank_match_type_id
-                    WHERE brm.system_transaction_reference = ?
-                    ORDER BY brm.created_on DESC
-                    LIMIT 50
-                    """, ref);
-            out.put(ref, rows);
+            out.put(ref, new ArrayList<>());
+        }
+        for (Map<String, Object> row : rows) {
+            Object txRefObj = row.get("systemTransactionReference");
+            if (txRefObj != null) {
+                out.computeIfAbsent(String.valueOf(txRefObj), k -> new ArrayList<>()).add(row);
+            }
         }
         return out;
     }
