@@ -451,7 +451,7 @@ public class ReconciliationModuleController {
 
     @PostMapping("/reports/{slug}/query")
     public ResponseEntity<Map<String, Object>> reportQuery(
-            @PathVariable String slug
+            @PathVariable String slug,
             @Valid @RequestBody ReconciliationRequests.ReportQueryRequest request
     ) {
         String tenantId = AccessContext.applicationId().toString();
@@ -555,7 +555,7 @@ public class ReconciliationModuleController {
 
     @GetMapping("/config/enterprise/thresholds/{kind}")
     public ResponseEntity<Map<String, Object>> listEnterpriseThresholdsByKind(
-            @PathVariable String kind
+            @PathVariable String kind,
             @RequestParam(required = false) Boolean activeOnly,
             @RequestParam(required = false) String search,
             @RequestParam(defaultValue = "1") int page,
@@ -582,7 +582,7 @@ public class ReconciliationModuleController {
 
     @GetMapping("/config/enterprise/thresholds/{kind}/{id}")
     public ResponseEntity<Map<String, Object>> getEnterpriseThresholdRow(
-            @PathVariable String kind
+            @PathVariable String kind,
             @PathVariable String id
     ) {
         String tenantId = AccessContext.applicationId().toString();
@@ -602,7 +602,7 @@ public class ReconciliationModuleController {
 
     @PostMapping("/config/enterprise/thresholds/{kind}")
     public ResponseEntity<Map<String, Object>> createEnterpriseThreshold(
-            @PathVariable String kind
+            @PathVariable String kind,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
@@ -613,7 +613,7 @@ public class ReconciliationModuleController {
     @PutMapping("/config/enterprise/thresholds/{kind}/{id}")
     public ResponseEntity<Map<String, Object>> updateEnterpriseThreshold(
             @PathVariable String kind,
-            @PathVariable String id
+            @PathVariable String id,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
@@ -624,7 +624,7 @@ public class ReconciliationModuleController {
     @PostMapping("/config/enterprise/thresholds/{kind}/{id}/deactivate")
     public ResponseEntity<Map<String, Object>> deactivateEnterpriseThreshold(
             @PathVariable String kind,
-            @PathVariable String id
+            @PathVariable String id,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId
     ) {
         String tenantId = AccessContext.applicationId().toString();
@@ -634,7 +634,7 @@ public class ReconciliationModuleController {
     @PostMapping("/config/enterprise/thresholds/{kind}/{id}/clone")
     public ResponseEntity<Map<String, Object>> cloneEnterpriseThreshold(
             @PathVariable String kind,
-            @PathVariable String id
+            @PathVariable String id,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId
     ) {
         String tenantId = AccessContext.applicationId().toString();
@@ -643,7 +643,7 @@ public class ReconciliationModuleController {
 
     @PostMapping("/config/enterprise/thresholds/{kind}/test")
     public ResponseEntity<Map<String, Object>> testEnterpriseThreshold(
-            @PathVariable String kind
+            @PathVariable String kind,
             @RequestBody(required = false) ReconciliationRequests.ThresholdTestRequest request
     ) {
         String tenantId = AccessContext.applicationId().toString();
