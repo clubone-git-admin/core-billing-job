@@ -56,13 +56,19 @@ public class ActualChargePendingReconciliationService {
         int unchanged = 0;
 
         for (ActualChargeRepository.PendingChargeRow row : pendingRows) {
-            String gatewayStatus = normalize(actualChargeRepository.findGatewayTransactionStatus(row.clientPaymentTransactionId()));
+            String gatewayStatus = normalize(actualChargeRepository.findGatewayTransactionStatus(
+                    row.clientPaymentTransactionId(),
+                    row.applicationId()));
             if (gatewayStatus == null || gatewayStatus.isBlank()) {
                 unchanged++;
                 continue;
             }
             if (SUCCESS_GATEWAY_STATUSES.contains(gatewayStatus)) {
-                actualChargeRepository.updateHistoryStatus(row.subscriptionBillingHistoryId(), finalizedStatusId, null);
+                actualChargeRepository.updateHistoryStatus(
+                        row.subscriptionBillingHistoryId(),
+                        finalizedStatusId,
+                        null,
+                        row.applicationId());
                 finalized++;
                 continue;
             }
@@ -70,7 +76,8 @@ public class ActualChargePendingReconciliationService {
                 actualChargeRepository.updateHistoryStatus(
                         row.subscriptionBillingHistoryId(),
                         failedStatusId,
-                        "Gateway status=" + gatewayStatus);
+                        "Gateway status=" + gatewayStatus,
+                        row.applicationId());
                 failed++;
                 continue;
             }
@@ -108,13 +115,21 @@ public class ActualChargePendingReconciliationService {
 
         boolean updated = false;
         if (SUCCESS_GATEWAY_STATUSES.contains(gatewayStatus)) {
-            actualChargeRepository.updateHistoryStatus(row.subscriptionBillingHistoryId(), finalizedStatusId, null);
+            actualChargeRepository.updateHistoryStatus(
+                    row.subscriptionBillingHistoryId(),
+                    finalizedStatusId,
+                    null,
+                    row.applicationId());
             updated = true;
         } else if (FAILED_GATEWAY_STATUSES.contains(gatewayStatus)) {
             String reason = request.reason() != null && !request.reason().isBlank()
                     ? request.reason()
                     : "Gateway status=" + gatewayStatus;
-            actualChargeRepository.updateHistoryStatus(row.subscriptionBillingHistoryId(), failedStatusId, reason);
+            actualChargeRepository.updateHistoryStatus(
+                    row.subscriptionBillingHistoryId(),
+                    failedStatusId,
+                    reason,
+                    row.applicationId());
             updated = true;
         }
 

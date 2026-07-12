@@ -1,6 +1,7 @@
 package io.clubone.billing.repo;
 
 import io.clubone.billing.security.AccessContext;
+import io.clubone.billing.security.TenantContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -8,6 +9,7 @@ import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +34,12 @@ public class ActualChargeRepository {
 
     private static String requireAppIdStr() {
         return requireAppId().toString();
+    }
+
+    /** Present for HTTP request threads; empty for scheduled jobs / background pollers. */
+    private static Optional<UUID> optionalAppId() {
+        TenantContext ctx = TenantContext.get();
+        return ctx == null ? Optional.empty() : Optional.of(ctx.applicationId());
     }
 
     /**
@@ -214,10 +222,18 @@ public class ActualChargeRepository {
                 requireAppIdStr());
     }
 
+    /**
+     * Pending live captures ready for gateway reconciliation.
+     * <ul>
+     *   <li>HTTP (actor present): scoped to the caller's {@code application_id}</li>
+     *   <li>Scheduled poller (no actor): cross-tenant scan — each row carries its {@code applicationId}</li>
+     * </ul>
+     */
     public List<PendingChargeRow> findPendingLiveRowsForReconciliation(int limit, int staleMinutes) {
-        return jdbc.query(
-                """
+        Optional<UUID> scopedApp = optionalAppId();
+        StringBuilder sql = new StringBuilder("""
                 SELECT
+                    sbh.application_id,
                     sbh.subscription_billing_history_id,
                     sbh.billing_run_id,
                     sbh.invoice_id,
@@ -227,27 +243,41 @@ public class ActualChargeRepository {
                 FROM client_subscription_billing.subscription_billing_history sbh
                 JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
                 WHERE COALESCE(sbh.is_mock, false) = false
-                  AND sbh.application_id = ?::uuid
                   AND bs.status_code = 'PENDING_CAPTURE'
                   AND sbh.client_payment_transaction_id IS NOT NULL
                   AND sbh.billing_attempt_on <= now() - (? * INTERVAL '1 minute')
+                """);
+        List<Object> args = new ArrayList<>();
+        args.add(Math.max(1, staleMinutes));
+        if (scopedApp.isPresent()) {
+            sql.append(" AND sbh.application_id = ?::uuid ");
+            args.add(scopedApp.get().toString());
+        }
+        sql.append("""
                 ORDER BY sbh.billing_attempt_on ASC
                 LIMIT ?
-                """,
+                """);
+        args.add(Math.max(1, limit));
+
+        return jdbc.query(
+                sql.toString(),
                 (rs, i) -> new PendingChargeRow(
+                        (UUID) rs.getObject("application_id"),
                         (UUID) rs.getObject("subscription_billing_history_id"),
                         (UUID) rs.getObject("billing_run_id"),
                         (UUID) rs.getObject("invoice_id"),
                         (UUID) rs.getObject("client_payment_intent_id"),
                         (UUID) rs.getObject("client_payment_transaction_id"),
                         rs.getObject("billing_attempt_on", OffsetDateTime.class)),
-                requireAppIdStr(),
-                Math.max(1, staleMinutes),
-                Math.max(1, limit));
+                args.toArray());
     }
 
     public String findGatewayTransactionStatus(UUID clientPaymentTransactionId) {
-        if (clientPaymentTransactionId == null) {
+        return findGatewayTransactionStatus(clientPaymentTransactionId, requireAppId());
+    }
+
+    public String findGatewayTransactionStatus(UUID clientPaymentTransactionId, UUID applicationId) {
+        if (clientPaymentTransactionId == null || applicationId == null) {
             return null;
         }
         List<String> rows = jdbc.query(
@@ -262,7 +292,7 @@ public class ActualChargeRepository {
                 """,
                 (rs, i) -> rs.getString("gateway_status"),
                 clientPaymentTransactionId.toString(),
-                requireAppIdStr());
+                applicationId.toString());
         return rows.isEmpty() ? null : rows.get(0);
     }
 
@@ -270,9 +300,10 @@ public class ActualChargeRepository {
         if (clientPaymentTransactionId == null) {
             return null;
         }
-        List<PendingChargeRow> rows = jdbc.query(
-                """
+        Optional<UUID> scopedApp = optionalAppId();
+        StringBuilder sql = new StringBuilder("""
                 SELECT
+                    sbh.application_id,
                     sbh.subscription_billing_history_id,
                     sbh.billing_run_id,
                     sbh.invoice_id,
@@ -282,28 +313,46 @@ public class ActualChargeRepository {
                 FROM client_subscription_billing.subscription_billing_history sbh
                 JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
                 WHERE COALESCE(sbh.is_mock, false) = false
-                  AND sbh.application_id = ?::uuid
                   AND bs.status_code = 'PENDING_CAPTURE'
                   AND sbh.client_payment_transaction_id = ?::uuid
+                """);
+        List<Object> args = new ArrayList<>();
+        args.add(clientPaymentTransactionId.toString());
+        if (scopedApp.isPresent()) {
+            sql.append(" AND sbh.application_id = ?::uuid ");
+            args.add(scopedApp.get().toString());
+        }
+        sql.append("""
                 ORDER BY sbh.billing_attempt_on DESC NULLS LAST,
                          sbh.created_on DESC NULLS LAST,
                          sbh.subscription_billing_history_id DESC
                 LIMIT 1
-                """,
+                """);
+
+        List<PendingChargeRow> rows = jdbc.query(
+                sql.toString(),
                 (rs, i) -> new PendingChargeRow(
+                        (UUID) rs.getObject("application_id"),
                         (UUID) rs.getObject("subscription_billing_history_id"),
                         (UUID) rs.getObject("billing_run_id"),
                         (UUID) rs.getObject("invoice_id"),
                         (UUID) rs.getObject("client_payment_intent_id"),
                         (UUID) rs.getObject("client_payment_transaction_id"),
                         rs.getObject("billing_attempt_on", OffsetDateTime.class)),
-                requireAppIdStr(),
-                clientPaymentTransactionId.toString());
+                args.toArray());
         return rows.isEmpty() ? null : rows.get(0);
     }
 
     public void updateHistoryStatus(UUID subscriptionBillingHistoryId, UUID billingStatusId, String failureReason) {
-        if (subscriptionBillingHistoryId == null || billingStatusId == null) {
+        updateHistoryStatus(subscriptionBillingHistoryId, billingStatusId, failureReason, requireAppId());
+    }
+
+    public void updateHistoryStatus(
+            UUID subscriptionBillingHistoryId,
+            UUID billingStatusId,
+            String failureReason,
+            UUID applicationId) {
+        if (subscriptionBillingHistoryId == null || billingStatusId == null || applicationId == null) {
             return;
         }
         jdbc.update(
@@ -318,7 +367,7 @@ public class ActualChargeRepository {
                 billingStatusId.toString(),
                 failureReason,
                 subscriptionBillingHistoryId.toString(),
-                requireAppIdStr());
+                applicationId.toString());
     }
 
     /**
@@ -398,6 +447,7 @@ public class ActualChargeRepository {
     }
 
     public record PendingChargeRow(
+            UUID applicationId,
             UUID subscriptionBillingHistoryId,
             UUID billingRunId,
             UUID invoiceId,
