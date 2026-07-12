@@ -1,5 +1,6 @@
 package io.clubone.billing.repo;
 
+import io.clubone.billing.security.AccessContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -25,6 +26,14 @@ public class ActualChargeRepository {
         this.jdbc = jdbc;
     }
 
+    private static UUID requireAppId() {
+        return AccessContext.applicationId();
+    }
+
+    private static String requireAppIdStr() {
+        return requireAppId().toString();
+    }
+
     /**
      * True when the <strong>latest</strong> live attempt ({@code is_mock = false}) for this billing run + invoice
      * is a terminal <strong>success</strong> ({@code LIVE_FINALIZED} or {@code LIVE_SUCCESS}).
@@ -47,6 +56,7 @@ public class ActualChargeRepository {
                         JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
                         WHERE sbh.billing_run_id = ?::uuid
                           AND sbh.invoice_id = ?::uuid
+                          AND sbh.application_id = ?::uuid
                           AND COALESCE(sbh.is_mock, false) = false
                         ORDER BY sbh.billing_attempt_on DESC NULLS LAST,
                                  sbh.created_on DESC NULLS LAST,
@@ -58,7 +68,8 @@ public class ActualChargeRepository {
                     """,
                     rs -> rs.next() ? rs.getBoolean(1) : false,
                     billingRunId.toString(),
-                    invoiceId.toString());
+                    invoiceId.toString(),
+                    requireAppIdStr());
             return Boolean.TRUE.equals(ok);
         } catch (DataAccessException ex) {
             return false;
@@ -83,6 +94,7 @@ public class ActualChargeRepository {
                       JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
                       WHERE sbh.billing_run_id = ?::uuid
                         AND sbh.invoice_id = ?::uuid
+                        AND sbh.application_id = ?::uuid
                         AND COALESCE(sbh.is_mock, false) = false
                       ORDER BY sbh.billing_attempt_on DESC NULLS LAST,
                                sbh.created_on DESC NULLS LAST,
@@ -99,6 +111,7 @@ public class ActualChargeRepository {
                     rs -> rs.next() ? rs.getBoolean(1) : false,
                     billingRunId.toString(),
                     invoiceId.toString(),
+                    requireAppIdStr(),
                     Math.max(1, graceMinutes));
             return Boolean.TRUE.equals(pending);
         } catch (DataAccessException ex) {
@@ -118,11 +131,13 @@ public class ActualChargeRepository {
                     JOIN client_subscription_billing.subscription_plan sp
                       ON sp.subscription_plan_id = si.subscription_plan_id
                     WHERE si.subscription_instance_id = ?::uuid
+                      AND si.application_id = ?::uuid
                       AND COALESCE(sp.is_active, true) = true
                     LIMIT 1
                     """,
                     rs -> rs.next() ? (UUID) rs.getObject("client_payment_method_id") : null,
-                    subscriptionInstanceId.toString());
+                    subscriptionInstanceId.toString(),
+                    requireAppIdStr());
             return Optional.ofNullable(id);
         } catch (DataAccessException ex) {
             return Optional.empty();
@@ -161,7 +176,8 @@ public class ActualChargeRepository {
                     invoice_sub_total,
                     invoice_tax_amount,
                     invoice_discount_amount,
-                    invoice_total_amount
+                    invoice_total_amount,
+                    application_id
                 ) VALUES (
                     gen_random_uuid(),
                     ?::uuid,
@@ -179,7 +195,8 @@ public class ActualChargeRepository {
                     ?::numeric,
                     ?::numeric,
                     ?::numeric,
-                    ?::numeric
+                    ?::numeric,
+                    ?::uuid
                 )
                 """,
                 subscriptionInstanceId.toString(),
@@ -193,7 +210,8 @@ public class ActualChargeRepository {
                 subTotal,
                 tax,
                 discount,
-                total);
+                total,
+                requireAppIdStr());
     }
 
     public List<PendingChargeRow> findPendingLiveRowsForReconciliation(int limit, int staleMinutes) {
@@ -209,6 +227,7 @@ public class ActualChargeRepository {
                 FROM client_subscription_billing.subscription_billing_history sbh
                 JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
                 WHERE COALESCE(sbh.is_mock, false) = false
+                  AND sbh.application_id = ?::uuid
                   AND bs.status_code = 'PENDING_CAPTURE'
                   AND sbh.client_payment_transaction_id IS NOT NULL
                   AND sbh.billing_attempt_on <= now() - (? * INTERVAL '1 minute')
@@ -222,6 +241,7 @@ public class ActualChargeRepository {
                         (UUID) rs.getObject("client_payment_intent_id"),
                         (UUID) rs.getObject("client_payment_transaction_id"),
                         rs.getObject("billing_attempt_on", OffsetDateTime.class)),
+                requireAppIdStr(),
                 Math.max(1, staleMinutes),
                 Math.max(1, limit));
     }
@@ -237,10 +257,12 @@ public class ActualChargeRepository {
                 JOIN payment_gateway.lu_payment_gateway_transaction_status pgts
                   ON pgts.payment_gateway_transaction_status_id = cpt.payment_gateway_transaction_status_id
                 WHERE cpt.client_payment_transaction_id = ?::uuid
+                  AND cpt.application_id = ?::uuid
                 LIMIT 1
                 """,
                 (rs, i) -> rs.getString("gateway_status"),
-                clientPaymentTransactionId.toString());
+                clientPaymentTransactionId.toString(),
+                requireAppIdStr());
         return rows.isEmpty() ? null : rows.get(0);
     }
 
@@ -260,6 +282,7 @@ public class ActualChargeRepository {
                 FROM client_subscription_billing.subscription_billing_history sbh
                 JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
                 WHERE COALESCE(sbh.is_mock, false) = false
+                  AND sbh.application_id = ?::uuid
                   AND bs.status_code = 'PENDING_CAPTURE'
                   AND sbh.client_payment_transaction_id = ?::uuid
                 ORDER BY sbh.billing_attempt_on DESC NULLS LAST,
@@ -274,6 +297,7 @@ public class ActualChargeRepository {
                         (UUID) rs.getObject("client_payment_intent_id"),
                         (UUID) rs.getObject("client_payment_transaction_id"),
                         rs.getObject("billing_attempt_on", OffsetDateTime.class)),
+                requireAppIdStr(),
                 clientPaymentTransactionId.toString());
         return rows.isEmpty() ? null : rows.get(0);
     }
@@ -289,10 +313,12 @@ public class ActualChargeRepository {
                     failure_reason = ?,
                     created_on = now()
                 WHERE subscription_billing_history_id = ?::uuid
+                  AND application_id = ?::uuid
                 """,
                 billingStatusId.toString(),
                 failureReason,
-                subscriptionBillingHistoryId.toString());
+                subscriptionBillingHistoryId.toString(),
+                requireAppIdStr());
     }
 
     /**
@@ -314,6 +340,7 @@ public class ActualChargeRepository {
                     FROM client_subscription_billing.subscription_billing_history sbh
                     JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
                     WHERE sbh.billing_run_id = ?::uuid
+                      AND sbh.application_id = ?::uuid
                       AND COALESCE(sbh.is_mock, false) = false
                     ORDER BY sbh.invoice_id,
                              sbh.billing_attempt_on DESC NULLS LAST,
@@ -324,7 +351,8 @@ public class ActualChargeRepository {
                             (UUID) rs.getObject("invoice_id"),
                             rs.getString("status_code"),
                             rs.getBigDecimal("invoice_total_amount")),
-                    billingRunId.toString());
+                    billingRunId.toString(),
+                    requireAppIdStr());
             for (LatestLiveChargeRow r : rows) {
                 if (r.invoiceId() != null) {
                     out.put(r.invoiceId(), r);
@@ -356,11 +384,13 @@ public class ActualChargeRepository {
                 FROM client_subscription_billing.subscription_billing_history sbh
                 JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
                 WHERE sbh.billing_run_id = ?::uuid
+                  AND sbh.application_id = ?::uuid
                   AND COALESCE(sbh.is_mock, false) = false
                   AND bs.status_code = 'PENDING_CAPTURE'
                 """,
                 Math.max(1, stuckMinutes),
-                billingRunId.toString());
+                billingRunId.toString(),
+                requireAppIdStr());
         Number pendingCount = (Number) row.getOrDefault("pending_count", 0);
         Number p95 = (Number) row.getOrDefault("pending_age_p95_seconds", 0);
         Number stuckCount = (Number) row.getOrDefault("stuck_pending_count", 0);

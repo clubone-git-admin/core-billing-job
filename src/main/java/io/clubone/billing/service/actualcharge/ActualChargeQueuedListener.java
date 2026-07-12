@@ -27,7 +27,7 @@ public class ActualChargeQueuedListener {
         this.jobRunner = jobRunner;
     }
 
-    @Async
+    @Async("billingAsyncExecutor")
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onActualChargeQueued(ActualChargeQueuedEvent event) {
         UUID stageRunId = event.stageRunId();

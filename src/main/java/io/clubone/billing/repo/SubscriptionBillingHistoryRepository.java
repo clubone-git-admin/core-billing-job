@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import io.clubone.billing.security.AccessContext;
 @Repository
 public class SubscriptionBillingHistoryRepository {
 
@@ -30,6 +31,11 @@ public class SubscriptionBillingHistoryRepository {
         this.objectMapper = objectMapper;
     }
 
+
+    private static String requireAppIdStr() {
+        return AccessContext.applicationId().toString();
+    }
+
     /**
      * Resolves {@code subscription_billing_history_id} → {@code invoice_id} and {@code billing_run_id}.
      * Unknown ids are omitted from the result (caller treats as 404/unknown).
@@ -40,6 +46,7 @@ public class SubscriptionBillingHistoryRepository {
         }
         StringBuilder in = new StringBuilder();
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         for (int i = 0; i < sbhIds.size(); i++) {
             if (i > 0) {
                 in.append(',');
@@ -51,7 +58,8 @@ public class SubscriptionBillingHistoryRepository {
                 """
                 SELECT h.subscription_billing_history_id, h.invoice_id, h.billing_run_id
                 FROM client_subscription_billing.subscription_billing_history h
-                WHERE h.subscription_billing_history_id IN ("""
+                WHERE h.application_id = ?::uuid
+                  AND h.subscription_billing_history_id IN ("""
                         + in
                         + """
                 )
@@ -307,9 +315,11 @@ public class SubscriptionBillingHistoryRepository {
               ON cpt.client_payment_transaction_id = h.client_payment_transaction_id
             LEFT JOIN payment_gateway.lu_payment_gateway_transaction_status gts
               ON gts.payment_gateway_transaction_status_id = cpt.payment_gateway_transaction_status_id
-            WHERE h.billing_run_id = ?::uuid
+            WHERE h.application_id = ?::uuid
+              AND h.billing_run_id = ?::uuid
             """);
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         params.add(billingRunId.toString());
         if (stageRunId != null) {
             sql.append(" AND h.stage_run_id = ?::uuid");
@@ -475,10 +485,12 @@ public class SubscriptionBillingHistoryRepository {
                     AND COALESCE(cct.is_active, true) = true
                 WHERE cc.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
             ) ch ON true
-            WHERE i.billing_run_id = ?::uuid
+            WHERE i.application_id = ?::uuid
+              AND i.billing_run_id = ?::uuid
               AND COALESCE(i.is_active, true) = true
             """);
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         params.add(billingRunId.toString());
         appendInvoiceTableSearchFilter(sql, params, search);
         sql.append(" ORDER BY i.created_on DESC NULLS LAST LIMIT ? OFFSET ?");
@@ -516,6 +528,7 @@ public class SubscriptionBillingHistoryRepository {
         }
         StringBuilder inPlaceholders = new StringBuilder();
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         params.add(billingRunId.toString());
         for (int i = 0; i < invoiceIds.size(); i++) {
             if (i > 0) {
@@ -667,7 +680,8 @@ public class SubscriptionBillingHistoryRepository {
                     AND COALESCE(cct.is_active, true) = true
                 WHERE cc.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
             ) ch ON true
-            WHERE i.billing_run_id = ?::uuid
+            WHERE i.application_id = ?::uuid
+              AND i.billing_run_id = ?::uuid
               AND COALESCE(i.is_active, true) = true
               AND i.invoice_id IN ("""
                 + inPlaceholders
@@ -698,6 +712,7 @@ public class SubscriptionBillingHistoryRepository {
         }
         StringBuilder inPlaceholders = new StringBuilder();
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         params.add(billingRunId.toString());
         for (int i = 0; i < invoiceIds.size(); i++) {
             if (i > 0) {
@@ -711,7 +726,8 @@ public class SubscriptionBillingHistoryRepository {
                     """
                     SELECT COUNT(1)
                     FROM transactions.invoice i
-                    WHERE i.billing_run_id = ?::uuid
+                    WHERE i.application_id = ?::uuid
+              AND i.billing_run_id = ?::uuid
                       AND COALESCE(i.is_active, true) = true
                       AND i.invoice_id IN ("""
                             + inPlaceholders
@@ -766,7 +782,8 @@ public class SubscriptionBillingHistoryRepository {
                         AND COALESCE(cct.is_active, true) = true
                     WHERE cc.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
                 ) ch ON true
-                WHERE i.billing_run_id = ?::uuid
+                WHERE i.application_id = ?::uuid
+              AND i.billing_run_id = ?::uuid
                   AND COALESCE(i.is_active, true) = true
                   AND i.invoice_id IN ("""
                         + inPlaceholders
@@ -902,9 +919,11 @@ public class SubscriptionBillingHistoryRepository {
                     AND COALESCE(cct.is_active, true) = true
                 WHERE cc.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
             ) ch ON true
-            WHERE h.billing_run_id = ?::uuid
+            WHERE h.application_id = ?::uuid
+              AND h.billing_run_id = ?::uuid
             """);
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         params.add(billingRunId.toString());
         if (stageRunId != null) {
             sql.append(" AND h.stage_run_id = ?::uuid");
@@ -926,10 +945,12 @@ public class SubscriptionBillingHistoryRepository {
                     """
                     SELECT COUNT(1)
                     FROM transactions.invoice i
-                    WHERE i.billing_run_id = ?::uuid
+                    WHERE i.application_id = ?::uuid
+                      AND i.billing_run_id = ?::uuid
                       AND COALESCE(i.is_active, true) = true
                     """,
                     Integer.class,
+                    requireAppIdStr(),
                     billingRunId.toString());
             return n != null ? n : 0;
         }
@@ -975,7 +996,8 @@ public class SubscriptionBillingHistoryRepository {
                         AND COALESCE(cct.is_active, true) = true
                     WHERE cc.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
                 ) ch ON true
-                WHERE i.billing_run_id = ?::uuid
+                WHERE i.application_id = ?::uuid
+                  AND i.billing_run_id = ?::uuid
                   AND COALESCE(i.is_active, true) = true
                   AND (
                     COALESCE(i.invoice_number, '') ILIKE ?
@@ -991,6 +1013,7 @@ public class SubscriptionBillingHistoryRepository {
                   )
                 """,
                 Integer.class,
+                requireAppIdStr(),
                 billingRunId.toString(),
                 p,
                 p,

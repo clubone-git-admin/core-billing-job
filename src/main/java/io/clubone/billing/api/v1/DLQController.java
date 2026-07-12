@@ -2,10 +2,13 @@ package io.clubone.billing.api.v1;
 
 import io.clubone.billing.api.dto.*;
 import io.clubone.billing.service.DLQService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
@@ -16,6 +19,7 @@ import java.util.UUID;
  */
 @RestController
 @RequestMapping("/api/v1/billing/dlq")
+@Tag(name = "Dead Letter Queue", description = "Billing DLQ list, retry, and resolve")
 public class DLQController {
 
     private static final Logger log = LoggerFactory.getLogger(DLQController.class);
@@ -26,11 +30,8 @@ public class DLQController {
         this.dlqService = dlqService;
     }
 
-    /**
-     * GET /api/v1/billing/dlq
-     * List DLQ items with filtering.
-     */
     @GetMapping
+    @Operation(summary = "List DLQ items")
     public ResponseEntity<PageResponse<DLQItemDto>> listDLQItems(
             @RequestParam(required = false) UUID billingRunId,
             @RequestParam(required = false) UUID locationLevelId,
@@ -84,11 +85,8 @@ public class DLQController {
         return null;
     }
 
-    /**
-     * GET /api/v1/billing/dlq/{dlq_id}
-     * Get a specific DLQ item.
-     */
     @GetMapping("/{dlqId}")
+    @Operation(summary = "Get DLQ item by id")
     public ResponseEntity<DLQItemDto> getDLQItem(@PathVariable UUID dlqId) {
         log.debug("Getting DLQ item: dlqId={}", dlqId);
         
@@ -100,11 +98,9 @@ public class DLQController {
         return ResponseEntity.ok(item);
     }
 
-    /**
-     * POST /api/v1/billing/dlq/{dlq_id}/retry
-     * Retry a DLQ item.
-     */
     @PostMapping("/{dlqId}/retry")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Retry a DLQ item")
     public ResponseEntity<DLQItemDto> retryDLQItem(
             @PathVariable UUID dlqId,
             @Valid @RequestBody Map<String, Object> retryConfig) {
@@ -119,11 +115,9 @@ public class DLQController {
         return ResponseEntity.ok(item);
     }
 
-    /**
-     * PUT /api/v1/billing/dlq/{dlq_id}/resolve
-     * Resolve a DLQ item.
-     */
     @PutMapping("/{dlqId}/resolve")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Resolve a DLQ item")
     public ResponseEntity<DLQItemDto> resolveDLQItem(
             @PathVariable UUID dlqId,
             @Valid @RequestBody Map<String, Object> request) {
@@ -138,11 +132,9 @@ public class DLQController {
         return ResponseEntity.ok(item);
     }
 
-    /**
-     * POST /api/v1/billing/dlq/bulk-retry
-     * Bulk retry DLQ items.
-     */
     @PostMapping("/bulk-retry")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Bulk retry DLQ items")
     public ResponseEntity<Map<String, Object>> bulkRetryDLQItems(
             @Valid @RequestBody Map<String, Object> request) {
         
@@ -152,11 +144,9 @@ public class DLQController {
         return ResponseEntity.ok(result);
     }
 
-    /**
-     * POST /api/v1/billing/dlq/bulk-resolve
-     * Bulk resolve DLQ items.
-     */
     @PostMapping("/bulk-resolve")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Bulk resolve DLQ items")
     public ResponseEntity<Map<String, Object>> bulkResolveDLQItems(
             @Valid @RequestBody Map<String, Object> request) {
         

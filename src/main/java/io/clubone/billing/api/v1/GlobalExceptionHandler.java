@@ -1,6 +1,8 @@
 package io.clubone.billing.api.v1;
 
 import io.clubone.billing.api.dto.ErrorResponse;
+import io.clubone.billing.security.ForbiddenException;
+import io.clubone.billing.security.UnauthorizedException;
 import io.clubone.billing.service.CompareApiException;
 import io.clubone.billing.service.InvoiceGenerationApiException;
 import org.slf4j.Logger;
@@ -23,6 +25,32 @@ import java.util.UUID;
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(UnauthorizedException.class)
+    public ResponseEntity<ErrorResponse> handleUnauthorized(UnauthorizedException e) {
+        log.warn("Unauthorized: {}", e.getMessage());
+        String requestId = UUID.randomUUID().toString();
+        ErrorResponse.ErrorDetail error = new ErrorResponse.ErrorDetail(
+                "UNAUTHORIZED",
+                e.getMessage(),
+                Map.of("request_id", requestId),
+                requestId
+        );
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(new ErrorResponse(error));
+    }
+
+    @ExceptionHandler(ForbiddenException.class)
+    public ResponseEntity<ErrorResponse> handleForbidden(ForbiddenException e) {
+        log.warn("Forbidden: {}", e.getMessage());
+        String requestId = UUID.randomUUID().toString();
+        ErrorResponse.ErrorDetail error = new ErrorResponse.ErrorDetail(
+                "FORBIDDEN",
+                e.getMessage(),
+                Map.of("request_id", requestId),
+                requestId
+        );
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(new ErrorResponse(error));
+    }
 
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<ErrorResponse> handleIllegalArgumentException(IllegalArgumentException e) {

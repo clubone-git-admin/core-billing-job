@@ -1,5 +1,6 @@
 package io.clubone.billing.repo;
 
+import io.clubone.billing.security.AccessContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -21,6 +22,14 @@ public class BillingReportingRepository {
 
     public BillingReportingRepository(@Qualifier("cluboneJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+    }
+
+    private static UUID requireAppId() {
+        return AccessContext.applicationId();
+    }
+
+    private static String requireAppIdStr() {
+        return requireAppId().toString();
     }
 
     public List<Map<String, Object>> billRunSummary(
@@ -94,11 +103,12 @@ public class BillingReportingRepository {
                         + "LEFT JOIN clients.client_role cr ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
                         + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                         + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                        + whereSbhLocation("loc", locationIds);
+                        + whereTenantAndLocation("sbh", "loc", locationIds);
         StringBuilder qWhere = new StringBuilder();
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (UUID u : locationIds) {
                 p.add(u.toString());
@@ -165,6 +175,7 @@ public class BillingReportingRepository {
         countP.add(stageCode);
         countP.add(from);
         countP.add(to);
+        countP.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -225,6 +236,7 @@ public class BillingReportingRepository {
         dataP.add(stageCode);
         dataP.add(from);
         dataP.add(to);
+        dataP.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -296,12 +308,13 @@ public class BillingReportingRepository {
                         + "WHERE (br.due_date IS NULL OR (br.due_date >= ?::date AND br.due_date <= ?::date)) "
                         + "AND sbsa.created_on::date >= ?::date AND sbsa.created_on::date <= ?::date "
                         + "AND COALESCE(sbsa.is_active, true) = true "
-                        + whereSbhLocation("loc", locationIds);
+                        + whereTenantAndLocation("sbs", "loc", locationIds);
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (UUID u : locationIds) {
                 p.add(u.toString());
@@ -356,7 +369,7 @@ public class BillingReportingRepository {
                         + BillingReportSql.SBH_TO_PAYMENT_DIMENSIONS
                         + " "
                         + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                        + whereSbhLocation("loc", locationIds);
+                        + whereTenantAndLocation("sbh", "loc", locationIds);
         String grouped =
                 "SELECT MAX(br.due_date) AS payment_date, "
                         + "MAX(COALESCE(pt.method_type_name, pgw.name)) AS payment_method, "
@@ -375,6 +388,7 @@ public class BillingReportingRepository {
         List<Object> countP = new ArrayList<>();
         countP.add(from);
         countP.add(to);
+        countP.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (UUID u : locationIds) {
                 countP.add(u.toString());
@@ -407,6 +421,7 @@ public class BillingReportingRepository {
         List<Object> dataP = new ArrayList<>();
         dataP.add(from);
         dataP.add(to);
+        dataP.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (UUID u : locationIds) {
                 dataP.add(u.toString());
@@ -486,11 +501,12 @@ public class BillingReportingRepository {
                         + ") ch ON true "
                         + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
                         + "AND (invs.status_name IS NULL OR UPPER(invs.status_name) NOT IN ('PAID', 'VOID', 'CANCELLED')) "
-                        + whereSbhLocation("loc", locationIds);
+                        + whereTenantAndLocation("i", "loc", locationIds);
         StringBuilder qWhere = new StringBuilder();
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (UUID u : locationIds) {
                 p.add(u.toString());
@@ -569,12 +585,13 @@ public class BillingReportingRepository {
                         + "WHERE (br.due_date IS NULL OR (br.due_date >= ?::date AND br.due_date <= ?::date)) "
                         + "AND sbsa.created_on::date >= ?::date AND sbsa.created_on::date <= ?::date "
                         + "AND COALESCE(sbsa.is_active, true) = true "
-                        + whereSbhLocation("loc", locationIds);
+                        + whereTenantAndLocation("sbs", "loc", locationIds);
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (UUID u : locationIds) {
                 p.add(u.toString());
@@ -665,6 +682,7 @@ public class BillingReportingRepository {
         List<Object> countParams = new ArrayList<>();
         countParams.add(from);
         countParams.add(to);
+        countParams.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -755,6 +773,7 @@ public class BillingReportingRepository {
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -781,6 +800,7 @@ public class BillingReportingRepository {
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -899,7 +919,7 @@ public class BillingReportingRepository {
                         + "LEFT JOIN clients.client_role cr ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
                         + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                         + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                        + whereSbhLocation("loc", locationIds);
+                        + whereTenantAndLocation("sbh", "loc", locationIds);
         String sql =
                 "WITH loc_totals AS ( "
                         + "  SELECT COALESCE(loc.location_id::text, 'UNKNOWN') AS location_id, "
@@ -947,7 +967,7 @@ public class BillingReportingRepository {
                         + "LEFT JOIN clients.client_role cr ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
                         + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                         + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                        + whereSbhLocation("loc", locationIds);
+                        + whereTenantAndLocation("sbh", "loc", locationIds);
         return jdbc.queryForMap(sql, buildSbhParamsNoPaging(from, to, locationIds).toArray());
     }
 
@@ -968,7 +988,7 @@ public class BillingReportingRepository {
                         + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                         + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
                         + "AND (invs.status_name IS NULL OR UPPER(invs.status_name) NOT IN ('PAID', 'VOID', 'CANCELLED')) "
-                        + whereSbhLocation("loc", locationIds);
+                        + whereTenantAndLocation("i", "loc", locationIds);
         return jdbc.queryForMap(sql, buildSbhParamsNoPaging(from, to, locationIds).toArray());
     }
 
@@ -1017,6 +1037,7 @@ public class BillingReportingRepository {
         p.add(stageCode);
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -1039,6 +1060,7 @@ public class BillingReportingRepository {
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -1087,6 +1109,7 @@ public class BillingReportingRepository {
         List<Object> cp = new ArrayList<>();
         cp.add(from);
         cp.add(to);
+        cp.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -1153,11 +1176,12 @@ public class BillingReportingRepository {
                         + "LEFT JOIN clients.client_role cr ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
                         + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                         + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                        + whereSbhLocation("loc", locationIds);
+                        + whereTenantAndLocation("sbh", "loc", locationIds);
         String wQ = "";
         List<Object> cp = new ArrayList<>();
         cp.add(from);
         cp.add(to);
+        cp.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (UUID u : locationIds) {
                 cp.add(u.toString());
@@ -1224,6 +1248,7 @@ public class BillingReportingRepository {
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -1276,10 +1301,12 @@ public class BillingReportingRepository {
                         + ") dlq ON true "
                         + "WHERE sis.status_name = 'ACTIVE' "
                         + "AND sbs.billing_date >= ?::date AND sbs.billing_date <= ?::date "
+                        + "AND sbs.application_id = ?::uuid "
                         + "AND sbs.invoice_id IS NULL ";
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             String in = inClausePlaceholders(locationIds.size());
             base += "AND COALESCE(loc.location_id, loc_purchased.location_id) IN (" + in + ") ";
@@ -1375,10 +1402,12 @@ public class BillingReportingRepository {
                         + ") adj ON true "
                         + "WHERE sis.status_name = 'ACTIVE' "
                         + "AND sbs.billing_date >= ?::date AND sbs.billing_date <= ?::date "
+                        + "AND sbs.application_id = ?::uuid "
                         + "AND sbs.invoice_id IS NULL ";
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             String in = inClausePlaceholders(locationIds.size());
             sql += "AND COALESCE(loc.location_id, loc_purchased.location_id) IN (" + in + ") ";
@@ -1434,6 +1463,7 @@ public class BillingReportingRepository {
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -1538,6 +1568,7 @@ public class BillingReportingRepository {
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -1564,7 +1595,7 @@ public class BillingReportingRepository {
                                 + "  ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
                                 + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                                 + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                                + whereSbhLocation("loc", locationIds)
+                                + whereTenantAndLocation("sbh", "loc", locationIds)
                                 + " AND sbh.subscription_instance_id IS NOT NULL "
                                 + "GROUP BY loc.name, loc.location_id ORDER BY 1",
                         buildSbhParamsNoPaging(from, to, locationIds).toArray());
@@ -1589,7 +1620,7 @@ public class BillingReportingRepository {
                                 + "  ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
                                 + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                                 + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                                + whereSbhLocation("loc", locationIds)
+                                + whereTenantAndLocation("sbh", "loc", locationIds)
                                 + " GROUP BY loc.name, loc.location_id ORDER BY 1",
                         buildSbhParamsNoPaging(from, to, locationIds).toArray());
             }
@@ -1607,7 +1638,7 @@ public class BillingReportingRepository {
                                 + "  ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
                                 + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                                 + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                                + whereSbhLocation("loc", locationIds)
+                                + whereTenantAndLocation("sbh", "loc", locationIds)
                                 + " GROUP BY loc.name, loc.location_id ORDER BY 1",
                         buildSbhParamsNoPaging(from, to, locationIds).toArray());
             }
@@ -1627,7 +1658,7 @@ public class BillingReportingRepository {
                             + "  ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
                             + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                             + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                            + whereSbhLocation("loc", locationIds)
+                            + whereTenantAndLocation("sbh", "loc", locationIds)
                             + " AND sbh.subscription_instance_id IS NOT NULL "
                             + "GROUP BY 1 ORDER BY 1",
                     buildMetricParams(tr, from, to, locationIds).toArray());
@@ -1651,7 +1682,7 @@ public class BillingReportingRepository {
                                 + "  ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
                                 + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                                 + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                                + whereSbhLocation("loc", locationIds)
+                                + whereTenantAndLocation("sbh", "loc", locationIds)
                                 + " GROUP BY 1 ORDER BY 1",
                         buildMetricParams(tr, from, to, locationIds).toArray());
             }
@@ -1671,7 +1702,7 @@ public class BillingReportingRepository {
                             + "  ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
                             + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                             + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                            + whereSbhLocation("loc", locationIds)
+                            + whereTenantAndLocation("sbh", "loc", locationIds)
                             + " GROUP BY 1 ORDER BY 1",
                     buildMetricParams(tr, from, to, locationIds).toArray());
         }
@@ -1691,7 +1722,7 @@ public class BillingReportingRepository {
                                 + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                                 + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
                                 + "AND (invs.status_name IS NULL OR UPPER(invs.status_name) NOT IN ('PAID', 'VOID', 'CANCELLED')) "
-                                + whereSbhLocation("loc", locationIds)
+                                + whereTenantAndLocation("i", "loc", locationIds)
                                 + " GROUP BY 1 ORDER BY 1",
                         buildMetricParams(tr, from, to, locationIds).toArray());
             }
@@ -1711,7 +1742,7 @@ public class BillingReportingRepository {
                         + "  ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
                         + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
                         + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                        + whereSbhLocation("loc", locationIds)
+                        + whereTenantAndLocation("sbh", "loc", locationIds)
                         + " GROUP BY 1 ORDER BY 1",
                 buildMetricParams(tr, from, to, locationIds).toArray());
     }
@@ -1727,6 +1758,7 @@ public class BillingReportingRepository {
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (UUID u : locationIds) {
                 p.add(u.toString());
@@ -1740,6 +1772,7 @@ public class BillingReportingRepository {
         List<Object> p = new ArrayList<>();
         p.add(from);
         p.add(to);
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             for (int pass = 0; pass < 2; pass++) {
                 for (UUID u : locationIds) {
@@ -1754,10 +1787,10 @@ public class BillingReportingRepository {
 
     private String whereRunTouchesLocations(String br, List<UUID> locationIds) {
         if (locationIds == null || locationIds.isEmpty()) {
-            return "";
+            return "AND " + br + ".application_id = ?::uuid ";
         }
         String in = inClausePlaceholders(locationIds.size());
-        return "AND ("
+        return "AND " + br + ".application_id = ?::uuid AND ("
                 + br
                 + ".location_id IN ("
                 + in
@@ -1769,12 +1802,14 @@ public class BillingReportingRepository {
                 + "))) ";
     }
 
-    private String whereSbhLocation(String loc, List<UUID> locationIds) {
+    private String whereTenantAndLocation(
+            String tenantAlias, String loc, List<UUID> locationIds) {
         if (locationIds == null || locationIds.isEmpty()) {
-            return "";
+            return "AND " + tenantAlias + ".application_id = ?::uuid ";
         }
         String in = inClausePlaceholders(locationIds.size());
-        return "AND " + loc + ".location_id IN (" + in + ") ";
+        return "AND " + tenantAlias + ".application_id = ?::uuid "
+                + "AND " + loc + ".location_id IN (" + in + ") ";
     }
 
     private String inClausePlaceholders(int n) {

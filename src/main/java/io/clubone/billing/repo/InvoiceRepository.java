@@ -1,5 +1,6 @@
 package io.clubone.billing.repo;
 
+import io.clubone.billing.security.AccessContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -23,6 +24,14 @@ public class InvoiceRepository {
 
     public InvoiceRepository(@Qualifier("cluboneJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+    }
+
+    private static UUID requireAppId() {
+        return AccessContext.applicationId();
+    }
+
+    private static String requireAppIdStr() {
+        return requireAppId().toString();
     }
 
     /**
@@ -66,11 +75,13 @@ public class InvoiceRepository {
                 SET invoice_status_id = ?::uuid,
                     modified_on = now()
                 WHERE i.billing_run_id = ?::uuid
+                  AND i.application_id = ?::uuid
                   AND COALESCE(i.is_active, true) = true
                   AND i.invoice_status_id = ?::uuid
                 """,
                 dueId.get().toString(),
                 billingRunId.toString(),
+                requireAppIdStr(),
                 pendingId.get().toString());
     }
 
@@ -80,14 +91,16 @@ public class InvoiceRepository {
     public List<UUID> findInvoiceIdsByBillingRunId(UUID billingRunId) {
         return jdbc.query(
                 """
-                SELECT invoice_id
-                FROM transactions.invoice
-                WHERE billing_run_id = ?::uuid
-                  AND COALESCE(is_active, true) = true
-                ORDER BY created_on ASC NULLS LAST
+                SELECT i.invoice_id
+                FROM transactions.invoice i
+                WHERE i.billing_run_id = ?::uuid
+                  AND i.application_id = ?::uuid
+                  AND COALESCE(i.is_active, true) = true
+                ORDER BY i.created_on ASC NULLS LAST
                 """,
                 (rs, rowNum) -> (UUID) rs.getObject("invoice_id"),
-                billingRunId.toString());
+                billingRunId.toString(),
+                requireAppIdStr());
     }
 
     /**
@@ -106,11 +119,13 @@ public class InvoiceRepository {
                     FROM transactions.invoice i
                     INNER JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
                     WHERE i.billing_run_id = ?::uuid
+                      AND i.application_id = ?::uuid
                       AND COALESCE(i.is_active, true) = true
                       AND UPPER(TRIM(COALESCE(lis.status_name, ''))) IN ('PENDING', 'DUE')
                     """,
                     BigDecimal.class,
-                    billingRunId.toString());
+                    billingRunId.toString(),
+                    requireAppIdStr());
             return v != null ? v : BigDecimal.ZERO;
         } catch (DataAccessException e) {
             return BigDecimal.ZERO;
@@ -131,11 +146,13 @@ public class InvoiceRepository {
                     FROM transactions.invoice i
                     INNER JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
                     WHERE i.billing_run_id = ?::uuid
+                      AND i.application_id = ?::uuid
                       AND COALESCE(i.is_active, true) = true
                       AND UPPER(TRIM(COALESCE(lis.status_name, ''))) IN ('PENDING', 'DUE')
                     """,
                     Integer.class,
-                    billingRunId.toString());
+                    billingRunId.toString(),
+                    requireAppIdStr());
             return n != null ? n : 0;
         } catch (DataAccessException e) {
             return 0;
@@ -156,11 +173,13 @@ public class InvoiceRepository {
                     FROM transactions.invoice i
                     INNER JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
                     WHERE i.billing_run_id = ?::uuid
+                      AND i.application_id = ?::uuid
                       AND COALESCE(i.is_active, true) = true
                       AND UPPER(TRIM(COALESCE(lis.status_name, ''))) = 'VOID'
                     """,
                     BigDecimal.class,
-                    billingRunId.toString());
+                    billingRunId.toString(),
+                    requireAppIdStr());
             return v != null ? v : BigDecimal.ZERO;
         } catch (DataAccessException e) {
             return BigDecimal.ZERO;
@@ -174,13 +193,15 @@ public class InvoiceRepository {
         try {
             return Optional.ofNullable(jdbc.query(
                     """
-                    SELECT billing_run_id
-                    FROM transactions.invoice
-                    WHERE invoice_id = ?::uuid
-                      AND COALESCE(is_active, true) = true
+                    SELECT i.billing_run_id
+                    FROM transactions.invoice i
+                    WHERE i.invoice_id = ?::uuid
+                      AND i.application_id = ?::uuid
+                      AND COALESCE(i.is_active, true) = true
                     """,
                     rs -> rs.next() ? (UUID) rs.getObject("billing_run_id") : null,
-                    invoiceId.toString()));
+                    invoiceId.toString(),
+                    requireAppIdStr()));
         } catch (DataAccessException e) {
             return Optional.empty();
         }
@@ -200,10 +221,12 @@ public class InvoiceRepository {
                     FROM transactions.invoice i
                     JOIN transactions.lu_invoice_status lis ON lis.invoice_status_id = i.invoice_status_id
                     WHERE i.invoice_id = ?::uuid
+                      AND i.application_id = ?::uuid
                       AND COALESCE(i.is_active, true) = true
                     """,
                     rs -> rs.next() ? rs.getString("status_name") : null,
-                    invoiceId.toString()));
+                    invoiceId.toString(),
+                    requireAppIdStr()));
         } catch (DataAccessException e) {
             return Optional.empty();
         }
@@ -215,9 +238,15 @@ public class InvoiceRepository {
         }
         try {
             Timestamp ts = jdbc.query(
-                    "SELECT modified_on FROM transactions.invoice WHERE invoice_id = ?::uuid",
+                    """
+                    SELECT i.modified_on
+                    FROM transactions.invoice i
+                    WHERE i.invoice_id = ?::uuid
+                      AND i.application_id = ?::uuid
+                    """,
                     rs -> rs.next() ? rs.getTimestamp("modified_on") : null,
-                    invoiceId.toString());
+                    invoiceId.toString(),
+                    requireAppIdStr());
             if (ts == null) {
                 return Optional.empty();
             }
@@ -243,12 +272,14 @@ public class InvoiceRepository {
                     SET invoice_status_id = ?::uuid, modified_on = now()
                     FROM transactions.lu_invoice_status cur
                     WHERE i.invoice_id = ?::uuid
+                      AND i.application_id = ?::uuid
                       AND i.invoice_status_id = cur.invoice_status_id
                       AND COALESCE(i.is_active, true) = true
                       AND UPPER(TRIM(COALESCE(cur.status_name, ''))) <> UPPER(TRIM(?))
                     """,
                     newStatusId.toString(),
                     invoiceId.toString(),
+                    requireAppIdStr(),
                     notWhenCurrentStatus);
         } catch (DataAccessException e) {
             return 0;
@@ -270,12 +301,14 @@ public class InvoiceRepository {
                     SET invoice_status_id = ?::uuid, modified_on = now()
                     FROM transactions.lu_invoice_status cur
                     WHERE i.invoice_id = ?::uuid
+                      AND i.application_id = ?::uuid
                       AND i.invoice_status_id = cur.invoice_status_id
                       AND COALESCE(i.is_active, true) = true
                       AND UPPER(TRIM(COALESCE(cur.status_name, ''))) = UPPER(TRIM(?))
                     """,
                     newStatusId.toString(),
                     invoiceId.toString(),
+                    requireAppIdStr(),
                     whenCurrentStatus);
         } catch (DataAccessException e) {
             return 0;

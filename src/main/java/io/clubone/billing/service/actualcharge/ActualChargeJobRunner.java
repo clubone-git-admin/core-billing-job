@@ -20,13 +20,14 @@ import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -48,6 +49,7 @@ public class ActualChargeJobRunner {
     private final PaymentService livePaymentService;
     private final int pendingRetryGraceMinutes;
     private final int pendingStuckThresholdMinutes;
+    private final int invoicePageSize;
 
     public ActualChargeJobRunner(
             StageRunRepository stageRunRepository,
@@ -57,6 +59,7 @@ public class ActualChargeJobRunner {
             BillingRepository billingRepository,
             @Value("${clubone.billing.actual-charge.pending.retry-grace-minutes:30}") int pendingRetryGraceMinutes,
             @Value("${clubone.billing.actual-charge.pending.stuck-threshold-minutes:30}") int pendingStuckThresholdMinutes,
+            @Value("${clubone.billing.charge.invoice-page-size:500}") int invoicePageSize,
             PaymentServiceFactory paymentServiceFactory) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
@@ -65,10 +68,14 @@ public class ActualChargeJobRunner {
         this.billingRepository = billingRepository;
         this.pendingRetryGraceMinutes = Math.max(1, pendingRetryGraceMinutes);
         this.pendingStuckThresholdMinutes = Math.max(1, pendingStuckThresholdMinutes);
+        this.invoicePageSize = Math.max(50, Math.min(invoicePageSize, 2_000));
         this.livePaymentService = paymentServiceFactory.get(RunMode.LIVE);
     }
 
-    @Transactional
+    /**
+     * Not {@code @Transactional}: payment HTTP calls must not hold a DB connection.
+     * Per-invoice writes use repository auto-commit / short transactions.
+     */
     public void process(UUID stageRunId) {
         MDC.put(MDC_STAGE_RUN, stageRunId.toString());
         try {
@@ -134,26 +141,29 @@ public class ActualChargeJobRunner {
                 billingRun.dueDate(),
                 billingRun.locationId());
 
-        List<MockInvoiceRow> invoices = mockChargeRepository.findInvoicesForBillingRun(billingRunId);
-        int rawCandidates = invoices.size();
+        Set<String> subscriptionFilter = null;
         if (s.summaryJson() != null) {
             Object opt = s.summaryJson().get("subscription_instance_ids");
             if (opt instanceof List<?> ids && !ids.isEmpty()) {
+                subscriptionFilter = new HashSet<>();
+                for (Object id : ids) {
+                    if (id != null) {
+                        subscriptionFilter.add(id.toString());
+                    }
+                }
                 log.info(
                         "actual-charge job: applying subscription_instance_ids filter filterSize={}",
-                        ids.size());
-                invoices = invoices.stream()
-                        .filter(r -> r.subscriptionInstanceId() != null && ids.stream().anyMatch(
-                                id -> id != null && r.subscriptionInstanceId().toString().equals(id.toString())))
-                        .toList();
+                        subscriptionFilter.size());
             }
         }
+
+        int rawCandidates = mockChargeRepository.countInvoicesForBillingRun(billingRunId);
         log.info(
-                "actual-charge job: invoice candidates rawCount={} afterFilter={} billingRunId={}",
+                "actual-charge job: invoice candidates totalCount={} pageSize={} billingRunId={}",
                 rawCandidates,
-                invoices.size(),
+                invoicePageSize,
                 billingRunId);
-        if (invoices.isEmpty()) {
+        if (rawCandidates == 0) {
             log.warn(
                     "actual-charge job: no invoice rows to process (check transactions.invoice for billing_run_id and optional subscription_instance filter)");
         }
@@ -162,6 +172,7 @@ public class ActualChargeJobRunner {
         int pending = 0;
         int failed = 0;
         int skipped = 0;
+        int processedCount = 0;
         BigDecimal totalSelectedAmount = BigDecimal.ZERO;
         BigDecimal chargedAmount = BigDecimal.ZERO;
         BigDecimal pendingAmount = BigDecimal.ZERO;
@@ -182,172 +193,162 @@ public class ActualChargeJobRunner {
                 statusPayFail,
                 statusErr);
 
+        int offset = 0;
         int idx = 0;
-        for (MockInvoiceRow row : invoices) {
-            idx++;
-            BigDecimal amt = row.totalAmount() != null ? row.totalAmount() : BigDecimal.ZERO;
-            totalSelectedAmount = totalSelectedAmount.add(amt);
-            LoggingUtils.setInvoiceId(row.invoiceId());
-
-            if (actualChargeRepository.hasSuccessfulLiveChargeForInvoiceAndBillingRun(billingRunId, row.invoiceId())) {
-                skipped++;
-                log.info(
-                        "actual-charge invoice {}/{}: SKIP (idempotency) — latest live subscription_billing_history for this "
-                                + "billing_run_id + invoice_id is LIVE_FINALIZED/LIVE_SUCCESS; no second capture. invoiceId={} billingRunId={} amount={}",
-                        idx,
-                        invoices.size(),
-                        row.invoiceId(),
-                        billingRunId,
-                        amt);
-                continue;
+        while (true) {
+            List<MockInvoiceRow> page =
+                    mockChargeRepository.findInvoicesForBillingRun(billingRunId, invoicePageSize, offset);
+            if (page.isEmpty()) {
+                break;
             }
-            if (actualChargeRepository.hasFreshPendingLiveChargeForInvoiceAndBillingRun(
-                    billingRunId, row.invoiceId(), pendingRetryGraceMinutes)) {
-                skipped++;
-                log.info(
-                        "actual-charge invoice {}/{}: SKIP (pending-idempotency) — latest live status is PENDING_CAPTURE and within grace window={}m; "
-                                + "retry is blocked to avoid duplicate capture. invoiceId={} billingRunId={} amount={}",
-                        idx,
-                        invoices.size(),
-                        pendingRetryGraceMinutes,
-                        row.invoiceId(),
-                        billingRunId,
-                        amt);
-                continue;
+            int rawPageSize = page.size();
+            if (subscriptionFilter != null) {
+                Set<String> filter = subscriptionFilter;
+                page = page.stream()
+                        .filter(r -> r.subscriptionInstanceId() != null
+                                && filter.contains(r.subscriptionInstanceId().toString()))
+                        .toList();
             }
-            if (row.subscriptionInstanceId() == null || row.clientRoleId() == null) {
-                skipped++;
-                log.warn(
-                        "actual-charge invoice {}/{}: SKIP — missing subscription_instance_id or client_role_id on invoice row invoiceId={} "
-                                + "subscriptionInstanceId={} clientRoleId={}",
-                        idx,
-                        invoices.size(),
-                        row.invoiceId(),
-                        row.subscriptionInstanceId(),
-                        row.clientRoleId());
-                continue;
-            }
+            log.info(
+                    "actual-charge job: processing page offset={} rawPageRows={} afterFilter={} billingRunId={}",
+                    offset,
+                    rawPageSize,
+                    page.size(),
+                    billingRunId);
 
-            var pm = actualChargeRepository.findClientPaymentMethodIdForSubscriptionInstance(row.subscriptionInstanceId());
-            if (pm.isEmpty()) {
-                failed++;
-                failedAmount = failedAmount.add(amt);
-                log.warn(
-                        "actual-charge invoice {}/{}: FAIL (data) — no client_payment_method_id for subscription_instance_id={} invoiceId={}",
-                        idx,
-                        invoices.size(),
-                        row.subscriptionInstanceId(),
-                        row.invoiceId());
-                insertFailureRow(
-                        stageRunId,
-                        billingRunId,
-                        row,
-                        statusErr,
-                        "client_payment_method_id not found for subscription");
-                continue;
-            }
+            for (MockInvoiceRow row : page) {
+                idx++;
+                processedCount++;
+                BigDecimal amt = row.totalAmount() != null ? row.totalAmount() : BigDecimal.ZERO;
+                totalSelectedAmount = totalSelectedAmount.add(amt);
+                LoggingUtils.setInvoiceId(row.invoiceId());
 
-            String currency = row.invoiceCurrencyCode() != null && !row.invoiceCurrencyCode().isBlank()
-                    ? row.invoiceCurrencyCode()
-                    : "INR";
-            long amountMinor = amt.multiply(BigDecimal.valueOf(100)).setScale(0, RoundingMode.HALF_UP).longValue();
-
-            try {
-                log.info(
-                        "actual-charge invoice {}/{}: calling PaymentService(LIVE).billInvoiceRecurring invoiceId={} "
-                                + "clientRoleId={} clientPaymentMethodId={} amountMinor={} currency={} totalAmount={}",
-                        idx,
-                        invoices.size(),
-                        row.invoiceId(),
-                        row.clientRoleId(),
-                        pm.get(),
-                        amountMinor,
-                        currency,
-                        amt);
-                PaymentResult pr = livePaymentService.billInvoiceRecurring(
-                        row.invoiceId(), row.clientRoleId(), pm.get(), amountMinor, currency);
-                if (pr.isSuccess()) {
+                if (actualChargeRepository.hasSuccessfulLiveChargeForInvoiceAndBillingRun(billingRunId, row.invoiceId())) {
+                    skipped++;
                     log.info(
-                            "actual-charge invoice {}/{}: payment OK invoiceId={} gatewayRef={} clientPaymentIntentId={} clientPaymentTransactionId={}",
+                            "actual-charge invoice {}: SKIP (idempotency) invoiceId={} billingRunId={} amount={}",
                             idx,
-                            invoices.size(),
                             row.invoiceId(),
-                            pr.getGatewayRef(),
-                            pr.getClientPaymentIntentId(),
-                            pr.getClientPaymentTransactionId());
-                    actualChargeRepository.insertLiveChargeHistoryRow(
-                            row.subscriptionInstanceId(),
                             billingRunId,
-                            stageRunId,
-                            row.invoiceId(),
-                            statusOk,
-                            null,
-                            row.subTotal(),
-                            row.taxAmount(),
-                            row.discountAmount(),
-                            row.totalAmount(),
-                            pr.getClientPaymentIntentId(),
-                            pr.getClientPaymentTransactionId());
-                    success++;
-                    chargedAmount = chargedAmount.add(amt);
-                } else if (isPendingGatewayResult(pr)) {
+                            amt);
+                    continue;
+                }
+                if (actualChargeRepository.hasFreshPendingLiveChargeForInvoiceAndBillingRun(
+                        billingRunId, row.invoiceId(), pendingRetryGraceMinutes)) {
+                    skipped++;
                     log.info(
-                            "actual-charge invoice {}/{}: payment PENDING invoiceId={} gatewayStatus={} intentId={} txnId={}",
+                            "actual-charge invoice {}: SKIP (pending-idempotency) grace={}m invoiceId={} amount={}",
                             idx,
-                            invoices.size(),
+                            pendingRetryGraceMinutes,
                             row.invoiceId(),
-                            pr.getFailureReason(),
-                            pr.getClientPaymentIntentId(),
-                            pr.getClientPaymentTransactionId());
-                    actualChargeRepository.insertLiveChargeHistoryRow(
-                            row.subscriptionInstanceId(),
-                            billingRunId,
-                            stageRunId,
-                            row.invoiceId(),
-                            statusPendingCapture,
-                            null,
-                            row.subTotal(),
-                            row.taxAmount(),
-                            row.discountAmount(),
-                            row.totalAmount(),
-                            pr.getClientPaymentIntentId(),
-                            pr.getClientPaymentTransactionId());
-                    pending++;
-                    pendingAmount = pendingAmount.add(amt);
-                } else {
+                            amt);
+                    continue;
+                }
+                if (row.subscriptionInstanceId() == null || row.clientRoleId() == null) {
+                    skipped++;
                     log.warn(
-                            "actual-charge invoice {}/{}: payment FAILED invoiceId={} reason={}",
+                            "actual-charge invoice {}: SKIP — missing subscription_instance_id or client_role_id invoiceId={}",
                             idx,
-                            invoices.size(),
+                            row.invoiceId());
+                    continue;
+                }
+
+                var pm = actualChargeRepository.findClientPaymentMethodIdForSubscriptionInstance(row.subscriptionInstanceId());
+                if (pm.isEmpty()) {
+                    failed++;
+                    failedAmount = failedAmount.add(amt);
+                    log.warn(
+                            "actual-charge invoice {}: FAIL (data) — no client_payment_method_id subscriptionInstanceId={} invoiceId={}",
+                            idx,
+                            row.subscriptionInstanceId(),
+                            row.invoiceId());
+                    insertFailureRow(
+                            stageRunId,
+                            billingRunId,
+                            row,
+                            statusErr,
+                            "client_payment_method_id not found for subscription");
+                    continue;
+                }
+
+                String currency = row.invoiceCurrencyCode() != null && !row.invoiceCurrencyCode().isBlank()
+                        ? row.invoiceCurrencyCode()
+                        : "INR";
+                long amountMinor = amt.multiply(BigDecimal.valueOf(100)).setScale(0, RoundingMode.HALF_UP).longValue();
+
+                try {
+                    log.info(
+                            "actual-charge invoice {}: calling PaymentService(LIVE) invoiceId={} amountMinor={} currency={}",
+                            idx,
                             row.invoiceId(),
-                            pr.getFailureReason());
+                            amountMinor,
+                            currency);
+                    PaymentResult pr = livePaymentService.billInvoiceRecurring(
+                            row.invoiceId(), row.clientRoleId(), pm.get(), amountMinor, currency);
+                    if (pr.isSuccess()) {
+                        actualChargeRepository.insertLiveChargeHistoryRow(
+                                row.subscriptionInstanceId(),
+                                billingRunId,
+                                stageRunId,
+                                row.invoiceId(),
+                                statusOk,
+                                null,
+                                row.subTotal(),
+                                row.taxAmount(),
+                                row.discountAmount(),
+                                row.totalAmount(),
+                                pr.getClientPaymentIntentId(),
+                                pr.getClientPaymentTransactionId());
+                        success++;
+                        chargedAmount = chargedAmount.add(amt);
+                    } else if (isPendingGatewayResult(pr)) {
+                        actualChargeRepository.insertLiveChargeHistoryRow(
+                                row.subscriptionInstanceId(),
+                                billingRunId,
+                                stageRunId,
+                                row.invoiceId(),
+                                statusPendingCapture,
+                                null,
+                                row.subTotal(),
+                                row.taxAmount(),
+                                row.discountAmount(),
+                                row.totalAmount(),
+                                pr.getClientPaymentIntentId(),
+                                pr.getClientPaymentTransactionId());
+                        pending++;
+                        pendingAmount = pendingAmount.add(amt);
+                    } else {
+                        insertFailureRow(
+                                stageRunId,
+                                billingRunId,
+                                row,
+                                statusPayFail,
+                                pr.getFailureReason() != null ? pr.getFailureReason() : "payment failed");
+                        failed++;
+                        failedAmount = failedAmount.add(amt);
+                    }
+                } catch (Exception ex) {
+                    log.warn(
+                            "actual-charge invoice {}: payment EXCEPTION invoiceId={}",
+                            idx,
+                            row.invoiceId(),
+                            ex);
                     insertFailureRow(
                             stageRunId,
                             billingRunId,
                             row,
                             statusPayFail,
-                            pr.getFailureReason() != null ? pr.getFailureReason() : "payment failed");
+                            ex.getMessage() != null ? ex.getMessage() : "payment exception");
                     failed++;
                     failedAmount = failedAmount.add(amt);
+                } finally {
+                    MDC.remove("invoiceId");
                 }
-            } catch (Exception ex) {
-                log.warn(
-                        "actual-charge invoice {}/{}: payment EXCEPTION invoiceId={} billingRunId={}",
-                        idx,
-                        invoices.size(),
-                        row.invoiceId(),
-                        billingRunId,
-                        ex);
-                insertFailureRow(
-                        stageRunId,
-                        billingRunId,
-                        row,
-                        statusPayFail,
-                        ex.getMessage() != null ? ex.getMessage() : "payment exception");
-                failed++;
-                failedAmount = failedAmount.add(amt);
-            } finally {
-                MDC.remove("invoiceId");
+            }
+
+            offset += invoicePageSize;
+            if (rawPageSize < invoicePageSize) {
+                break;
             }
         }
 
@@ -355,8 +356,8 @@ public class ActualChargeJobRunner {
         if (s.summaryJson() != null) {
             merged.putAll(s.summaryJson());
         }
-        merged.put("total_selected", invoices.size());
-        merged.put("totalSelected", invoices.size());
+        merged.put("total_selected", processedCount);
+        merged.put("totalSelected", processedCount);
         merged.put("success_count", success);
         merged.put("successCount", success);
         merged.put("pending_count", pending);
@@ -392,7 +393,7 @@ public class ActualChargeJobRunner {
                         + "totalSelected={} successCount={} pendingCount={} failedCount={} skippedCount={} totalAmountSelected={} chargedAmount={} pendingAmount={} failedAmount={} pendingAgeP95s={} stuckPendingCount={}",
                 stageRunId,
                 billingRunId,
-                invoices.size(),
+                processedCount,
                 success,
                 pending,
                 failed,

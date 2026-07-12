@@ -2,10 +2,13 @@ package io.clubone.billing.api.v1;
 
 import io.clubone.billing.api.dto.*;
 import io.clubone.billing.service.ApprovalService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -17,6 +20,7 @@ import java.util.UUID;
  */
 @RestController
 @RequestMapping("/api/v1/billing/runs/{billingRunId}/approvals")
+@Tag(name = "Approval Workflow", description = "Billing run approve / reject workflow")
 public class ApprovalWorkflowController {
 
     private static final Logger log = LoggerFactory.getLogger(ApprovalWorkflowController.class);
@@ -27,11 +31,8 @@ public class ApprovalWorkflowController {
         this.approvalService = approvalService;
     }
 
-    /**
-     * GET /api/v1/billing/runs/{billing_run_id}/approvals
-     * List all approvals for a billing run.
-     */
     @GetMapping
+    @Operation(summary = "List approvals for a billing run")
     public ResponseEntity<List<ApprovalDto>> listApprovals(@PathVariable UUID billingRunId) {
         log.debug("Listing approvals for billing run: billingRunId={}", billingRunId);
         
@@ -39,11 +40,9 @@ public class ApprovalWorkflowController {
         return ResponseEntity.ok(approvals);
     }
 
-    /**
-     * POST /api/v1/billing/runs/{billing_run_id}/approve
-     * Approve a billing run.
-     */
     @PostMapping("/approve")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Approve a billing run")
     public ResponseEntity<BillingRunDto> approveBillingRun(
             @PathVariable UUID billingRunId,
             @Valid @RequestBody ApproveBillingRunRequest request) {
@@ -59,11 +58,9 @@ public class ApprovalWorkflowController {
         return ResponseEntity.ok(billingRun);
     }
 
-    /**
-     * POST /api/v1/billing/runs/{billing_run_id}/reject
-     * Reject a billing run.
-     */
     @PostMapping("/reject")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Reject a billing run")
     public ResponseEntity<BillingRunDto> rejectBillingRun(
             @PathVariable UUID billingRunId,
             @Valid @RequestBody RejectBillingRunRequest request) {
@@ -79,11 +76,8 @@ public class ApprovalWorkflowController {
         return ResponseEntity.ok(billingRun);
     }
 
-    /**
-     * GET /api/v1/billing/approvals/pending
-     * List pending approvals.
-     */
     @GetMapping("/pending")
+    @Operation(summary = "List pending approvals")
     public ResponseEntity<PageResponse<BillingRunDto>> listPendingApprovals(
             @RequestParam(required = false) String approverRole,
             @RequestParam(required = false) Integer approvalLevel,

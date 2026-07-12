@@ -192,7 +192,17 @@ public class S3Service {
                     .key(key)
                     .build();
             ResponseInputStream<GetObjectResponse> response = s3Client.getObject(getRequest);
+            long contentLength = response.response().contentLength();
+            final long maxBytes = 32L * 1024 * 1024; // 32MB hard cap — prevents OOM on huge previews
+            if (contentLength > maxBytes) {
+                throw new IllegalStateException(
+                        "S3 object too large to load into memory: path=" + s3Path + " size=" + contentLength);
+            }
             byte[] bytes = response.readAllBytes();
+            if (bytes.length > maxBytes) {
+                throw new IllegalStateException(
+                        "S3 object too large to load into memory: path=" + s3Path + " size=" + bytes.length);
+            }
             return new String(bytes, StandardCharsets.UTF_8);
         } catch (S3Exception e) {
             log.error("Failed to download from S3: path={}, error={}", s3Path, e.getMessage(), e);

@@ -9,7 +9,6 @@ import io.clubone.billing.repo.StageRunRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -61,7 +60,10 @@ public class InvoiceGenerationJobRunner {
         this.invoiceGenerationStageDlqSummaryService = invoiceGenerationStageDlqSummaryService;
     }
 
-    @Transactional
+    /**
+     * Not {@code @Transactional}: long draft generation must not hold one connection for the whole run.
+     * Per-line writes rely on repository / processor short transactions.
+     */
     public void process(UUID stageRunId) {
         log.info("Invoice generation job starting: stageRunId={}", stageRunId);
         StageRunDto s = stageRunRepository.findById(stageRunId);

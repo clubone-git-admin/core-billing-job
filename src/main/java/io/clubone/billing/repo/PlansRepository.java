@@ -1,5 +1,6 @@
 package io.clubone.billing.repo;
 
+import io.clubone.billing.security.AccessContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -59,6 +60,14 @@ public class PlansRepository {
         this.jdbc = jdbc;
     }
 
+    private static UUID requireAppId() {
+        return AccessContext.applicationId();
+    }
+
+    private static String requireAppIdStr() {
+        return requireAppId().toString();
+    }
+
     /**
      * Find subscription plans with filtering.
      */
@@ -92,9 +101,10 @@ public class PlansRepository {
                 loc.name AS location_name
             """);
         sql.append(PLAN_SELECT_FROM);
-        sql.append("WHERE 1=1\n");
+        sql.append("WHERE sp.application_id = ?::uuid\n");
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
 
         if (isActive != null) {
             sql.append(" AND sp.is_active = ?");
@@ -132,10 +142,11 @@ public class PlansRepository {
         StringBuilder sql = new StringBuilder("""
             SELECT COUNT(1)
             FROM client_subscription_billing.subscription_plan sp
-            WHERE 1=1
+            WHERE sp.application_id = ?::uuid
             """);
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
 
         if (isActive != null) {
             sql.append(" AND sp.is_active = ?");
@@ -196,9 +207,11 @@ public class PlansRepository {
                 + PLAN_SELECT_FROM
                 + """
             WHERE sp.subscription_plan_id = ?::uuid
+              AND sp.application_id = ?::uuid
             """;
 
-        List<Map<String, Object>> results = jdbc.queryForList(sql, subscriptionPlanId.toString());
+        List<Map<String, Object>> results =
+                jdbc.queryForList(sql, subscriptionPlanId.toString(), requireAppIdStr());
         return results.isEmpty() ? null : results.get(0);
     }
 
@@ -217,6 +230,12 @@ public class PlansRepository {
             JOIN client_subscription_billing.subscription_purchase_snapshot_cycle_price pscp
                 ON pscp.subscription_purchase_snapshot_id = sps.subscription_purchase_snapshot_id
             WHERE sps.subscription_plan_id = ?::uuid
+              AND EXISTS (
+                  SELECT 1
+                  FROM client_subscription_billing.subscription_plan sp
+                  WHERE sp.subscription_plan_id = sps.subscription_plan_id
+                    AND sp.application_id = ?::uuid
+              )
               AND sps.subscription_purchase_snapshot_id = (
                   SELECT sps2.subscription_purchase_snapshot_id
                   FROM client_subscription_billing.subscription_purchase_snapshot sps2
@@ -228,7 +247,7 @@ public class PlansRepository {
             """;
 
         String id = subscriptionPlanId.toString();
-        return jdbc.queryForList(sql, id, id);
+        return jdbc.queryForList(sql, id, requireAppIdStr(), id);
     }
 
     /**
@@ -247,6 +266,12 @@ public class PlansRepository {
                 ON pspe.subscription_purchase_snapshot_id = sps.subscription_purchase_snapshot_id
             JOIN billing_config.entitlement_mode em ON em.entitlement_mode_id = pspe.entitlement_mode_id
             WHERE sps.subscription_plan_id = ?::uuid
+              AND EXISTS (
+                  SELECT 1
+                  FROM client_subscription_billing.subscription_plan sp
+                  WHERE sp.subscription_plan_id = sps.subscription_plan_id
+                    AND sp.application_id = ?::uuid
+              )
               AND sps.subscription_purchase_snapshot_id = (
                   SELECT sps2.subscription_purchase_snapshot_id
                   FROM client_subscription_billing.subscription_purchase_snapshot sps2
@@ -257,7 +282,7 @@ public class PlansRepository {
             """;
 
         String id = subscriptionPlanId.toString();
-        return jdbc.queryForList(sql, id, id);
+        return jdbc.queryForList(sql, id, requireAppIdStr(), id);
     }
 
     /**
@@ -270,10 +295,12 @@ public class PlansRepository {
             JOIN billing_config.subscription_instance_status sis 
                 ON sis.subscription_instance_status_id = si.subscription_instance_status_id
             WHERE si.subscription_plan_id = ?::uuid
-            AND sis.status_name = 'ACTIVE'
+              AND si.application_id = ?::uuid
+              AND sis.status_name = 'ACTIVE'
             """;
 
-        return jdbc.queryForObject(sql, Integer.class, subscriptionPlanId.toString());
+        return jdbc.queryForObject(
+                sql, Integer.class, subscriptionPlanId.toString(), requireAppIdStr());
     }
 
     /**
@@ -294,10 +321,12 @@ public class PlansRepository {
             JOIN billing_config.subscription_instance_status sis 
                 ON sis.subscription_instance_status_id = si.subscription_instance_status_id
             WHERE si.subscription_plan_id = ?::uuid
+              AND si.application_id = ?::uuid
             """);
 
         List<Object> params = new ArrayList<>();
         params.add(subscriptionPlanId.toString());
+        params.add(requireAppIdStr());
 
         if (statusCode != null) {
             sql.append(" AND sis.status_name = ?");
@@ -321,10 +350,12 @@ public class PlansRepository {
             JOIN billing_config.subscription_instance_status sis 
                 ON sis.subscription_instance_status_id = si.subscription_instance_status_id
             WHERE si.subscription_plan_id = ?::uuid
+              AND si.application_id = ?::uuid
             """);
 
         List<Object> params = new ArrayList<>();
         params.add(subscriptionPlanId.toString());
+        params.add(requireAppIdStr());
 
         if (statusCode != null) {
             sql.append(" AND sis.status_name = ?");
@@ -357,9 +388,12 @@ public class PlansRepository {
             LEFT JOIN transactions.lu_invoice_status invs
               ON invs.invoice_status_id = i.invoice_status_id
             WHERE si.subscription_plan_id = ?::uuid
+              AND si.application_id = ?::uuid
+              AND sbs.application_id = ?::uuid
             ORDER BY sbs.billing_date, sbs.cycle_number
             """;
-        return jdbc.queryForList(sql, subscriptionPlanId.toString());
+        return jdbc.queryForList(
+                sql, subscriptionPlanId.toString(), requireAppIdStr(), requireAppIdStr());
     }
 
     public Map<String, Object> getMandateAndPaymentDetails(UUID subscriptionPlanId) {
@@ -398,8 +432,10 @@ public class PlansRepository {
             LEFT JOIN client_payments.lu_gateway_mandate_status lgs
               ON lgs.gateway_mandate_status_id = cgm.mandate_status_id
             WHERE sp.subscription_plan_id = ?::uuid
+              AND sp.application_id = ?::uuid
             """;
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, subscriptionPlanId.toString());
+        List<Map<String, Object>> rows =
+                jdbc.queryForList(sql, subscriptionPlanId.toString(), requireAppIdStr());
         return rows.isEmpty() ? Map.of() : rows.get(0);
     }
 

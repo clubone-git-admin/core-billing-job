@@ -19,6 +19,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
@@ -161,6 +162,8 @@ public class BillingRunsController {
      * billing run (same shape as GET /api/v1/billing/runs/{id}).</p>
      */
     @PostMapping("/{billingRunId}/invoice-generation/lock")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Lock generated invoices and advance stage")
     public ResponseEntity<BillingRunDto> lockGeneratedInvoices(
             @PathVariable UUID billingRunId,
             @Valid @RequestBody InvoiceGenerationLockRequest request) {
@@ -173,6 +176,8 @@ public class BillingRunsController {
      * POST /api/v1/billing/runs/{billingRunId}/mock-charge/skip
      */
     @PostMapping("/{billingRunId}/mock-charge/skip")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Skip mock charge stage")
     public ResponseEntity<BillingRunDto> skipMockCharge(
             @PathVariable UUID billingRunId,
             @Valid @RequestBody MockChargeSkipRequest request) {
@@ -183,6 +188,8 @@ public class BillingRunsController {
      * POST /api/v1/billing/runs/{billingRunId}/mock-charge/proceed-to-actual-charge
      */
     @PostMapping("/{billingRunId}/mock-charge/proceed-to-actual-charge")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Proceed from mock charge to actual charge")
     public ResponseEntity<BillingRunDto> proceedToActualCharge(
             @PathVariable UUID billingRunId,
             @Valid @RequestBody MockChargeProceedRequest request) {
@@ -247,6 +254,7 @@ public class BillingRunsController {
             @ApiResponse(responseCode = "409", description = "Billing run already exists with this idempotency key")
     })
     @PostMapping
+    @PreAuthorize("@perm.canManageBilling()")
     public ResponseEntity<?> createBillingRun(
             @Parameter(description = "Billing run creation request", required = true)
             @Valid @RequestBody CreateBillingRunRequest request) {
@@ -281,6 +289,8 @@ public class BillingRunsController {
      * Permissions: {@code billing.run.create.by_location_level} (enforced in auth layer when configured).
      */
     @PostMapping("/scope-preview")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Preview billing run location scope")
     public ResponseEntity<?> scopePreview(@Valid @RequestBody ScopePreviewRequest request) {
         try {
             return ResponseEntity.ok(billingRunService.scopePreview(request));
@@ -301,6 +311,7 @@ public class BillingRunsController {
             @ApiResponse(responseCode = "404", description = "Billing run not found")
     })
     @PutMapping("/{billingRunId}")
+    @PreAuthorize("@perm.canManageBilling()")
     public ResponseEntity<BillingRunDto> updateBillingRun(
             @Parameter(description = "Billing run ID", required = true) @PathVariable UUID billingRunId,
             @Parameter(description = "Update request", required = true)
@@ -328,6 +339,7 @@ public class BillingRunsController {
             @ApiResponse(responseCode = "404", description = "Billing run not found")
     })
     @DeleteMapping("/{billingRunId}")
+    @PreAuthorize("@perm.canManageBilling()")
     public ResponseEntity<BillingRunDto> cancelBillingRun(
             @Parameter(description = "Billing run ID", required = true) @PathVariable UUID billingRunId,
             @Parameter(description = "Cancellation request", required = true)
@@ -356,6 +368,7 @@ public class BillingRunsController {
                     content = @Content(schema = @Schema(implementation = BulkCreateBillingRunResponse.class)))
     })
     @PostMapping("/bulk")
+    @PreAuthorize("@perm.canManageBilling()")
     public ResponseEntity<BulkCreateBillingRunResponse> bulkCreateBillingRuns(
             @Parameter(description = "Bulk creation request", required = true)
             @Valid @RequestBody BulkCreateBillingRunRequest request) {

@@ -1,5 +1,6 @@
 package io.clubone.billing.repo;
 
+import io.clubone.billing.security.AccessContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -25,6 +26,14 @@ public class DashboardRepository {
         this.jdbc = jdbc;
     }
 
+    private static UUID requireAppId() {
+        return AccessContext.applicationId();
+    }
+
+    private static String requireAppIdStr() {
+        return requireAppId().toString();
+    }
+
     /**
      * Get summary statistics for dashboard KPIs.
      */
@@ -43,10 +52,12 @@ public class DashboardRepository {
             LEFT JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
             LEFT JOIN client_subscription_billing.subscription_billing_history sbh ON sbh.billing_run_id = br.billing_run_id
             LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
-            WHERE br.created_on >= ?
+            WHERE br.application_id = ?::uuid
+              AND br.created_on >= ?
             """);
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         params.add(dateFrom.atStartOfDay().atOffset(java.time.ZoneOffset.UTC));
 
         if (locationId != null) {
@@ -72,10 +83,12 @@ public class DashboardRepository {
             JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
             LEFT JOIN client_subscription_billing.subscription_billing_history sbh ON sbh.billing_run_id = br.billing_run_id
-            WHERE br.created_on >= ?
+            WHERE br.application_id = ?::uuid
+              AND br.created_on >= ?
             """;
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         params.add(dateFrom.atStartOfDay().atOffset(java.time.ZoneOffset.UTC));
 
         if (locationId != null) {
@@ -108,12 +121,14 @@ public class DashboardRepository {
             JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
             LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
             JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id
-            WHERE bss.status_code IN """
+            WHERE sbs.application_id = ?::uuid
+              AND bss.status_code IN """
                     + SCHEDULE_STATUS_OPEN_SQL
                     + """
             """;
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         if (locationId != null) {
             sql += """
                 AND EXISTS (
@@ -146,10 +161,11 @@ public class DashboardRepository {
             FROM client_subscription_billing.billing_dead_letter_queue dlq
             LEFT JOIN billing_config.failure_type ft ON ft.failure_type_id = dlq.failure_type_id
             LEFT JOIN client_subscription_billing.billing_run br ON br.billing_run_id = dlq.billing_run_id
-            WHERE 1=1
+            WHERE dlq.application_id = ?::uuid
             """;
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         if (locationId != null) {
             sql += " AND br.location_id = ?::uuid";
             params.add(locationId.toString());
@@ -168,10 +184,12 @@ public class DashboardRepository {
                 br.billing_run_code, bal.user_id, bal.created_on
             FROM client_subscription_billing.billing_audit_log bal
             LEFT JOIN client_subscription_billing.billing_run br ON br.billing_run_id = bal.entity_id::uuid
-            WHERE bal.entity_type = 'BILLING_RUN'
+            WHERE br.application_id = ?::uuid
+              AND bal.entity_type = 'BILLING_RUN'
             """;
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         if (locationId != null) {
             sql += " AND br.location_id = ?::uuid";
             params.add(locationId.toString());
@@ -215,6 +233,8 @@ public class DashboardRepository {
         params.add(dateFormat);
         params.add(dateFrom.atStartOfDay().atOffset(java.time.ZoneOffset.UTC));
         params.add(dateTo.atTime(23, 59, 59).atOffset(java.time.ZoneOffset.UTC));
+        sql.append(" AND br.application_id = ?::uuid");
+        params.add(requireAppIdStr());
 
         if (locationId != null) {
             sql.append(" AND br.location_id = ?::uuid");
@@ -419,12 +439,14 @@ public class DashboardRepository {
                         + "FROM client_subscription_billing.subscription_billing_schedule sbs "
                         + "JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id "
                         + "JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id "
-                        + "WHERE sbs.billing_date >= ?::date AND sbs.billing_date <= ?::date "
+                        + "WHERE sbs.application_id = ?::uuid "
+                        + "AND sbs.billing_date >= ?::date AND sbs.billing_date <= ?::date "
                         + "AND sbs.invoice_id IS NULL "
                         + "AND bss.status_code IN "
                         + SCHEDULE_STATUS_OPEN_SQL
                         + " ");
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         params.add(dueDateFrom);
         params.add(dueDateTo);
         if (locationIds != null && !locationIds.isEmpty()) {
@@ -468,12 +490,14 @@ public class DashboardRepository {
                 JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
                 LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
                 JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id
-                WHERE bss.status_code IN """
+                WHERE sbs.application_id = ?::uuid
+                  AND bss.status_code IN """
                     + SCHEDULE_STATUS_OPEN_SQL
                     + """
                 """;
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             String in = inClausePlaceholders(locationIds.size());
             sql +=
@@ -637,11 +661,16 @@ public class DashboardRepository {
                         + "COUNT(1) FILTER (WHERE UPPER(COALESCE(lcas.name,'')) = 'EXPIRED') AS expired_contracts, "
                         + "0 AS expiring_in_30_days "
                         + "FROM client_agreements.client_agreement ca "
-                        + "LEFT JOIN client_agreements.lu_client_agreement_status lcas ON lcas.client_agreement_status_id = ca.client_agreement_status_id ";
+                        + "LEFT JOIN client_agreements.lu_client_agreement_status lcas ON lcas.client_agreement_status_id = ca.client_agreement_status_id "
+                        + "WHERE EXISTS ( "
+                        + "SELECT 1 FROM client_subscription_billing.subscription_plan sp "
+                        + "WHERE sp.client_agreement_id = ca.client_agreement_id "
+                        + "AND sp.application_id = ?::uuid) ";
         List<Object> p = new ArrayList<>();
+        p.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             String in = inClausePlaceholders(locationIds.size());
-            sql += "WHERE ca.client_role_id IN (SELECT cr.client_role_id FROM clients.client_role cr WHERE cr.location_id IN (" + in + ")) ";
+            sql += "AND ca.client_role_id IN (SELECT cr.client_role_id FROM clients.client_role cr WHERE cr.location_id IN (" + in + ")) ";
             for (UUID u : locationIds) {
                 p.add(u.toString());
             }
@@ -957,7 +986,10 @@ public class DashboardRepository {
             String status,
             String currentStage,
             List<Object> params) {
-        StringBuilder w = new StringBuilder("WHERE 1=1 ");
+        StringBuilder w = new StringBuilder("WHERE 1=1 AND ")
+                .append(runAlias)
+                .append(".application_id = ?::uuid ");
+        params.add(requireAppIdStr());
         if (dueDateFrom != null) {
             w.append("AND ").append(runAlias).append(".due_date >= ?::date ");
             params.add(dueDateFrom);

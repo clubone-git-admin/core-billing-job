@@ -88,6 +88,7 @@ public class HttpPaymentService implements PaymentService {
 		// Rate limiting
 		if (!rateLimiter.tryConsumePayment()) {
 			log.warn("Payment service rate limit exceeded: invoiceId={}", invoiceId);
+			clearAttemptCounters();
 			return PaymentResult.fail("RATE_LIMIT_EXCEEDED");
 		}
 
@@ -103,6 +104,7 @@ public class HttpPaymentService implements PaymentService {
 			boolean valid = Boolean.TRUE.equals(validObj) || "true".equalsIgnoreCase(String.valueOf(validObj));
 			if (!valid) {
 				log.warn("billInvoiceRecurring validate-method failed (valid=false): invoiceId={} response={}", invoiceId, validateResp);
+				clearAttemptCounters();
 				return PaymentResult.fail("VALIDATE_METHOD_INVALID: valid=false");
 			}
 
@@ -122,6 +124,7 @@ public class HttpPaymentService implements PaymentService {
 			Object razorpayOrderIdObj = intentResp.get("razorpayOrderId");
 			if (intentIdObj == null || razorpayOrderIdObj == null) {
 				log.warn("billInvoiceRecurring create-intent failed (missing intentId/razorpayOrderId): invoiceId={} response={}", invoiceId, intentResp);
+				clearAttemptCounters();
 				return PaymentResult.fail("CREATE_INTENT_FAILED: missing intentId or razorpayOrderId");
 			}
 			UUID intentId = UUID.fromString(String.valueOf(intentIdObj));
@@ -144,6 +147,7 @@ public class HttpPaymentService implements PaymentService {
 			Object clientPaymentTxnIdObj = chargeResp.get("clientPaymentTransactionId");
 			if (clientPaymentTxnIdObj == null) {
 				log.warn("billInvoiceRecurring charge-at-will failed (missing clientPaymentTransactionId): invoiceId={} response={}", invoiceId, chargeResp);
+				clearAttemptCounters();
 				return new PaymentResult(false, null, "CHARGE_AT_WILL_FAILED: missing clientPaymentTransactionId", intentId, null, null);
 			}
 			
@@ -156,6 +160,7 @@ public class HttpPaymentService implements PaymentService {
 			            invoiceId, status, intentId, clientPaymentTxnId);
 			    metrics.recordPaymentCallTime(timer);
 			    metrics.recordPaymentFailure("PAYMENT_FAILED");
+			    clearAttemptCounters();
 			    return new PaymentResult(false, null, "PAYMENT_FAILED", intentId, clientPaymentTxnId, null);
 			}
 
@@ -164,6 +169,7 @@ public class HttpPaymentService implements PaymentService {
 					|| GatewayStatus.CREATED.getCode().equalsIgnoreCase(status)) {
 				log.info("billInvoiceRecurring charge-at-will PENDING: invoiceId={} status={} intentId={} txnId={}",
 						invoiceId, status, intentId, clientPaymentTxnId);
+				clearAttemptCounters();
 				return new PaymentResult(
 					false,
 					GatewayStatus.PENDING_CAPTURE.getCode(),
@@ -179,12 +185,14 @@ public class HttpPaymentService implements PaymentService {
 			            invoiceId, status, intentId, clientPaymentTxnId);
 			    metrics.recordPaymentCallTime(timer);
 			    metrics.recordPaymentFailure("UNSUPPORTED_STATUS:" + status);
+			    clearAttemptCounters();
 			    return new PaymentResult(false, null, "UNSUPPORTED_STATUS:" + status, intentId, clientPaymentTxnId, null);
 			}
 
 			log.info("billInvoiceRecurring RESP (success): invoiceId={} intentId={} clientPaymentTxnId={} transactionId={} razorpayOrderId={}",
 					invoiceId, intentId, clientPaymentTxnId, null, razorpayOrderId);
 			metrics.recordPaymentCallTime(timer);
+			clearAttemptCounters();
 			return new PaymentResult(true, "RZP_ORDER:" + razorpayOrderId, null, intentId, clientPaymentTxnId, null);
 
 		} catch (Exception e) {
@@ -203,6 +211,10 @@ public class HttpPaymentService implements PaymentService {
 		}
 	}
 
+	private void clearAttemptCounters() {
+		attemptCounters.remove();
+	}
+
 	/**
 	 * Fallback method for circuit breaker.
 	 * Called when circuit breaker is open or when an exception occurs.
@@ -219,6 +231,7 @@ public class HttpPaymentService implements PaymentService {
 			long amountMinor, String currencyCode, Throwable throwable) {
 		log.warn("Circuit breaker fallback triggered: invoiceId={} error={}", invoiceId, 
 			throwable != null ? throwable.getMessage() : "Unknown error");
+		clearAttemptCounters();
 		return PaymentResult.fail("CIRCUIT_BREAKER_OPEN: " + 
 			(throwable != null ? throwable.getMessage() : "Service unavailable"));
 	}

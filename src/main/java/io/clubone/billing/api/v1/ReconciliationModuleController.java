@@ -1,10 +1,14 @@
 package io.clubone.billing.api.v1;
 
 import io.clubone.billing.api.dto.reconciliation.ReconciliationRequests;
+import io.clubone.billing.security.AccessContext;
 import io.clubone.billing.service.ReconciliationModuleService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -17,6 +21,7 @@ import java.util.UUID;
 
 @RestController
 @RequestMapping("/reconciliation/v1")
+@Tag(name = "Reconciliation", description = "Reconciliation runs, exceptions, bank match, and refunds")
 public class ReconciliationModuleController {
 
     private final ReconciliationModuleService service;
@@ -113,21 +118,23 @@ public class ReconciliationModuleController {
             @PathVariable String entityId,
             @RequestParam(required = false) String entityType,
             @RequestParam(required = false) String recoRunId,
-            @RequestParam(defaultValue = "true") boolean recompute,
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
+            @RequestParam(defaultValue = "true") boolean recompute
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getWorkspace(entityId, entityType, recoRunId, recompute, tenantId), 1, 1));
     }
 
     @PostMapping("/runs")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Create reconciliation run")
     public ResponseEntity<Map<String, Object>> createRun(
-            @RequestHeader(name = "X-Tenant-Id", defaultValue = "default-tenant") String tenantId,
             @RequestHeader(name = "Idempotency-Key") String idempotencyKey,
             @RequestParam(defaultValue = "FULL") String runType,
             @RequestParam(defaultValue = "MANUAL") String triggerMode,
             @RequestParam(required = false) String requestedBy,
             @RequestBody(required = false) Map<String, Object> filters
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(
                 service.idempotentCreateRun(tenantId, idempotencyKey, runType, triggerMode, requestedBy, filters), 1, 1));
     }
@@ -150,6 +157,7 @@ public class ReconciliationModuleController {
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "50") int pageSize
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> body = service.listReconciliationRuns(
                 financialPeriod, fromDate, toDate, expandLocationRequest(locationIds), status, runType, currency, page, pageSize);
         long total = ((Number) body.getOrDefault("totalCount", 0L)).longValue();
@@ -162,12 +170,14 @@ public class ReconciliationModuleController {
     }
 
     @PostMapping("/runs/{reconciliationRunId}/resync")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Resync a reconciliation run")
     public ResponseEntity<Map<String, Object>> resyncReconciliationRun(
             @PathVariable String reconciliationRunId,
             @RequestParam(required = false) String requestedBy,
-            @RequestHeader(name = "X-Tenant-Id", defaultValue = "default-tenant") String tenantId,
             @RequestHeader(name = "Idempotency-Key") String idempotencyKey
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(
                 service.idempotentResyncRun(tenantId, idempotencyKey, reconciliationRunId, requestedBy), 1, 1));
     }
@@ -205,6 +215,7 @@ public class ReconciliationModuleController {
             @PathVariable String entityId,
             @RequestParam(required = false) String recoRunId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> timeline = service.getWorkspaceTimeline(entityId, recoRunId);
         List<Map<String, Object>> events = (List<Map<String, Object>>) timeline.getOrDefault("events", List.of());
         return ResponseEntity.ok(success(timeline, 1, events.size()));
@@ -215,27 +226,30 @@ public class ReconciliationModuleController {
             @PathVariable String entityId,
             @RequestParam(defaultValue = "all") String source
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getWorkspacePayloads(entityId, source), 1, 1));
     }
 
     @PostMapping("/workspace/{entityId}/actions/retry-sync")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Retry workspace entity sync")
     public ResponseEntity<Map<String, Object>> retrySync(
             @PathVariable String entityId,
-            @RequestHeader(name = "X-Tenant-Id", defaultValue = "default-tenant") String tenantId,
             @RequestHeader(name = "Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody ReconciliationRequests.RetrySyncRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.accepted().body(success(service.idempotentRetrySync(tenantId, idempotencyKey, entityId, request), 1, 1));
     }
 
     @GetMapping("/exceptions/assignable-users")
     public ResponseEntity<Map<String, Object>> listAssignableExceptionUsers(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false) String search,
             @RequestParam(required = false, defaultValue = "1") Integer page,
             @RequestParam(required = false, defaultValue = "25") Integer pageSize,
             @RequestParam(required = false, defaultValue = "true") Boolean activeOnly
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> payload = service.listAssignableExceptionUsers(tenantId, search, page, pageSize, activeOnly);
         @SuppressWarnings("unchecked")
         Map<String, Object> meta = (Map<String, Object>) payload.getOrDefault("meta", Map.of());
@@ -247,9 +261,9 @@ public class ReconciliationModuleController {
 
     @GetMapping("/exceptions/{exceptionId}")
     public ResponseEntity<Map<String, Object>> getExceptionDetail(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String exceptionId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> detail = service.getExceptionDetail(exceptionId, tenantId);
         if ("NOT_FOUND".equals(detail.get("status"))) {
             return ResponseEntity.notFound().build();
@@ -259,7 +273,6 @@ public class ReconciliationModuleController {
 
     @GetMapping("/exceptions")
     public ResponseEntity<Map<String, Object>> listExceptions(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false) String recoRunId,
             @RequestParam(required = false) List<String> severity,
             @RequestParam(required = false) List<String> status,
@@ -270,6 +283,7 @@ public class ReconciliationModuleController {
             @RequestParam(required = false, defaultValue = "1") Integer page,
             @RequestParam(required = false, defaultValue = "20") Integer pageSize
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> filters = new HashMap<>();
         filters.put("tenantId", tenantId);
         filters.put("recoRunId", recoRunId);
@@ -292,14 +306,16 @@ public class ReconciliationModuleController {
 
     @PostMapping("/exceptions")
     public ResponseEntity<Map<String, Object>> createException(
-            @RequestHeader(name = "X-Tenant-Id", defaultValue = "default-tenant") String tenantId,
             @RequestHeader(name = "Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody ReconciliationRequests.CreateExceptionRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.status(201).body(success(service.idempotentCreateException(tenantId, idempotencyKey, request), 1, 1));
     }
 
     @PatchMapping("/exceptions/{exceptionId}/assign")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Assign reconciliation exception")
     public ResponseEntity<Map<String, Object>> assignException(
             @PathVariable String exceptionId,
             @Valid @RequestBody ReconciliationRequests.AssignExceptionRequest request
@@ -308,6 +324,8 @@ public class ReconciliationModuleController {
     }
 
     @PatchMapping("/exceptions/{exceptionId}/status")
+    @PreAuthorize("@perm.canManageBilling()")
+    @Operation(summary = "Update reconciliation exception status")
     public ResponseEntity<Map<String, Object>> updateExceptionStatus(
             @PathVariable String exceptionId,
             @Valid @RequestBody ReconciliationRequests.UpdateExceptionStatusRequest request
@@ -317,6 +335,7 @@ public class ReconciliationModuleController {
 
     @PostMapping("/exceptions/bulk-action")
     public ResponseEntity<Map<String, Object>> bulkAction(@Valid @RequestBody ReconciliationRequests.BulkActionRequest request) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.bulkExceptionAction(request), 1, 1));
     }
 
@@ -325,12 +344,12 @@ public class ReconciliationModuleController {
             @PathVariable String exceptionId,
             @Valid @RequestBody ReconciliationRequests.AddNoteRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.addExceptionNote(exceptionId, request), 1, 1));
     }
 
     @GetMapping("/accounting/journal")
     public ResponseEntity<Map<String, Object>> journal(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false) String period,
             @RequestParam(required = false) List<String> glAccountCodes,
             @RequestParam(required = false) List<String> postingStatus,
@@ -339,6 +358,7 @@ public class ReconciliationModuleController {
             @RequestParam(required = false, defaultValue = "1") Integer page,
             @RequestParam(required = false, defaultValue = "50") Integer pageSize
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> payload = service.getJournal(
                 tenantId, period, glAccountCodes, postingStatus, entityId, recoRunId, page, pageSize);
         @SuppressWarnings("unchecked")
@@ -408,6 +428,7 @@ public class ReconciliationModuleController {
 
     @PostMapping("/refunds/{refundId}/retry")
     public ResponseEntity<Map<String, Object>> retryRefund(@PathVariable String refundId) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.accepted().body(success(service.retryRefund(refundId), 1, 1));
     }
 
@@ -416,11 +437,13 @@ public class ReconciliationModuleController {
             @PathVariable String refundId,
             @Valid @RequestBody ReconciliationRequests.LinkRefundRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.linkRefund(refundId, request), 1, 1));
     }
 
     @GetMapping("/reports/catalog")
     public ResponseEntity<Map<String, Object>> reportCatalog() {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> payload = service.reportCatalog();
         List<?> items = (List<?>) payload.getOrDefault("items", List.of());
         return ResponseEntity.ok(success(payload, 1, items.size()));
@@ -428,10 +451,10 @@ public class ReconciliationModuleController {
 
     @PostMapping("/reports/{slug}/query")
     public ResponseEntity<Map<String, Object>> reportQuery(
-            @PathVariable String slug,
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String slug
             @Valid @RequestBody ReconciliationRequests.ReportQueryRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> payload = service.reportQuery(slug, request, tenantId);
         Object rowCount = payload.get("meta") instanceof Map<?, ?> meta
                 ? meta.get("rowCount")
@@ -443,10 +466,10 @@ public class ReconciliationModuleController {
     @PostMapping("/reports/{slug}/export")
     public ResponseEntity<Map<String, Object>> reportExport(
             @PathVariable String slug,
-            @RequestHeader(name = "X-Tenant-Id", defaultValue = "default-tenant") String tenantId,
             @RequestHeader(name = "Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody ReconciliationRequests.ReportExportRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.accepted().body(success(service.idempotentReportExport(tenantId, idempotencyKey, slug, request), 1, 1));
     }
 
@@ -470,11 +493,13 @@ public class ReconciliationModuleController {
 
     @PostMapping("/audit/export")
     public ResponseEntity<Map<String, Object>> auditExport() {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.accepted().body(success(service.auditExport(), 1, 1));
     }
 
     @GetMapping("/config/{configType}")
     public ResponseEntity<Map<String, Object>> getConfig(@PathVariable String configType) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getConfig(configType), 1, 1));
     }
 
@@ -483,39 +508,41 @@ public class ReconciliationModuleController {
             @PathVariable String configType,
             @Valid @RequestBody ReconciliationRequests.ConfigUpdateRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.updateConfig(configType, request), 1, 1));
     }
 
     @GetMapping("/config/enterprise/lookups")
     public ResponseEntity<Map<String, Object>> enterpriseConfigLookups(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getEnterpriseConfigLookups(tenantId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/draft")
     public ResponseEntity<Map<String, Object>> enterpriseConfigDraft(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getEnterpriseConfigDraftSummary(tenantId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/control-center/shell")
     public ResponseEntity<Map<String, Object>> enterpriseControlCenterShell() {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getEnterpriseControlCenterShell(), 1, 1));
     }
 
     @GetMapping("/config/enterprise/control-center/overview")
     public ResponseEntity<Map<String, Object>> enterpriseControlCenterOverview(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getEnterpriseControlCenterOverview(tenantId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/thresholds")
     public ResponseEntity<Map<String, Object>> enterpriseThresholds(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getEnterpriseThresholdsBundle(tenantId), 1, 1));
     }
 
@@ -528,8 +555,7 @@ public class ReconciliationModuleController {
 
     @GetMapping("/config/enterprise/thresholds/{kind}")
     public ResponseEntity<Map<String, Object>> listEnterpriseThresholdsByKind(
-            @PathVariable String kind,
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String kind
             @RequestParam(required = false) Boolean activeOnly,
             @RequestParam(required = false) String search,
             @RequestParam(defaultValue = "1") int page,
@@ -546,6 +572,7 @@ public class ReconciliationModuleController {
             @RequestParam(required = false) String effectiveFrom,
             @RequestParam(required = false) String effectiveTo
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> data = service.listEnterpriseThresholdsByKind(
                 kind, tenantId, activeOnly, search, page, pageSize, applicationId,
                 recoDomain, stage, level, gatewayCode, currencyCode, paymentMethodCode,
@@ -555,10 +582,10 @@ public class ReconciliationModuleController {
 
     @GetMapping("/config/enterprise/thresholds/{kind}/{id}")
     public ResponseEntity<Map<String, Object>> getEnterpriseThresholdRow(
-            @PathVariable String kind,
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String kind
             @PathVariable String id
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getEnterpriseThresholdRow(kind, tenantId, id), 1, 1));
     }
 
@@ -567,6 +594,7 @@ public class ReconciliationModuleController {
             @PathVariable String kind,
             @PathVariable String id
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> payload = service.listThresholdAuditEvents(kind, id);
         List<?> items = (List<?>) payload.getOrDefault("items", List.of());
         return ResponseEntity.ok(success(payload, 1, items.size()));
@@ -574,57 +602,56 @@ public class ReconciliationModuleController {
 
     @PostMapping("/config/enterprise/thresholds/{kind}")
     public ResponseEntity<Map<String, Object>> createEnterpriseThreshold(
-            @PathVariable String kind,
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String kind
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.upsertEnterpriseThreshold(kind, tenantId, request, null, actorUserId), 1, 1));
     }
 
     @PutMapping("/config/enterprise/thresholds/{kind}/{id}")
     public ResponseEntity<Map<String, Object>> updateEnterpriseThreshold(
             @PathVariable String kind,
-            @PathVariable String id,
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String id
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.upsertEnterpriseThreshold(kind, tenantId, request, id, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/thresholds/{kind}/{id}/deactivate")
     public ResponseEntity<Map<String, Object>> deactivateEnterpriseThreshold(
             @PathVariable String kind,
-            @PathVariable String id,
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String id
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.deactivateEnterpriseThreshold(kind, tenantId, id, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/thresholds/{kind}/{id}/clone")
     public ResponseEntity<Map<String, Object>> cloneEnterpriseThreshold(
             @PathVariable String kind,
-            @PathVariable String id,
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String id
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.cloneEnterpriseThreshold(kind, tenantId, id, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/thresholds/{kind}/test")
     public ResponseEntity<Map<String, Object>> testEnterpriseThreshold(
-            @PathVariable String kind,
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
+            @PathVariable String kind
             @RequestBody(required = false) ReconciliationRequests.ThresholdTestRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.testEnterpriseThreshold(kind, tenantId, request), 1, 1));
     }
 
     @GetMapping("/config/enterprise/access-control")
     public ResponseEntity<Map<String, Object>> listEnterpriseAccessControl(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false, defaultValue = "roles") String view,
             @RequestParam(required = false) Boolean activeOnly,
             @RequestParam(required = false) String search,
@@ -638,6 +665,7 @@ public class ReconciliationModuleController {
             @RequestParam(required = false) String permissionCode,
             @RequestParam(required = false) String status
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> data = service.listEnterpriseAccessControl(
                 tenantId, view, activeOnly, search, page, pageSize,
                 roleId, userId, recoDomain, stage, level, permissionCode, status);
@@ -646,78 +674,78 @@ public class ReconciliationModuleController {
 
     @GetMapping("/config/enterprise/access-control/export-matrix")
     public ResponseEntity<Map<String, Object>> exportEnterpriseAccessMatrix(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.exportEnterpriseAccessMatrix(tenantId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/access-control/roles/{id}")
     public ResponseEntity<Map<String, Object>> getEnterpriseAccessRole(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String id
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getEnterpriseAccessRole(tenantId, id), 1, 1));
     }
 
     @PostMapping("/config/enterprise/access-control/roles")
     public ResponseEntity<Map<String, Object>> createEnterpriseAccessRole(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.upsertEnterpriseAccessRole(tenantId, request, null, actorUserId), 1, 1));
     }
 
     @PutMapping("/config/enterprise/access-control/roles/{id}")
     public ResponseEntity<Map<String, Object>> updateEnterpriseAccessRole(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String id,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.upsertEnterpriseAccessRole(tenantId, request, id, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/access-control/roles/{id}/deactivate")
     public ResponseEntity<Map<String, Object>> deactivateEnterpriseAccessRole(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String id
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.deactivateEnterpriseAccessRole(tenantId, id, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/access-control/roles/{id}/clone")
     public ResponseEntity<Map<String, Object>> cloneEnterpriseAccessRole(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String id
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.cloneEnterpriseAccessRole(tenantId, id, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/access-control/user-assignments")
     public ResponseEntity<Map<String, Object>> assignEnterpriseAccessUser(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.assignEnterpriseAccessUser(tenantId, request, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/access-control/preview-effective-access")
     public ResponseEntity<Map<String, Object>> previewEnterpriseEffectiveAccess(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.previewEnterpriseEffectiveAccess(tenantId, request), 1, 1));
     }
 
     @PostMapping("/config/enterprise/access-control/preview-impact")
     public ResponseEntity<Map<String, Object>> previewEnterpriseAccessImpact(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.previewEnterpriseAccessImpact(tenantId, request), 1, 1));
     }
 
@@ -726,13 +754,14 @@ public class ReconciliationModuleController {
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String violationId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.acknowledgeEnterpriseSodViolation(violationId, actorUserId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/roles")
     public ResponseEntity<Map<String, Object>> enterpriseRoles(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> payload = service.listEnterpriseRoles(tenantId);
         List<?> items = (List<?>) payload.getOrDefault("items", List.of());
         return ResponseEntity.ok(success(payload, 1, items.size()));
@@ -740,7 +769,6 @@ public class ReconciliationModuleController {
 
     @GetMapping("/config/enterprise/notifications")
     public ResponseEntity<Map<String, Object>> listEnterpriseNotifications(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false, defaultValue = "rules") String view,
             @RequestParam(required = false) Boolean activeOnly,
             @RequestParam(required = false) String search,
@@ -754,6 +782,7 @@ public class ReconciliationModuleController {
             @RequestParam(required = false) String gatewayCode,
             @RequestParam(required = false) String status
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> data = service.listEnterpriseNotifications(
                 tenantId, view, activeOnly, search, page, pageSize,
                 notificationEvent, channel, severity, recoDomain, stage, gatewayCode, status);
@@ -762,79 +791,79 @@ public class ReconciliationModuleController {
 
     @GetMapping("/config/enterprise/notifications/rules/{id}")
     public ResponseEntity<Map<String, Object>> getEnterpriseNotificationRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String id
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getEnterpriseNotificationRule(tenantId, id), 1, 1));
     }
 
     @PostMapping("/config/enterprise/notifications/rules")
     public ResponseEntity<Map<String, Object>> createEnterpriseNotificationRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.upsertEnterpriseNotificationRule(tenantId, request, null, actorUserId), 1, 1));
     }
 
     @PutMapping("/config/enterprise/notifications/rules/{id}")
     public ResponseEntity<Map<String, Object>> updateEnterpriseNotificationRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String id,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.upsertEnterpriseNotificationRule(tenantId, request, id, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/notifications/rules/{id}/deactivate")
     public ResponseEntity<Map<String, Object>> deactivateEnterpriseNotificationRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String id
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.deactivateEnterpriseNotificationRule(tenantId, id, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/notifications/rules/{id}/clone")
     public ResponseEntity<Map<String, Object>> cloneEnterpriseNotificationRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String id
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.cloneEnterpriseNotificationRule(tenantId, id, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/notifications/test")
     public ResponseEntity<Map<String, Object>> testEnterpriseNotification(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.testEnterpriseNotification(tenantId, request), 1, 1));
     }
 
     @PostMapping("/config/enterprise/notifications/send-test-alert")
     public ResponseEntity<Map<String, Object>> sendEnterpriseTestAlert(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @RequestBody Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.sendEnterpriseTestAlert(tenantId, request, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/notifications/preview-recipients")
     public ResponseEntity<Map<String, Object>> previewEnterpriseNotificationRecipients(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.previewEnterpriseNotificationRecipients(tenantId, request), 1, 1));
     }
 
     @PostMapping("/config/enterprise/notifications/preview")
     public ResponseEntity<Map<String, Object>> previewEnterpriseNotification(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.previewEnterpriseNotification(tenantId, request), 1, 1));
     }
 
@@ -842,6 +871,7 @@ public class ReconciliationModuleController {
     public ResponseEntity<Map<String, Object>> retryFailedEnterpriseNotification(
             @PathVariable String notificationId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.retryFailedEnterpriseNotification(notificationId), 1, 1));
     }
 
@@ -849,13 +879,14 @@ public class ReconciliationModuleController {
     public ResponseEntity<Map<String, Object>> resendEnterpriseNotificationHistory(
             @PathVariable String historyId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.resendEnterpriseNotificationHistory(historyId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/notification-rules")
     public ResponseEntity<Map<String, Object>> enterpriseNotificationRules(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> payload = service.listEnterpriseNotificationRules(tenantId);
         List<?> items = (List<?>) payload.getOrDefault("items", List.of());
         return ResponseEntity.ok(success(payload, 1, items.size()));
@@ -863,7 +894,6 @@ public class ReconciliationModuleController {
 
     @GetMapping("/config/enterprise/matching-rules")
     public ResponseEntity<Map<String, Object>> listEnterpriseMatchingRules(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false) String recoDomain,
             @RequestParam(required = false) String stage,
             @RequestParam(required = false) Boolean activeOnly,
@@ -872,6 +902,7 @@ public class ReconciliationModuleController {
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "50") int pageSize
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> body = service.listEnterpriseMatchingRules(tenantId, recoDomain, stage, activeOnly, search, locationId, page, pageSize);
         long total = ((Number) body.getOrDefault("totalCount", 0L)).longValue();
         @SuppressWarnings("unchecked")
@@ -884,42 +915,43 @@ public class ReconciliationModuleController {
 
     @PostMapping("/config/enterprise/matching-rules")
     public ResponseEntity<Map<String, Object>> createEnterpriseMatchingRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseMatchingRuleWriteRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.createEnterpriseMatchingRule(tenantId, request, actorUserId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/matching-rules/{matchingRuleId}")
     public ResponseEntity<Map<String, Object>> getEnterpriseMatchingRule(@PathVariable String matchingRuleId) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getEnterpriseMatchingRuleDetail(matchingRuleId), 1, 1));
     }
 
     @PutMapping("/config/enterprise/matching-rules/{matchingRuleId}")
     public ResponseEntity<Map<String, Object>> updateEnterpriseMatchingRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String matchingRuleId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseMatchingRuleWriteRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.updateEnterpriseMatchingRule(tenantId, matchingRuleId, request, actorUserId), 1, 1));
     }
 
     @PatchMapping("/config/enterprise/matching-rules/{matchingRuleId}/active")
     public ResponseEntity<Map<String, Object>> patchMatchingRuleActive(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String matchingRuleId,
             @Valid @RequestBody ReconciliationRequests.MatchingRuleActivePatchRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.patchMatchingRuleActive(tenantId, matchingRuleId, request), 1, 1));
     }
 
     @DeleteMapping("/config/enterprise/matching-rules/{matchingRuleId}")
     public ResponseEntity<Map<String, Object>> deleteEnterpriseMatchingRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String matchingRuleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.deleteEnterpriseMatchingRule(tenantId, matchingRuleId), 1, 1));
     }
 
@@ -928,26 +960,26 @@ public class ReconciliationModuleController {
             @PathVariable String matchingRuleId,
             @RequestBody(required = false) ReconciliationRequests.MatchingRuleTestRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.testMatchingRulePreview(matchingRuleId, request), 1, 1));
     }
 
     @GetMapping("/config/enterprise/gl-mapping-rules/export")
     public ResponseEntity<Map<String, Object>> exportEnterpriseGlMappingRules(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.exportGlMappingRules(tenantId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/gl-mapping-rules/lookups")
     public ResponseEntity<Map<String, Object>> glMappingRulesLookups(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getGlMappingRuleLookupsBundle(tenantId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/gl-mapping-rules")
     public ResponseEntity<Map<String, Object>> listEnterpriseGlMappingRules(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false) Boolean activeOnly,
             @RequestParam(required = false) String search,
             @RequestParam(required = false) String locationId,
@@ -965,6 +997,7 @@ public class ReconciliationModuleController {
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "50") int pageSize
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> body = service.listEnterpriseGlMappingRules(
                 tenantId, activeOnly, search, locationId,
                 sourceType, transactionType, lineOfBusiness, journalType, itemCategory,
@@ -985,52 +1018,52 @@ public class ReconciliationModuleController {
 
     @PostMapping("/config/enterprise/gl-mapping-rules/import")
     public ResponseEntity<Map<String, Object>> importGlMappingRules(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @Valid @RequestBody ReconciliationRequests.GlMappingImportRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.importGlMappingRules(tenantId, request, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/gl-mapping-rules/test")
     public ResponseEntity<Map<String, Object>> testGlMappingJournal(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestBody(required = false) ReconciliationRequests.GlMappingJournalTestRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.previewGlMappingJournal(tenantId, request), 1, 1));
     }
 
     @PostMapping("/config/enterprise/gl-mapping-rules/preview-journal")
     public ResponseEntity<Map<String, Object>> previewGlMappingJournal(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestBody(required = false) ReconciliationRequests.GlMappingJournalTestRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.previewGlMappingJournal(tenantId, request), 1, 1));
     }
 
     @GetMapping("/config/enterprise/gl-mapping-rules/{glMappingRuleId}")
     public ResponseEntity<Map<String, Object>> getEnterpriseGlMappingRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String glMappingRuleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getEnterpriseGlMappingRuleDetail(tenantId, glMappingRuleId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/gl-mapping-rules/{glMappingRuleId}/clone")
     public ResponseEntity<Map<String, Object>> cloneGlMappingRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String glMappingRuleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.cloneGlMappingRule(tenantId, glMappingRuleId, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/gl-mapping-rules/{glMappingRuleId}/deactivate")
     public ResponseEntity<Map<String, Object>> deactivateGlMappingRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String glMappingRuleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.deactivateGlMappingRule(tenantId, glMappingRuleId, actorUserId), 1, 1));
     }
 
@@ -1039,6 +1072,7 @@ public class ReconciliationModuleController {
             @PathVariable String glMappingRuleId,
             @RequestParam(required = false) Integer limit
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> payload = service.glMappingRuleUsage(glMappingRuleId, limit);
         List<?> items = (List<?>) payload.getOrDefault("items", List.of());
         return ResponseEntity.ok(success(payload, 1, items.size()));
@@ -1046,43 +1080,42 @@ public class ReconciliationModuleController {
 
     @PostMapping("/config/enterprise/gl-mapping-rules")
     public ResponseEntity<Map<String, Object>> createGlMappingRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.upsertGlMappingRule(tenantId, request, null, actorUserId), 1, 1));
     }
 
     @PutMapping("/config/enterprise/gl-mapping-rules/{glMappingRuleId}")
     public ResponseEntity<Map<String, Object>> updateGlMappingRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String glMappingRuleId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.upsertGlMappingRule(tenantId, request, glMappingRuleId, actorUserId), 1, 1));
     }
 
     @PatchMapping("/config/enterprise/gl-mapping-rules/{glMappingRuleId}/active")
     public ResponseEntity<Map<String, Object>> patchGlMappingActive(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String glMappingRuleId,
             @Valid @RequestBody ReconciliationRequests.MatchingRuleActivePatchRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.patchGlMappingActive(tenantId, glMappingRuleId, request), 1, 1));
     }
 
     @DeleteMapping("/config/enterprise/gl-mapping-rules/{glMappingRuleId}")
     public ResponseEntity<Map<String, Object>> deleteGlMappingRule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String glMappingRuleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.deleteGlMappingRule(tenantId, glMappingRuleId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/schedules")
     public ResponseEntity<Map<String, Object>> listEnterpriseSchedules(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false, defaultValue = "active") String view,
             @RequestParam(required = false) Boolean activeOnly,
             @RequestParam(required = false) String search,
@@ -1101,6 +1134,7 @@ public class ReconciliationModuleController {
             @RequestParam(required = false) String to,
             @RequestParam(required = false) String locationId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> data = service.listEnterpriseSchedules(
                 tenantId, view, activeOnly, search, page, pageSize,
                 recoDomain, stage, level, gatewayCode, currencyCode, paymentMethodCode,
@@ -1110,17 +1144,17 @@ public class ReconciliationModuleController {
 
     @GetMapping("/config/enterprise/schedules/{scheduleId}")
     public ResponseEntity<Map<String, Object>> getEnterpriseScheduleDetail(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String scheduleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.getEnterpriseScheduleDetail(tenantId, scheduleId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/schedules/preview")
     public ResponseEntity<Map<String, Object>> previewEnterpriseSchedule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.previewEnterpriseSchedule(tenantId, request), 1, 1));
     }
 
@@ -1130,60 +1164,61 @@ public class ReconciliationModuleController {
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "50") int pageSize
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.listEnterpriseScheduleRuns(scheduleId, page, pageSize), 1, 1));
     }
 
     @PostMapping("/config/enterprise/schedules")
     public ResponseEntity<Map<String, Object>> createSchedule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.upsertSchedule(tenantId, request, null, actorUserId), 1, 1));
     }
 
     @PutMapping("/config/enterprise/schedules/{scheduleId}")
     public ResponseEntity<Map<String, Object>> updateSchedule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String scheduleId,
             @Valid @RequestBody ReconciliationRequests.EnterpriseConfigRowRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.upsertSchedule(tenantId, request, scheduleId, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/schedules/{scheduleId}/clone")
     public ResponseEntity<Map<String, Object>> cloneEnterpriseSchedule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String scheduleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.cloneEnterpriseSchedule(tenantId, scheduleId, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/schedules/{scheduleId}/deactivate")
     public ResponseEntity<Map<String, Object>> deactivateEnterpriseSchedule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String scheduleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.deactivateEnterpriseSchedule(tenantId, scheduleId, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/schedules/{scheduleId}/run-now")
     public ResponseEntity<Map<String, Object>> runEnterpriseScheduleNow(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String scheduleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.runScheduleNow(tenantId, scheduleId, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/schedules/{scheduleId}/pause")
     public ResponseEntity<Map<String, Object>> pauseEnterpriseSchedule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String scheduleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(
                 service.patchScheduleActive(tenantId, scheduleId, new ReconciliationRequests.MatchingRuleActivePatchRequest(false)),
                 1, 1));
@@ -1191,9 +1226,9 @@ public class ReconciliationModuleController {
 
     @PostMapping("/config/enterprise/schedules/{scheduleId}/resume")
     public ResponseEntity<Map<String, Object>> resumeEnterpriseSchedule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String scheduleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(
                 service.patchScheduleActive(tenantId, scheduleId, new ReconciliationRequests.MatchingRuleActivePatchRequest(true)),
                 1, 1));
@@ -1201,43 +1236,45 @@ public class ReconciliationModuleController {
 
     @PostMapping("/config/enterprise/schedules/pause-all")
     public ResponseEntity<Map<String, Object>> pauseAllEnterpriseSchedules(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.pauseAllEnterpriseSchedules(tenantId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/schedules/resume-all")
     public ResponseEntity<Map<String, Object>> resumeAllEnterpriseSchedules(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.resumeAllEnterpriseSchedules(tenantId), 1, 1));
     }
 
     @PatchMapping("/config/enterprise/schedules/{scheduleId}/active")
     public ResponseEntity<Map<String, Object>> patchScheduleActive(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String scheduleId,
             @Valid @RequestBody ReconciliationRequests.MatchingRuleActivePatchRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.patchScheduleActive(tenantId, scheduleId, request), 1, 1));
     }
 
     @PostMapping("/config/enterprise/schedules/queue/{runReference}/cancel")
     public ResponseEntity<Map<String, Object>> cancelScheduleQueuedRun(@PathVariable String runReference) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.cancelScheduleQueuedRun(runReference), 1, 1));
     }
 
     @PostMapping("/config/enterprise/schedules/queue/{runReference}/force-start")
     public ResponseEntity<Map<String, Object>> forceStartScheduleQueuedRun(@PathVariable String runReference) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.forceStartScheduleQueuedRun(runReference), 1, 1));
     }
 
     @PostMapping("/config/enterprise/schedules/queue/{runReference}/retry")
     public ResponseEntity<Map<String, Object>> retryScheduleQueuedRun(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @PathVariable String runReference
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.retryScheduleQueuedRun(tenantId, runReference, actorUserId), 1, 1));
     }
 
@@ -1246,21 +1283,21 @@ public class ReconciliationModuleController {
             @PathVariable String runReference,
             @RequestBody Map<String, Object> body
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         String priority = body == null || body.get("priority") == null ? "MEDIUM" : String.valueOf(body.get("priority"));
         return ResponseEntity.ok(success(service.patchScheduleQueuePriority(runReference, priority), 1, 1));
     }
 
     @DeleteMapping("/config/enterprise/schedules/{scheduleId}")
     public ResponseEntity<Map<String, Object>> deleteSchedule(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String scheduleId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.deleteSchedule(tenantId, scheduleId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/publish")
     public ResponseEntity<Map<String, Object>> listEnterprisePublish(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false, defaultValue = "current") String view,
             @RequestParam(required = false) String search,
             @RequestParam(defaultValue = "1") int page,
@@ -1274,6 +1311,7 @@ public class ReconciliationModuleController {
             @RequestParam(required = false) String versionA,
             @RequestParam(required = false) String versionB
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> data = service.listEnterprisePublish(
                 tenantId, view, search, page, pageSize, environment, version,
                 publishedBy, publishStatus, from, to, versionA, versionB);
@@ -1282,52 +1320,52 @@ public class ReconciliationModuleController {
 
     @GetMapping("/config/enterprise/publish/export-snapshot")
     public ResponseEntity<Map<String, Object>> exportEnterprisePublishSnapshot(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(required = false) String version
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.exportEnterprisePublishSnapshot(tenantId, version), 1, 1));
     }
 
     @PostMapping("/config/enterprise/publish/save-draft")
     public ResponseEntity<Map<String, Object>> saveEnterprisePublishDraft(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.saveEnterprisePublishDraft(tenantId, request, actorUserId), 1, 1));
     }
 
     @PostMapping("/config/enterprise/publish/preview-draft")
     public ResponseEntity<Map<String, Object>> previewEnterprisePublishDraft(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.previewEnterprisePublishDraft(tenantId, request), 1, 1));
     }
 
     @PostMapping("/config/enterprise/publish/validate")
     public ResponseEntity<Map<String, Object>> validateEnterprisePublish(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.validateEnterprisePublish(tenantId, request), 1, 1));
     }
 
     @PostMapping("/config/enterprise/publish/preview-impact")
     public ResponseEntity<Map<String, Object>> previewEnterprisePublishImpact(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.previewEnterprisePublishImpact(tenantId, request), 1, 1));
     }
 
     @PostMapping("/config/enterprise/publish/execute")
     public ResponseEntity<Map<String, Object>> executeEnterprisePublish(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
             @RequestBody Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         if (service.isEnterprisePublishFrozen(tenantId, request)) {
             Map<String, Object> freeze = service.getEnterprisePublishFreezeWindow(tenantId, request);
             @SuppressWarnings("unchecked")
@@ -1344,10 +1382,10 @@ public class ReconciliationModuleController {
 
     @PostMapping("/config/enterprise/publish/rollback")
     public ResponseEntity<Map<String, Object>> rollbackEnterprisePublishConfig(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @RequestBody Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         if (service.isEnterprisePublishFrozen(tenantId, request)) {
             Map<String, Object> freeze = service.getEnterprisePublishFreezeWindow(tenantId, request);
             @SuppressWarnings("unchecked")
@@ -1360,10 +1398,10 @@ public class ReconciliationModuleController {
 
     @PostMapping("/config/enterprise/publish/promote")
     public ResponseEntity<Map<String, Object>> promoteEnterprisePublish(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @RequestBody Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         if (service.isEnterprisePublishFrozen(tenantId, request)) {
             Map<String, Object> freeze = service.getEnterprisePublishFreezeWindow(tenantId, request);
             @SuppressWarnings("unchecked")
@@ -1389,6 +1427,7 @@ public class ReconciliationModuleController {
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.rejectEnterpriseDraftChange(draftChangeId, request, actorUserId), 1, 1));
     }
 
@@ -1398,15 +1437,16 @@ public class ReconciliationModuleController {
             @RequestHeader(name = "X-Actor-Id", required = false) String actorUserId,
             @RequestBody(required = false) Map<String, Object> request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.discardEnterpriseDraftChange(draftChangeId, request, actorUserId), 1, 1));
     }
 
     @GetMapping("/config/enterprise/publishes")
     public ResponseEntity<Map<String, Object>> listEnterpriseConfigPublishes(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "50") int pageSize
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         Map<String, Object> body = service.listEnterpriseConfigPublishes(tenantId, page, pageSize);
         long total = ((Number) body.getOrDefault("totalCount", 0L)).longValue();
         @SuppressWarnings("unchecked")
@@ -1422,15 +1462,16 @@ public class ReconciliationModuleController {
             @RequestParam String a,
             @RequestParam String b
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.compareEnterprisePublishes(a, b), 1, 1));
     }
 
     @PostMapping("/config/enterprise/publishes")
     public ResponseEntity<Map<String, Object>> publishEnterpriseConfig(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
             @Valid @RequestBody ReconciliationRequests.PublishRecoConfigRequest request
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             return ResponseEntity.ok(success(service.publishEnterpriseConfigIdempotent(tenantId, idempotencyKey, request), 1, 1));
         }
@@ -1439,9 +1480,9 @@ public class ReconciliationModuleController {
 
     @PostMapping("/config/enterprise/publishes/{recoConfigPublishId}/rollback")
     public ResponseEntity<Map<String, Object>> rollbackEnterprisePublish(
-            @RequestHeader(name = "X-Tenant-Id", required = false) String tenantId,
             @PathVariable String recoConfigPublishId
     ) {
+        String tenantId = AccessContext.applicationId().toString();
         return ResponseEntity.ok(success(service.rollbackEnterprisePublish(tenantId, recoConfigPublishId), 1, 1));
     }
 

@@ -11,6 +11,7 @@ import org.springframework.stereotype.Repository;
 import java.time.OffsetDateTime;
 import java.util.*;
 
+import io.clubone.billing.security.AccessContext;
 /**
  * Repository for Dead Letter Queue operations.
  */
@@ -24,6 +25,11 @@ public class DLQRepository {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
     }
+
+    private static String requireAppIdStr() {
+        return AccessContext.applicationId().toString();
+    }
+
 
     /**
      * Find DLQ items with filtering.
@@ -49,10 +55,11 @@ public class DLQRepository {
             LEFT JOIN client_subscription_billing.billing_stage_run srs ON srs.stage_run_id = dlq.stage_run_id
             LEFT JOIN transactions.invoice i ON i.invoice_id = dlq.invoice_id
             LEFT JOIN billing_config.failure_type ft ON ft.failure_type_id = dlq.failure_type_id
-            WHERE 1=1
+            WHERE dlq.application_id = ?::uuid
             """);
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
 
         if (billingRunId != null) {
             sql.append(" AND dlq.billing_run_id = ?::uuid");
@@ -109,10 +116,11 @@ public class DLQRepository {
             FROM client_subscription_billing.billing_dead_letter_queue dlq
             LEFT JOIN client_subscription_billing.billing_run br ON br.billing_run_id = dlq.billing_run_id
             LEFT JOIN billing_config.failure_type ft ON ft.failure_type_id = dlq.failure_type_id
-            WHERE 1=1
+            WHERE dlq.application_id = ?::uuid
             """);
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
 
         if (billingRunId != null) {
             sql.append(" AND dlq.billing_run_id = ?::uuid");
@@ -168,8 +176,8 @@ public class DLQRepository {
             jdbc.update("""
                 INSERT INTO client_subscription_billing.billing_dead_letter_queue
                 (dlq_id, billing_run_id, stage_run_id, invoice_id, subscription_instance_id,
-                 error_type, error_message, error_stack_trace, work_item_json, created_on, resolved)
-                VALUES (?::uuid, ?::uuid, ?::uuid, NULL, ?::uuid, ?, ?, ?, ?::jsonb, now(), false)
+                 error_type, error_message, error_stack_trace, work_item_json, created_on, resolved, application_id)
+                VALUES (?::uuid, ?::uuid, ?::uuid, NULL, ?::uuid, ?, ?, ?, ?::jsonb, now(), false, ?::uuid)
                 """,
                     dlqId.toString(),
                     billingRunId.toString(),
@@ -178,7 +186,8 @@ public class DLQRepository {
                     errorType,
                     errorMessage,
                     errorStackTrace,
-                    jsonStr);
+                    jsonStr,
+                    requireAppIdStr());
         } catch (Exception e) {
             throw new IllegalStateException("Failed to insert invoice generation draft DLQ row: " + e.getMessage(), e);
         }
@@ -194,13 +203,15 @@ public class DLQRepository {
                 """
                 SELECT dlq_id
                 FROM client_subscription_billing.billing_dead_letter_queue
-                WHERE billing_run_id = ?::uuid
+                WHERE application_id = ?::uuid
+                  AND billing_run_id = ?::uuid
                   AND stage_run_id = ?::uuid
                   AND error_type = ?
                   AND resolved = false
                 ORDER BY created_on ASC, dlq_id ASC
                 """,
                 (rs, rowNum) -> (UUID) rs.getObject("dlq_id"),
+                requireAppIdStr(),
                 billingRunId.toString(),
                 stageRunId.toString(),
                 errorType);
@@ -214,11 +225,13 @@ public class DLQRepository {
                 """
                 SELECT COUNT(1)
                 FROM client_subscription_billing.billing_dead_letter_queue
-                WHERE stage_run_id = ?::uuid
+                WHERE application_id = ?::uuid
+                  AND stage_run_id = ?::uuid
                   AND resolved = false
                   AND error_type IN ('INVOICE_GENERATION_DRAFT', 'INVOICE_GENERATION_JOB')
                 """,
                 Integer.class,
+                requireAppIdStr(),
                 stageRunId.toString());
         return n != null ? n : 0;
     }
@@ -243,9 +256,10 @@ public class DLQRepository {
             LEFT JOIN transactions.invoice i ON i.invoice_id = dlq.invoice_id
             LEFT JOIN billing_config.failure_type ft ON ft.failure_type_id = dlq.failure_type_id
             WHERE dlq.dlq_id = ?::uuid
+              AND dlq.application_id = ?::uuid
             """;
 
-        List<DLQItemDto> results = jdbc.query(sql, new Object[]{dlqId.toString()}, (rs, rowNum) -> mapDLQItem(rs));
+        List<DLQItemDto> results = jdbc.query(sql, new Object[]{dlqId.toString(), requireAppIdStr()}, (rs, rowNum) -> mapDLQItem(rs));
         return results.isEmpty() ? null : results.get(0);
     }
 
@@ -258,16 +272,16 @@ public class DLQRepository {
             jdbc.update("""
                 UPDATE client_subscription_billing.billing_dead_letter_queue
                 SET retry_count = retry_count + 1, last_retry_on = now(), retry_strategy = ?::jsonb
-                WHERE dlq_id = ?::uuid
+                WHERE dlq_id = ?::uuid AND application_id = ?::uuid
                 """,
-                    retryStrategyStr, dlqId.toString());
+                    retryStrategyStr, dlqId.toString(), requireAppIdStr());
         } catch (Exception e) {
             jdbc.update("""
                 UPDATE client_subscription_billing.billing_dead_letter_queue
                 SET retry_count = retry_count + 1, last_retry_on = now()
-                WHERE dlq_id = ?::uuid
+                WHERE dlq_id = ?::uuid AND application_id = ?::uuid
                 """,
-                        dlqId.toString());
+                        dlqId.toString(), requireAppIdStr());
         }
     }
 
@@ -278,9 +292,9 @@ public class DLQRepository {
         jdbc.update("""
             UPDATE client_subscription_billing.billing_dead_letter_queue
             SET resolved = true, resolved_on = now(), resolved_by = ?, resolution_notes = ?
-            WHERE dlq_id = ?::uuid
+            WHERE dlq_id = ?::uuid AND application_id = ?::uuid
             """,
-                resolvedBy, resolutionNotes, dlqId.toString());
+                resolvedBy, resolutionNotes, dlqId.toString(), requireAppIdStr());
     }
 
     /**
@@ -295,9 +309,9 @@ public class DLQRepository {
             jdbc.update("""
                 UPDATE client_subscription_billing.billing_dead_letter_queue
                 SET retry_strategy = COALESCE(retry_strategy, '{}'::jsonb) || ?::jsonb
-                WHERE dlq_id = ?::uuid
+                WHERE dlq_id = ?::uuid AND application_id = ?::uuid
                 """,
-                    patchStr, dlqId.toString());
+                    patchStr, dlqId.toString(), requireAppIdStr());
         } catch (Exception e) {
             throw new IllegalStateException("Failed to merge billing_dead_letter_queue.retry_strategy: " + e.getMessage(), e);
         }

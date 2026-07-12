@@ -14,7 +14,6 @@ import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -87,7 +86,9 @@ public class MockChargeJobRunner {
         auditLogRepository.insertAuditLog("MOCK_CHARGE", "STAGE_RUN", stageRunId, action, "system", payload);
     }
 
-    @Transactional
+    /**
+     * Not {@code @Transactional}: mock evaluation can take a long time and must not hold a DB connection.
+     */
     public void process(UUID stageRunId) {
         MDC.put(MDC_STAGE_RUN, stageRunId.toString());
         try {

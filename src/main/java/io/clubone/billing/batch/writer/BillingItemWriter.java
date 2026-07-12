@@ -38,12 +38,14 @@ public class BillingItemWriter implements ItemWriter<BillingWorkItem> {
 	public void write(@NonNull Chunk<? extends BillingWorkItem> chunk) {
 		int successCount = 0;
 		int failureCount = 0;
-		
+		// Cache status lookups for the chunk (avoids N identical resolve queries)
+		java.util.Map<String, UUID> statusCache = new java.util.HashMap<>();
+
 		for (BillingWorkItem it : chunk) {
 			try {
 				LoggingUtils.setInvoiceId(it.getInvoiceId());
 				LoggingUtils.setBillingRunId(it.getBillingRunId());
-				writeOne(it);
+				writeOne(it, statusCache);
 				successCount++;
 				metrics.recordInvoiceProcessed(it.getHistoryStatusCode());
 			} catch (BillingDataException e) {
@@ -92,8 +94,10 @@ public class BillingItemWriter implements ItemWriter<BillingWorkItem> {
 			successCount, failureCount, chunk.size());
 	}
 
-	private void writeOne(BillingWorkItem it) {
-		UUID statusId = repo.resolveBillingStatusIdByCode(it.getHistoryStatusCode());
+	private void writeOne(BillingWorkItem it, java.util.Map<String, UUID> statusCache) {
+		UUID statusId = statusCache.computeIfAbsent(
+				it.getHistoryStatusCode(),
+				code -> repo.resolveBillingStatusIdByCode(code));
 		if (statusId == null) {
 			throw new BillingDataException(
 				"Missing billing status code in lookup table",
@@ -104,20 +108,19 @@ public class BillingItemWriter implements ItemWriter<BillingWorkItem> {
 			);
 		}
 
-		// Idempotency check: Verify record doesn't already exist for this run+invoice
-		// This provides defense in depth in case reader check was bypassed
+		// Idempotency: EXISTS is cheaper than COUNT(*)
 		try {
-			Integer existingCount = jdbc.queryForObject(
-				"SELECT COUNT(1) FROM client_subscription_billing.subscription_billing_history " +
-				"WHERE billing_run_id = ?::uuid AND invoice_id = ?::uuid",
-				Integer.class,
+			Boolean exists = jdbc.queryForObject(
+				"SELECT EXISTS (SELECT 1 FROM client_subscription_billing.subscription_billing_history " +
+				"WHERE billing_run_id = ?::uuid AND invoice_id = ?::uuid)",
+				Boolean.class,
 				it.getBillingRunId().toString(),
 				it.getInvoiceId().toString()
 			);
 			
-			if (existingCount != null && existingCount > 0) {
-				log.warn("Billing history record already exists, skipping insert: invoiceId={} billingRunId={} existingCount={}", 
-					it.getInvoiceId(), it.getBillingRunId(), existingCount);
+			if (Boolean.TRUE.equals(exists)) {
+				log.warn("Billing history record already exists, skipping insert: invoiceId={} billingRunId={}", 
+					it.getInvoiceId(), it.getBillingRunId());
 				return; // Idempotent: already processed, skip insert
 			}
 		} catch (Exception e) {

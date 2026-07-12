@@ -21,8 +21,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 
 /**
  * Service for compare operations.
@@ -34,7 +37,13 @@ public class CompareService {
     private final StageRunRepository stageRunRepository;
     private final SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository;
     private final DuePreviewService duePreviewService;
-    private final Map<String, ExportFile> exports = new ConcurrentHashMap<>();
+    /** Bounded TTL cache — previous ConcurrentHashMap retained export byte[] for 24h+ and caused OOM. */
+    private final Cache<String, ExportFile> exports = Caffeine.newBuilder()
+            .expireAfterWrite(2, TimeUnit.HOURS)
+            .maximumWeight(64L * 1024 * 1024) // ~64MB of export payload
+            .weigher((String k, ExportFile v) -> Math.max(1, v.payload().length))
+            .recordStats()
+            .build();
 
     public CompareService(
             CompareRepository compareRepository,
@@ -709,7 +718,8 @@ public class CompareService {
 
     public BillingCompareExportResponse export(BillingCompareQueryRequest request, String baseUrl) {
         List<BillingCompareQueryResponse.Row> allRows = new ArrayList<>();
-        for (int exportPage = 1; ; exportPage++) {
+        final int maxPages = 40; // 40 * 500 = 20_000 rows max (was 10_000 pages / unbounded heap)
+        for (int exportPage = 1; exportPage <= maxPages; exportPage++) {
             BillingCompareQueryRequest paged = new BillingCompareQueryRequest(
                     request.scenarioCode(),
                     request.left(),
@@ -726,22 +736,19 @@ public class CompareService {
             if (!Boolean.TRUE.equals(chunk.hasNext())) {
                 break;
             }
-            if (exportPage > 10_000) {
-                break;
-            }
         }
         String exportId = "cmp-exp-" + UUID.randomUUID().toString().substring(0, 8);
         String csv = toCsv(allRows);
-        OffsetDateTime expiresAt = OffsetDateTime.now().plusHours(24);
-        exports.put(exportId, new ExportFile(csv.getBytes(), expiresAt));
+        OffsetDateTime expiresAt = OffsetDateTime.now().plusHours(2);
+        exports.put(exportId, new ExportFile(csv.getBytes(java.nio.charset.StandardCharsets.UTF_8), expiresAt));
         String downloadUrl = baseUrl + "/api/v1/billing/compare/export/" + exportId + "/download";
         return new BillingCompareExportResponse(exportId, "READY", downloadUrl, expiresAt);
     }
 
     public byte[] downloadExport(String exportId) {
-        ExportFile exportFile = exports.get(exportId);
+        ExportFile exportFile = exports.getIfPresent(exportId);
         if (exportFile == null || exportFile.expiresAt().isBefore(OffsetDateTime.now())) {
-            exports.remove(exportId);
+            exports.invalidate(exportId);
             throw new CompareApiException(
                     "SNAPSHOT_NOT_FOUND",
                     "Export not found or expired",

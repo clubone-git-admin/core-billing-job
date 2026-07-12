@@ -11,6 +11,7 @@ import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.util.*;
 
+import io.clubone.billing.security.AccessContext;
 /**
  * Repository for stage run operations.
  */
@@ -24,6 +25,11 @@ public class StageRunRepository {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
     }
+
+    private static String requireAppIdStr() {
+        return AccessContext.applicationId().toString();
+    }
+
 
     /**
      * Find all stages for a billing run.
@@ -41,10 +47,11 @@ public class StageRunRepository {
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
             JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             WHERE bsr.billing_run_id = ?::uuid
+              AND bsr.application_id = ?::uuid
             ORDER BY bsc.stage_sequence ASC, bsr.created_on ASC, bsr.stage_run_id ASC
             """;
 
-        return jdbc.query(sql, new Object[]{billingRunId.toString()}, (rs, rowNum) -> mapStageRunRow(rs));
+        return jdbc.query(sql, new Object[]{billingRunId.toString(), requireAppIdStr()}, (rs, rowNum) -> mapStageRunRow(rs));
     }
 
     /**
@@ -63,8 +70,9 @@ public class StageRunRepository {
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
             JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             WHERE bsr.stage_run_id = ?::uuid
+              AND bsr.application_id = ?::uuid
             """;
-        List<StageRunDto> results = jdbc.query(sql, new Object[]{stageRunId.toString()}, (rs, rowNum) -> mapStageRunRow(rs));
+        List<StageRunDto> results = jdbc.query(sql, new Object[]{stageRunId.toString(), requireAppIdStr()}, (rs, rowNum) -> mapStageRunRow(rs));
         return results.isEmpty() ? null : results.get(0);
     }
 
@@ -84,11 +92,12 @@ public class StageRunRepository {
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
             JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             WHERE bsr.billing_run_id = ?::uuid AND bsc.stage_code = ?
+              AND bsr.application_id = ?::uuid
             ORDER BY bsr.created_on DESC
             LIMIT 1
             """;
 
-        List<StageRunDto> results = jdbc.query(sql, new Object[]{billingRunId.toString(), stageCode}, (rs, rowNum) -> mapStageRunRow(rs));
+        List<StageRunDto> results = jdbc.query(sql, new Object[]{billingRunId.toString(), stageCode, requireAppIdStr()}, (rs, rowNum) -> mapStageRunRow(rs));
 
         return results.isEmpty() ? null : results.get(0);
     }
@@ -110,11 +119,12 @@ public class StageRunRepository {
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
             JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             WHERE bsr.billing_run_id = ?::uuid AND bsc.stage_code = ?
+              AND bsr.application_id = ?::uuid
               AND srs.status_code NOT IN ('COMPLETED', 'SKIPPED', 'FAILED', 'CANCELLED')
             ORDER BY bsr.created_on ASC, bsr.stage_run_id ASC
             """;
 
-        return jdbc.query(sql, new Object[]{billingRunId.toString(), stageCode}, (rs, rowNum) -> mapStageRunRow(rs));
+        return jdbc.query(sql, new Object[]{billingRunId.toString(), stageCode, requireAppIdStr()}, (rs, rowNum) -> mapStageRunRow(rs));
     }
 
     /**
@@ -136,9 +146,10 @@ public class StageRunRepository {
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
             JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             WHERE bsr.idempotency_key = ?
+              AND bsr.application_id = ?::uuid
             LIMIT 1
             """;
-        List<StageRunDto> results = jdbc.query(sql, new Object[]{idempotencyKey}, (rs, rowNum) -> mapStageRunRow(rs));
+        List<StageRunDto> results = jdbc.query(sql, new Object[]{idempotencyKey, requireAppIdStr()}, (rs, rowNum) -> mapStageRunRow(rs));
         return results.isEmpty() ? null : results.get(0);
     }
 
@@ -163,10 +174,12 @@ public class StageRunRepository {
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
             JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             WHERE bsr.billing_run_id = ?::uuid AND bsc.stage_code = ?
+              AND bsr.application_id = ?::uuid
             """);
         List<Object> params = new ArrayList<>();
         params.add(billingRunId.toString());
         params.add(stageCode);
+        params.add(requireAppIdStr());
         if (statusCode != null && !statusCode.isBlank()) {
             sql.append(" AND srs.status_code = ?");
             params.add(statusCode);
@@ -197,10 +210,12 @@ public class StageRunRepository {
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
             JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             WHERE bsr.billing_run_id = ?::uuid AND bsc.stage_code = ?
+              AND bsr.application_id = ?::uuid
             """);
         List<Object> params = new ArrayList<>();
         params.add(billingRunId.toString());
         params.add(stageCode);
+        params.add(requireAppIdStr());
         if (statusCode != null && !statusCode.isBlank()) {
             sql.append(" AND srs.status_code = ?");
             params.add(statusCode);
@@ -233,10 +248,10 @@ public class StageRunRepository {
                         SET summary_json = COALESCE(summary_json, '{}'::jsonb) || ?::jsonb,
                             is_locked = true,
                             modified_on = now()
-                        WHERE stage_run_id = ?::uuid
+                        WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
                         """,
                         patchStr,
-                        stageRunId.toString());
+                        stageRunId.toString(), requireAppIdStr());
             } else if (hasPatch) {
                 String patchStr = objectMapper.writeValueAsString(patch);
                 jdbc.update(
@@ -244,18 +259,18 @@ public class StageRunRepository {
                         UPDATE client_subscription_billing.billing_stage_run
                         SET summary_json = COALESCE(summary_json, '{}'::jsonb) || ?::jsonb,
                             modified_on = now()
-                        WHERE stage_run_id = ?::uuid
+                        WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
                         """,
                         patchStr,
-                        stageRunId.toString());
+                        stageRunId.toString(), requireAppIdStr());
             } else {
                 jdbc.update(
                         """
                         UPDATE client_subscription_billing.billing_stage_run
                         SET is_locked = true, modified_on = now()
-                        WHERE stage_run_id = ?::uuid
+                        WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
                         """,
-                        stageRunId.toString());
+                        stageRunId.toString(), requireAppIdStr());
             }
         } catch (Exception e) {
             throw new IllegalStateException("Failed to merge billing_stage_run summary_json: " + e.getMessage(), e);
@@ -271,16 +286,16 @@ public class StageRunRepository {
                 jdbc.update("""
                     UPDATE client_subscription_billing.billing_stage_run
                     SET summary_json = NULL, modified_on = now()
-                    WHERE stage_run_id = ?::uuid
-                    """, stageRunId.toString());
+                    WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
+                    """, stageRunId.toString(), requireAppIdStr());
                 return;
             }
             String jsonStr = objectMapper.writeValueAsString(summaryJson);
             jdbc.update("""
                 UPDATE client_subscription_billing.billing_stage_run
                 SET summary_json = ?::jsonb, modified_on = now()
-                WHERE stage_run_id = ?::uuid
-                """, jsonStr, stageRunId.toString());
+                WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
+                """, jsonStr, stageRunId.toString(), requireAppIdStr());
         } catch (Exception e) {
             throw new RuntimeException("Failed to update stage run summary", e);
         }
@@ -296,8 +311,8 @@ public class StageRunRepository {
         jdbc.update("""
             UPDATE client_subscription_billing.billing_stage_run
             SET idempotency_key = ?, modified_on = now()
-            WHERE stage_run_id = ?::uuid AND (idempotency_key IS NULL OR idempotency_key = '')
-            """, idempotencyKey, stageRunId.toString());
+            WHERE stage_run_id = ?::uuid AND application_id = ?::uuid AND (idempotency_key IS NULL OR idempotency_key = '')
+            """, idempotencyKey, stageRunId.toString(), requireAppIdStr());
     }
 
     /**
@@ -315,8 +330,8 @@ public class StageRunRepository {
         jdbc.update("""
             UPDATE client_subscription_billing.billing_stage_run
             SET stage_run_status_id = ?::uuid, ended_on = now(), error_message = ?, modified_on = now()
-            WHERE stage_run_id = ?::uuid
-            """, statusId.toString(), reason, stageRunId.toString());
+            WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
+            """, statusId.toString(), reason, stageRunId.toString(), requireAppIdStr());
     }
 
     private StageRunDto mapStageRunRow(java.sql.ResultSet rs) throws SQLException {
@@ -391,22 +406,22 @@ public class StageRunRepository {
             jdbc.update("""
                 INSERT INTO client_subscription_billing.billing_stage_run
                 (stage_run_id, stage_run_code, billing_run_id, stage_code_id, stage_run_status_id,
-                  started_on, attempt_number, max_attempts, idempotency_key, created_by)
-                VALUES (?::uuid, ?, ?::uuid, ?::uuid, ?::uuid, now(), 1, 1, ?, ?::uuid)
+                  started_on, attempt_number, max_attempts, idempotency_key, created_by, application_id)
+                VALUES (?::uuid, ?, ?::uuid, ?::uuid, ?::uuid, now(), 1, 1, ?, ?::uuid, ?::uuid)
                 """,
                     stageRunId.toString(), stageRunCode, billingRunId.toString(),
                     stageId.toString(), statusId.toString(),
-                    idempotencyKey, createdBy != null ? createdBy.toString() : null);
+                    idempotencyKey, createdBy != null ? createdBy.toString() : null, requireAppIdStr());
         } else {
             jdbc.update("""
                 INSERT INTO client_subscription_billing.billing_stage_run
                 (stage_run_id, stage_run_code, billing_run_id, stage_code_id, stage_run_status_id,
-                  started_on, attempt_number, max_attempts, idempotency_key, created_by)
-                VALUES (?::uuid, ?, ?::uuid, ?::uuid, ?::uuid, NULL, 1, 1, ?, ?::uuid)
+                  started_on, attempt_number, max_attempts, idempotency_key, created_by, application_id)
+                VALUES (?::uuid, ?, ?::uuid, ?::uuid, ?::uuid, NULL, 1, 1, ?, ?::uuid, ?::uuid)
                 """,
                     stageRunId.toString(), stageRunCode, billingRunId.toString(),
                     stageId.toString(), statusId.toString(),
-                    idempotencyKey, createdBy != null ? createdBy.toString() : null);
+                    idempotencyKey, createdBy != null ? createdBy.toString() : null, requireAppIdStr());
         }
 
         return stageRunId;
@@ -426,8 +441,8 @@ public class StageRunRepository {
         jdbc.update("""
             UPDATE client_subscription_billing.billing_stage_run
             SET stage_run_status_id = ?::uuid, modified_on = now()
-            WHERE stage_run_id = ?::uuid
-            """, ids.get(0).toString(), stageRunId.toString());
+            WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
+            """, ids.get(0).toString(), stageRunId.toString(), requireAppIdStr());
         return true;
     }
 
@@ -441,9 +456,9 @@ public class StageRunRepository {
         jdbc.update("""
             UPDATE client_subscription_billing.billing_stage_run
             SET stage_run_status_id = ?::uuid, started_on = now(), modified_on = now()
-            WHERE stage_run_id = ?::uuid
+            WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
             """,
-                statusId.toString(), stageRunId.toString());
+                statusId.toString(), stageRunId.toString(), requireAppIdStr());
     }
 
     /**
@@ -480,17 +495,17 @@ public class StageRunRepository {
             jdbc.update("""
                 UPDATE client_subscription_billing.billing_stage_run
                 SET stage_run_status_id = ?::uuid, ended_on = now(), summary_json = ?::jsonb, modified_on = now()
-                WHERE stage_run_id = ?::uuid
+                WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
                 """,
-                    statusId.toString(), jsonStr, stageRunId.toString());
+                    statusId.toString(), jsonStr, stageRunId.toString(), requireAppIdStr());
         } catch (Exception e) {
             // Log error
             jdbc.update("""
                 UPDATE client_subscription_billing.billing_stage_run
                 SET stage_run_status_id = ?::uuid, ended_on = now(), modified_on = now()
-                WHERE stage_run_id = ?::uuid
+                WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
                 """,
-                        statusId.toString(), stageRunId.toString());
+                        statusId.toString(), stageRunId.toString(), requireAppIdStr());
         }
     }
 
@@ -513,16 +528,16 @@ public class StageRunRepository {
             jdbc.update("""
                 UPDATE client_subscription_billing.billing_stage_run
                 SET stage_run_status_id = ?::uuid, ended_on = now(), summary_json = ?::jsonb, modified_on = now()
-                WHERE stage_run_id = ?::uuid
+                WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
                 """,
-                    statusId.toString(), jsonStr, stageRunId.toString());
+                    statusId.toString(), jsonStr, stageRunId.toString(), requireAppIdStr());
         } catch (Exception e) {
             jdbc.update("""
                 UPDATE client_subscription_billing.billing_stage_run
                 SET stage_run_status_id = ?::uuid, ended_on = now(), modified_on = now()
-                WHERE stage_run_id = ?::uuid
+                WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
                 """,
-                    statusId.toString(), stageRunId.toString());
+                    statusId.toString(), stageRunId.toString(), requireAppIdStr());
         }
         return true;
     }
@@ -539,17 +554,17 @@ public class StageRunRepository {
             jdbc.update("""
                 UPDATE client_subscription_billing.billing_stage_run
                 SET stage_run_status_id = ?::uuid, ended_on = now(), error_message = ?, error_details = ?::jsonb, modified_on = now()
-                WHERE stage_run_id = ?::uuid
+                WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
                 """,
-                    statusId.toString(), errorMessage, errorDetailsStr, stageRunId.toString());
+                    statusId.toString(), errorMessage, errorDetailsStr, stageRunId.toString(), requireAppIdStr());
         } catch (Exception e) {
             // Log error
             jdbc.update("""
                 UPDATE client_subscription_billing.billing_stage_run
                 SET stage_run_status_id = ?::uuid, ended_on = now(), error_message = ?, modified_on = now()
-                WHERE stage_run_id = ?::uuid
+                WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
                 """,
-                        statusId.toString(), errorMessage, stageRunId.toString());
+                        statusId.toString(), errorMessage, stageRunId.toString(), requireAppIdStr());
         }
     }
 }

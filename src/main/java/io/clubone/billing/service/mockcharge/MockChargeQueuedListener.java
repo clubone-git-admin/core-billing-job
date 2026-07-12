@@ -23,7 +23,7 @@ public class MockChargeQueuedListener {
         this.jobRunner = jobRunner;
     }
 
-    @Async
+    @Async("billingAsyncExecutor")
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onMockChargeQueued(MockChargeQueuedEvent event) {
         UUID stageRunId = event.stageRunId();

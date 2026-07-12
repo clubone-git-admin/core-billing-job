@@ -1,6 +1,7 @@
 package io.clubone.billing.repo;
 
 import io.clubone.billing.api.dto.DuePreviewRunHistoryDto;
+import io.clubone.billing.security.AccessContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -20,6 +21,14 @@ public class DuePreviewRepository {
 
     public DuePreviewRepository(@Qualifier("cluboneJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+    }
+
+    private static UUID requireAppId() {
+        return AccessContext.applicationId();
+    }
+
+    private static String requireAppIdStr() {
+        return requireAppId().toString();
     }
 
     /**
@@ -137,7 +146,8 @@ public class DuePreviewRepository {
             AND cct.is_active = true
         WHERE cc.client_role_id = ca.client_role_id
     ) ch ON true
-    WHERE sis.status_name = 'ACTIVE'
+    WHERE sbs.application_id = ?::uuid
+    AND sis.status_name = 'ACTIVE'
     AND sbs.billing_date IS NOT NULL
     AND sbs.billing_date <= ?::date
     AND sbs.invoice_id IS NULL
@@ -145,6 +155,7 @@ public class DuePreviewRepository {
         """);
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         params.add(dueDate);
 
         if (locationIds != null && !locationIds.isEmpty()) {
@@ -252,7 +263,8 @@ public class DuePreviewRepository {
             JOIN client_subscription_billing.subscription_plan sp ON sp.subscription_plan_id = si.subscription_plan_id
             JOIN billing_config.subscription_instance_status ss
                 ON ss.subscription_instance_status_id = si.subscription_instance_status_id
-            WHERE si.subscription_instance_id = ?::uuid
+            WHERE si.application_id = ?::uuid
+              AND si.subscription_instance_id = ?::uuid
               AND COALESCE(sp.is_active, true) = true
               AND ss.status_name = 'ACTIVE'
               AND (si.billing_start_date IS NULL OR si.billing_start_date <= ?::date)
@@ -260,7 +272,7 @@ public class DuePreviewRepository {
         """;
 
         String sid = subscriptionInstanceId.toString();
-        Boolean result = jdbc.queryForObject(sql, Boolean.class, sid, asOfDate, asOfDate);
+        Boolean result = jdbc.queryForObject(sql, Boolean.class, requireAppIdStr(), sid, asOfDate, asOfDate);
         return Boolean.TRUE.equals(result);
     }
 
@@ -299,13 +311,15 @@ public class DuePreviewRepository {
             JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
             LEFT JOIN client_subscription_billing.billing_run br ON br.billing_run_id = bsr.billing_run_id
             LEFT JOIN billing_config.approval_status ap ON ap.approval_status_id = br.approval_status_id
-            WHERE bsc.stage_code = 'DUE_PREVIEW'""";
+            WHERE bsr.application_id = ?::uuid
+              AND bsc.stage_code = 'DUE_PREVIEW'""";
         // Append filter + ORDER/LIMIT in one shot so `?::uuid` is never glued to "ORDER" (text-block concat bug).
         String sql = fromWhere + billingRunFilter
                 + "\n            ORDER BY " + orderCol + " " + dir
                 + "\n            LIMIT ? OFFSET ?\n";
 
         List<Object> args = new ArrayList<>();
+        args.add(requireAppIdStr());
         if (billingRunId != null) {
             args.add(billingRunId.toString());
         }
@@ -337,12 +351,14 @@ public class DuePreviewRepository {
             SELECT COUNT(1)
             FROM client_subscription_billing.billing_stage_run bsr
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
-            WHERE bsc.stage_code = 'DUE_PREVIEW'""" + billingRunFilter;
+            WHERE bsr.application_id = ?::uuid
+              AND bsc.stage_code = 'DUE_PREVIEW'""" + billingRunFilter;
+        List<Object> args = new ArrayList<>();
+        args.add(requireAppIdStr());
         if (billingRunId != null) {
-            Integer n = jdbc.queryForObject(sql, Integer.class, billingRunId.toString());
-            return n != null ? n : 0;
+            args.add(billingRunId.toString());
         }
-        Integer n = jdbc.queryForObject(sql, Integer.class);
+        Integer n = jdbc.queryForObject(sql, args.toArray(), Integer.class);
         return n != null ? n : 0;
     }
 
@@ -407,10 +423,12 @@ public class DuePreviewRepository {
                         spsl.line_sequence ASC NULLS LAST
                     LIMIT 1
                 ) lbl ON true
-                WHERE sbs.billing_schedule_id IN (%s)
+                WHERE sbs.application_id = ?::uuid
+                  AND sbs.billing_schedule_id IN (%s)
                 """, placeholders);
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         for (UUID id : ids) {
             params.add(id.toString());
         }

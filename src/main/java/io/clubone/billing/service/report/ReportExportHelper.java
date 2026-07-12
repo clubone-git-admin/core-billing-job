@@ -2,7 +2,7 @@ package io.clubone.billing.service.report;
 
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.apache.poi.xssf.streaming.SXSSFWorkbook;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -13,9 +13,13 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * CSV and XLSX export with stable key order (first row keys of the first data row, or from {@code columnKeys}).
+ * CSV and XLSX export with stable key order.
+ * XLSX uses streaming {@link SXSSFWorkbook} (windowed rows) to avoid OOM on large exports.
  */
 public final class ReportExportHelper {
+
+    /** Keep only this many rows in memory while writing XLSX. */
+    private static final int SXSSF_ROW_WINDOW = 100;
 
     private ReportExportHelper() {
     }
@@ -28,7 +32,7 @@ public final class ReportExportHelper {
         if (keys.isEmpty()) {
             return "";
         }
-        StringBuilder sb = new StringBuilder();
+        StringBuilder sb = new StringBuilder(Math.min(rows.size() * 64 + 256, 4 * 1024 * 1024));
         sb.append(
                 keys.stream()
                         .map(ReportExportHelper::escapeCsv)
@@ -55,8 +59,11 @@ public final class ReportExportHelper {
                 (columnKeys != null && !columnKeys.isEmpty())
                         ? columnKeys
                         : (rows.isEmpty() ? List.of() : new ArrayList<>(rows.get(0).keySet()));
-        try (XSSFWorkbook wb = new XSSFWorkbook(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            Sheet sh = wb.createSheet(sheetName == null ? "Report" : sheetName.substring(0, Math.min(31, sheetName.length())));
+        try (SXSSFWorkbook wb = new SXSSFWorkbook(SXSSF_ROW_WINDOW);
+                ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            wb.setCompressTempFiles(true);
+            String safeName = sheetName == null ? "Report" : sheetName.substring(0, Math.min(31, sheetName.length()));
+            Sheet sh = wb.createSheet(safeName);
             int r = 0;
             Row head = sh.createRow(r++);
             for (int i = 0; i < keys.size(); i++) {
@@ -76,6 +83,7 @@ public final class ReportExportHelper {
                 }
             }
             wb.write(out);
+            wb.dispose();
             return out.toByteArray();
         }
     }

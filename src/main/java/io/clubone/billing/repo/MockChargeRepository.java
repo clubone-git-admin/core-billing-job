@@ -2,6 +2,7 @@ package io.clubone.billing.repo;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.clubone.billing.security.AccessContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,6 +32,14 @@ public class MockChargeRepository {
             ObjectMapper objectMapper) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
+    }
+
+    private static UUID requireAppId() {
+        return AccessContext.applicationId();
+    }
+
+    private static String requireAppIdStr() {
+        return requireAppId().toString();
     }
 
     public Optional<UUID> findBillingStatusIdByCode(String statusCode) {
@@ -111,7 +120,35 @@ public class MockChargeRepository {
      * {@link MockInvoiceRow#invoiceCurrencyCode()} is null unless you add e.g. {@code transactions.invoice.currency_code}
      * and extend this query — {@code client_agreements.client_agreement} has no currency column in the current schema.
      */
+    /**
+     * Prefer {@link #findInvoicesForBillingRun(UUID, int, int)} for jobs.
+     * This overload pages internally with a hard ceiling to avoid unbounded heap.
+     */
     public List<MockInvoiceRow> findInvoicesForBillingRun(UUID billingRunId) {
+        List<MockInvoiceRow> all = new java.util.ArrayList<>();
+        final int page = 1_000;
+        final int hardMax = 50_000;
+        int offset = 0;
+        while (all.size() < hardMax) {
+            List<MockInvoiceRow> chunk = findInvoicesForBillingRun(billingRunId, page, offset);
+            if (chunk.isEmpty()) {
+                break;
+            }
+            all.addAll(chunk);
+            if (chunk.size() < page) {
+                break;
+            }
+            offset += page;
+        }
+        return all;
+    }
+
+    /**
+     * Page invoices for a billing run. Prefer this over the unbounded overload for long charge jobs.
+     */
+    public List<MockInvoiceRow> findInvoicesForBillingRun(UUID billingRunId, int limit, int offset) {
+        int safeLimit = Math.max(1, Math.min(limit, 5_000));
+        int safeOffset = Math.max(0, offset);
         String sql = """
                 SELECT i.invoice_id,
                        i.client_role_id,
@@ -133,9 +170,11 @@ public class MockChargeRepository {
                 ) ie ON true
                 LEFT JOIN transactions.lu_invoice_status invs_mc ON invs_mc.invoice_status_id = i.invoice_status_id
                 WHERE i.billing_run_id = ?::uuid
+                  AND i.application_id = ?::uuid
                   AND COALESCE(i.is_active, true) = true
                   AND UPPER(TRIM(COALESCE(invs_mc.status_name, ''))) <> 'VOID'
                 ORDER BY i.created_on ASC
+                LIMIT ? OFFSET ?
                 """;
         return jdbc.query(sql, (rs, rn) -> new MockInvoiceRow(
                 (UUID) rs.getObject("invoice_id"),
@@ -146,7 +185,24 @@ public class MockChargeRepository {
                 rs.getBigDecimal("discount_amount"),
                 rs.getBigDecimal("total_amount"),
                 (UUID) rs.getObject("subscription_instance_id"),
-                null), billingRunId.toString());
+                null), billingRunId.toString(), requireAppIdStr(), safeLimit, safeOffset);
+    }
+
+    public int countInvoicesForBillingRun(UUID billingRunId) {
+        Integer n = jdbc.queryForObject(
+                """
+                SELECT COUNT(*)::int
+                FROM transactions.invoice i
+                LEFT JOIN transactions.lu_invoice_status invs_mc ON invs_mc.invoice_status_id = i.invoice_status_id
+                WHERE i.billing_run_id = ?::uuid
+                  AND i.application_id = ?::uuid
+                  AND COALESCE(i.is_active, true) = true
+                  AND UPPER(TRIM(COALESCE(invs_mc.status_name, ''))) <> 'VOID'
+                """,
+                Integer.class,
+                billingRunId.toString(),
+                requireAppIdStr());
+        return n != null ? n : 0;
     }
 
     /**
@@ -169,7 +225,10 @@ public class MockChargeRepository {
                     FROM client_payments.client_gateway_mandate cgm
                     JOIN client_payments.lu_gateway_mandate_status lgs
                       ON lgs.gateway_mandate_status_id = cgm.mandate_status_id
+                    JOIN client_subscription_billing.subscription_plan sp
+                      ON sp.subscription_plan_id = cgm.subscription_plan_id
                     WHERE cgm.subscription_plan_id = ?::uuid
+                      AND sp.application_id = ?::uuid
                       AND COALESCE(cgm.is_active, true) = true
                     ORDER BY cgm.created_on DESC NULLS LAST
                     LIMIT 1
@@ -182,7 +241,8 @@ public class MockChargeRepository {
                             rs.getObject("mandate_end_date", java.sql.Timestamp.class),
                             rs.getObject("mandate_max_amount_minor") != null ? rs.getLong("mandate_max_amount_minor") : null,
                             rs.getString("mandate_currency")),
-                    subscriptionPlanId.toString());
+                    subscriptionPlanId.toString(),
+                    requireAppIdStr());
             return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
         } catch (DataAccessException ex) {
             return Optional.empty();
@@ -199,10 +259,12 @@ public class MockChargeRepository {
                     SELECT subscription_plan_id
                     FROM client_subscription_billing.subscription_instance
                     WHERE subscription_instance_id = ?::uuid
+                      AND application_id = ?::uuid
                     LIMIT 1
                     """,
                     rs -> rs.next() ? (UUID) rs.getObject("subscription_plan_id") : null,
-                    subscriptionInstanceId.toString());
+                    subscriptionInstanceId.toString(),
+                    requireAppIdStr());
             return Optional.ofNullable(id);
         } catch (DataAccessException ex) {
             return Optional.empty();
@@ -256,7 +318,8 @@ public class MockChargeRepository {
                     invoice_total_amount,
                     mock_charge_status,
                     mock_charge_failure_code,
-                    mock_charge_details
+                    mock_charge_details,
+                    application_id
                 ) VALUES (
                     gen_random_uuid(),
                     ?::uuid,
@@ -274,7 +337,8 @@ public class MockChargeRepository {
                     ?::numeric,
                     ?,
                     ?,
-                    ?::jsonb
+                    ?::jsonb,
+                    ?::uuid
                 )
                 """,
                 subscriptionInstanceId.toString(),
@@ -289,7 +353,8 @@ public class MockChargeRepository {
                 total,
                 mockChargeStatus,
                 mockChargeFailureCode,
-                detailsJson);
+                detailsJson,
+                requireAppIdStr());
     }
 
     public record MockInvoiceRow(

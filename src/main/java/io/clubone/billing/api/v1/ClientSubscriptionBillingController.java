@@ -5,17 +5,17 @@ import io.clubone.billing.api.dto.billingprofile.BillingProfileLevelOverridesInd
 import io.clubone.billing.api.dto.billingprofile.BillingProfileLevelOverrideDto;
 import io.clubone.billing.api.dto.billingprofile.UpsertBillingProfileDefaultRequest;
 import io.clubone.billing.api.dto.billingprofile.UpsertBillingProfileLevelOverrideRequest;
-import io.clubone.billing.api.util.ApplicationIdHeader;
 import io.clubone.billing.service.BillingProfileSettingsService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
+
+import io.clubone.billing.security.AccessContext;
 
 /**
  * APIs for {@code client_subscription_billing.billing_profile_default} and
@@ -34,18 +34,17 @@ public class ClientSubscriptionBillingController {
 
     @Operation(summary = "Get application billing profile default")
     @GetMapping("/billing-profile-default")
-    public ResponseEntity<BillingProfileDefaultDto> getBillingProfileDefault(HttpServletRequest request) {
-        UUID applicationId = ApplicationIdHeader.requireApplicationId(request);
+    public ResponseEntity<BillingProfileDefaultDto> getBillingProfileDefault() {
+        UUID applicationId = AccessContext.applicationId();
         return ResponseEntity.ok(billingProfileSettingsService.getBillingProfileDefault(applicationId));
     }
 
     @Operation(summary = "Create or update application billing profile default")
     @PutMapping("/billing-profile-default")
     public ResponseEntity<BillingProfileDefaultDto> putBillingProfileDefault(
-            HttpServletRequest request,
             @Valid @RequestBody UpsertBillingProfileDefaultRequest body) {
-        UUID applicationId = ApplicationIdHeader.requireApplicationId(request);
-        UUID actorId = ApplicationIdHeader.optionalActorId(request);
+        UUID applicationId = AccessContext.applicationId();
+        UUID actorId = AccessContext.actorApplicationUserId();
         BillingProfileDefaultDto dto = billingProfileSettingsService.upsertBillingProfileDefault(applicationId, body, actorId);
         return ResponseEntity.status(HttpStatus.OK).body(dto);
     }
@@ -60,10 +59,9 @@ public class ClientSubscriptionBillingController {
     @Operation(summary = "List billing profile level overrides")
     @GetMapping("/billing-profile-level-overrides")
     public ResponseEntity<?> listLevelOverrides(
-            HttpServletRequest request,
             @RequestParam(required = false) UUID levelId,
             @RequestParam(required = false, defaultValue = "false") boolean index) {
-        UUID applicationId = ApplicationIdHeader.requireApplicationId(request);
+        UUID applicationId = AccessContext.applicationId();
         if (levelId != null) {
             return ResponseEntity.ok(
                     billingProfileSettingsService.listLevelOverridesForLevel(applicationId, levelId));
@@ -79,10 +77,9 @@ public class ClientSubscriptionBillingController {
     @Operation(summary = "Create billing profile level override")
     @PostMapping("/billing-profile-level-overrides")
     public ResponseEntity<BillingProfileLevelOverrideDto> createLevelOverride(
-            HttpServletRequest request,
             @RequestBody UpsertBillingProfileLevelOverrideRequest body) {
-        UUID applicationId = ApplicationIdHeader.requireApplicationId(request);
-        UUID actorId = ApplicationIdHeader.optionalActorId(request);
+        UUID applicationId = AccessContext.applicationId();
+        UUID actorId = AccessContext.actorApplicationUserId();
         BillingProfileLevelOverrideDto dto = billingProfileSettingsService.createLevelOverride(applicationId, body, actorId);
         return ResponseEntity.status(HttpStatus.CREATED).body(dto);
     }
@@ -90,11 +87,10 @@ public class ClientSubscriptionBillingController {
     @Operation(summary = "Update billing profile level override")
     @PutMapping("/billing-profile-level-overrides/{billingProfileLevelOverrideId}")
     public ResponseEntity<BillingProfileLevelOverrideDto> updateLevelOverride(
-            HttpServletRequest request,
             @PathVariable UUID billingProfileLevelOverrideId,
             @RequestBody UpsertBillingProfileLevelOverrideRequest body) {
-        UUID applicationId = ApplicationIdHeader.requireApplicationId(request);
-        UUID actorId = ApplicationIdHeader.optionalActorId(request);
+        UUID applicationId = AccessContext.applicationId();
+        UUID actorId = AccessContext.actorApplicationUserId();
         BillingProfileLevelOverrideDto dto = billingProfileSettingsService.updateLevelOverride(
                 applicationId, billingProfileLevelOverrideId, body, actorId);
         if (dto == null) {

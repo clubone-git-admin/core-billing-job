@@ -14,6 +14,7 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.*;
 
+import io.clubone.billing.security.AccessContext;
 /**
  * Repository for billing run operations.
  */
@@ -27,6 +28,15 @@ public class BillingRunRepository {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
     }
+
+    private static UUID requireAppId() {
+        return AccessContext.applicationId();
+    }
+
+    private static String requireAppIdStr() {
+        return requireAppId().toString();
+    }
+
 
     /**
      * Find billing runs with filtering and pagination.
@@ -57,10 +67,11 @@ public class BillingRunRepository {
             LEFT JOIN locations.levels lv_scope ON lv_scope.level_id = br.location_level_id
             LEFT JOIN locations.location l ON l.location_id = br.location_id
             LEFT JOIN client_subscription_billing.billing_run src ON src.billing_run_id = br.source_run_id
-            WHERE 1=1
+            WHERE br.application_id = ?::uuid
             """);
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
 
         if (statusCode != null) {
             sql.append(" AND brs.status_code = ?");
@@ -141,9 +152,10 @@ public class BillingRunRepository {
             LEFT JOIN locations.levels lv_scope ON lv_scope.level_id = br.location_level_id
             LEFT JOIN locations.location l ON l.location_id = br.location_id
             LEFT JOIN client_subscription_billing.billing_run src ON src.billing_run_id = br.source_run_id
-            WHERE 1=1
+            WHERE br.application_id = ?::uuid
             """);
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         appendDashboardRunScopeFilters(sql, params, dueDateFrom, dueDateTo, asOfFrom, asOfTo, locationIds, status, currentStage);
         sql.append(" ORDER BY COALESCE(br.modified_on, br.ended_on, br.created_on) DESC NULLS LAST ");
         sql.append(" LIMIT ? OFFSET ?");
@@ -443,10 +455,11 @@ public class BillingRunRepository {
             FROM client_subscription_billing.billing_run br
             LEFT JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
             LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
-            WHERE 1=1
+            WHERE br.application_id = ?::uuid
             """);
 
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
 
         if (statusCode != null) {
             sql.append(" AND brs.status_code = ?");
@@ -498,10 +511,11 @@ public class BillingRunRepository {
             LEFT JOIN locations.location l ON l.location_id = br.location_id
             LEFT JOIN client_subscription_billing.billing_run src ON src.billing_run_id = br.source_run_id
             WHERE br.billing_run_id = ?::uuid
+              AND br.application_id = ?::uuid
             """;
 
         List<BillingRunDto> results = jdbc.query(
-                sql, new Object[]{billingRunId.toString()}, (rs, rowNum) -> mapBillingRunRow(rs, false));
+                sql, new Object[]{billingRunId.toString(), requireAppIdStr()}, (rs, rowNum) -> mapBillingRunRow(rs, false));
 
         if (results.isEmpty()) {
             return null;
@@ -520,9 +534,10 @@ public class BillingRunRepository {
             SELECT br.billing_run_id
             FROM client_subscription_billing.billing_run br
             WHERE br.idempotency_key = ?
+              AND br.application_id = ?::uuid
             """;
 
-        List<UUID> ids = jdbc.query(sql, new Object[]{idempotencyKey}, (rs, rowNum) ->
+        List<UUID> ids = jdbc.query(sql, new Object[]{idempotencyKey, requireAppIdStr()}, (rs, rowNum) ->
                 (UUID) rs.getObject("billing_run_id"));
 
         if (ids.isEmpty()) {
@@ -582,9 +597,10 @@ public class BillingRunRepository {
                 INSERT INTO client_subscription_billing.billing_run
                 (billing_run_id, billing_run_code, due_date, location_id,
                  location_level_id, include_child_locations,
-                 billing_run_status_id, current_stage_code_id, started_on, created_by, idempotency_key, summary_json)
+                 billing_run_status_id, current_stage_code_id, started_on, created_by, idempotency_key, summary_json,
+                 application_id)
                 VALUES (?::uuid, ?, ?::date, ?::uuid, ?::uuid, ?,
-                        ?::uuid, ?::uuid, ?::timestamptz, ?::uuid, ?, ?::jsonb)
+                        ?::uuid, ?::uuid, ?::timestamptz, ?::uuid, ?, ?::jsonb, ?::uuid)
                 """,
                 billingRunId.toString(),
                 billingRunCode,
@@ -597,7 +613,8 @@ public class BillingRunRepository {
                 OffsetDateTime.now(),
                 createdBy != null ? createdBy.toString() : null,
                 idempotencyKey,
-                summaryJsonStr);
+                summaryJsonStr,
+                requireAppIdStr());
 
         if (scopeLocationIds != null && !scopeLocationIds.isEmpty()) {
             insertRunScopeLocations(billingRunId, scopeLocationIds);
@@ -656,6 +673,7 @@ public class BillingRunRepository {
                     SELECT br.location_id AS loc_id
                     FROM client_subscription_billing.billing_run br
                     WHERE br.billing_run_id = ?::uuid
+                      AND br.application_id = ?::uuid
                       AND br.location_id IS NOT NULL
                     UNION ALL
                     SELECT j.location_id AS loc_id
@@ -665,7 +683,7 @@ public class BillingRunRepository {
                 WHERE u.loc_id IS NOT NULL
                 """,
                 (rs, row) -> (UUID) rs.getObject(1, UUID.class),
-                billingRunId.toString(), billingRunId.toString());
+                billingRunId.toString(), requireAppIdStr(), billingRunId.toString());
     }
 
     /**
@@ -713,7 +731,8 @@ public class BillingRunRepository {
                     FROM client_subscription_billing.billing_run br
                     JOIN billing_config.billing_run_status brs
                         ON brs.billing_run_status_id = br.billing_run_status_id
-                    WHERE br.due_date = ?::date
+                    WHERE br.application_id = ?::uuid
+                      AND br.due_date = ?::date
                       AND brs.status_code NOT IN ('CANCELLED', 'FAILED_SYSTEM')
                       AND br.location_id IS NULL
                       AND (br.location_level_id IS NULL)
@@ -724,7 +743,7 @@ public class BillingRunRepository {
                     LIMIT 1
                     """,
                     UUID.class,
-                    dueDate);
+                    requireAppIdStr(), dueDate);
             return Optional.ofNullable(id);
         } catch (org.springframework.dao.EmptyResultDataAccessException e) {
             return Optional.empty();
@@ -749,7 +768,8 @@ public class BillingRunRepository {
                 FROM client_subscription_billing.billing_run br
                 JOIN billing_config.billing_run_status brs
                     ON brs.billing_run_status_id = br.billing_run_status_id
-                WHERE br.due_date = ?::date
+                WHERE br.application_id = ?::uuid
+                      AND br.due_date = ?::date
                   AND brs.status_code NOT IN ('CANCELLED', 'FAILED_SYSTEM')
                   AND NOT (
                       br.location_id IS NULL
@@ -765,7 +785,8 @@ public class BillingRunRepository {
                         (UUID) rs.getObject(1, UUID.class),
                         (UUID) rs.getObject(2, UUID.class),
                         (Boolean) rs.getObject(3, Boolean.class)),
-                dueDate);
+                
+                requireAppIdStr(), dueDate);
     }
 
     /**

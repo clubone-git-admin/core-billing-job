@@ -1,5 +1,6 @@
 package io.clubone.billing.repo;
 
+import io.clubone.billing.security.AccessContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -23,6 +24,14 @@ public class ForecastRepository {
         this.jdbc = jdbc;
     }
 
+    private static UUID requireAppId() {
+        return AccessContext.applicationId();
+    }
+
+    private static String requireAppIdStr() {
+        return requireAppId().toString();
+    }
+
     /**
      * Get forecast items aggregated by date.
      */
@@ -38,7 +47,8 @@ public class ForecastRepository {
             JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id
             LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
             WHERE sbs.billing_date >= ? AND sbs.billing_date <= ?
-            AND bss.status_code IN """
+              AND sbs.application_id = ?::uuid
+              AND bss.status_code IN """
                     + FORECAST_OPEN_STATUS_SQL
                     + """
             """);
@@ -46,6 +56,7 @@ public class ForecastRepository {
         List<Object> params = new ArrayList<>();
         params.add(from);
         params.add(to);
+        params.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             String in = inClausePlaceholders(locationIds.size());
             sql.append(" AND EXISTS (")
@@ -87,7 +98,8 @@ public class ForecastRepository {
             LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
             JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id
             WHERE sbs.billing_date >= ? AND sbs.billing_date <= ?
-            AND bss.status_code IN """
+              AND sbs.application_id = ?::uuid
+              AND bss.status_code IN """
                     + FORECAST_OPEN_STATUS_SQL
                     + """
             """);
@@ -95,6 +107,7 @@ public class ForecastRepository {
         List<Object> params = new ArrayList<>();
         params.add(from);
         params.add(to);
+        params.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             String in = inClausePlaceholders(locationIds.size());
             sql.append(" AND EXISTS (")
@@ -127,7 +140,8 @@ public class ForecastRepository {
             JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
             JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id
             WHERE sbs.billing_date >= ? AND sbs.billing_date <= ?
-            AND bss.status_code IN """
+              AND sbs.application_id = ?::uuid
+              AND bss.status_code IN """
                     + FORECAST_OPEN_STATUS_SQL
                     + """
             """);
@@ -135,6 +149,7 @@ public class ForecastRepository {
         List<Object> params = new ArrayList<>();
         params.add(from);
         params.add(to);
+        params.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             String in = inClausePlaceholders(locationIds.size());
             sql.append(" AND EXISTS (")
@@ -174,12 +189,13 @@ public class ForecastRepository {
             JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
             LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
             WHERE sbs.billing_date = ?
-            AND bss.status_code IN """
+              AND sbs.application_id = ?::uuid
+              AND bss.status_code IN """
                     + FORECAST_OPEN_STATUS_SQL
                     + """
             """;
 
-        return jdbc.queryForMap(sql, date);
+        return jdbc.queryForMap(sql, date, requireAppIdStr());
     }
 
     /**
@@ -203,13 +219,15 @@ public class ForecastRepository {
             LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
             JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id
             WHERE sbs.billing_date = ?
-            AND bss.status_code IN """
+              AND sbs.application_id = ?::uuid
+              AND bss.status_code IN """
                     + FORECAST_OPEN_STATUS_SQL
                     + """
             """);
 
         List<Object> params = new ArrayList<>();
         params.add(date);
+        params.add(requireAppIdStr());
 
         if (search != null && !search.isEmpty()) {
             sql.append("""
@@ -263,11 +281,21 @@ public class ForecastRepository {
                 sbs.created_on
             FROM client_subscription_billing.subscription_billing_schedule sbs
             JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
+            JOIN client_subscription_billing.subscription_instance si
+              ON si.subscription_instance_id = sbs.subscription_instance_id
             WHERE sbs.subscription_instance_id = ?::uuid
-            AND sbs.billing_date >= ? AND sbs.billing_date <= ?
+              AND sbs.application_id = ?::uuid
+              AND si.application_id = ?::uuid
+              AND sbs.billing_date >= ? AND sbs.billing_date <= ?
             ORDER BY sbs.billing_date
             """;
 
-        return jdbc.queryForList(sql, subscriptionInstanceId.toString(), from, to);
+        return jdbc.queryForList(
+                sql,
+                subscriptionInstanceId.toString(),
+                requireAppIdStr(),
+                requireAppIdStr(),
+                from,
+                to);
     }
 }

@@ -2,6 +2,7 @@ package io.clubone.billing.repo;
 
 import io.clubone.billing.api.dto.BillingCompareQueryResponse;
 import io.clubone.billing.api.dto.BillingCompareSnapshotListResponse;
+import io.clubone.billing.security.AccessContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.SqlParameterValue;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -26,6 +27,14 @@ public class CompareRepository {
         this.jdbc = jdbc;
     }
 
+    private static UUID requireAppId() {
+        return AccessContext.applicationId();
+    }
+
+    private static String requireAppIdStr() {
+        return requireAppId().toString();
+    }
+
     /**
      * Get billing run summary for comparison.
      */
@@ -38,13 +47,17 @@ public class CompareRepository {
                 COUNT(DISTINCT CASE WHEN bs.is_success = true THEN sbh.invoice_id END) AS success_count,
                 COUNT(DISTINCT CASE WHEN bs.is_failure = true THEN sbh.invoice_id END) AS failure_count
             FROM client_subscription_billing.billing_run br
-            LEFT JOIN client_subscription_billing.subscription_billing_history sbh ON sbh.billing_run_id = br.billing_run_id
+            LEFT JOIN client_subscription_billing.subscription_billing_history sbh
+              ON sbh.billing_run_id = br.billing_run_id
+             AND sbh.application_id = br.application_id
             LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
             WHERE br.billing_run_id = ?::uuid
+              AND br.application_id = ?::uuid
             GROUP BY br.billing_run_id, br.billing_run_code, br.due_date
             """;
 
-        List<Map<String, Object>> results = jdbc.queryForList(sql, billingRunId.toString());
+        List<Map<String, Object>> results =
+                jdbc.queryForList(sql, billingRunId.toString(), requireAppIdStr());
         return results.isEmpty() ? null : results.get(0);
     }
 
@@ -69,12 +82,14 @@ public class CompareRepository {
                        sbh.billing_status_id, sbh.failure_reason
                 FROM client_subscription_billing.subscription_billing_history sbh
                 WHERE sbh.billing_run_id = ?::uuid
+                  AND sbh.application_id = ?::uuid
             ) a
             FULL OUTER JOIN (
                 SELECT sbh.subscription_instance_id, sbh.invoice_id, sbh.invoice_total_amount,
                        sbh.billing_status_id, sbh.failure_reason
                 FROM client_subscription_billing.subscription_billing_history sbh
                 WHERE sbh.billing_run_id = ?::uuid
+                  AND sbh.application_id = ?::uuid
             ) b ON a.subscription_instance_id = b.subscription_instance_id
             LEFT JOIN billing_config.billing_status a_status ON a_status.billing_status_id = a.billing_status_id
             LEFT JOIN billing_config.billing_status b_status ON b_status.billing_status_id = b.billing_status_id
@@ -83,7 +98,8 @@ public class CompareRepository {
                OR a_status.status_code IS DISTINCT FROM b_status.status_code
             """;
 
-        return jdbc.queryForList(sql, runA.toString(), runB.toString());
+        return jdbc.queryForList(
+                sql, runA.toString(), requireAppIdStr(), runB.toString(), requireAppIdStr());
     }
 
     /**
@@ -99,14 +115,17 @@ public class CompareRepository {
             FROM client_subscription_billing.subscription_billing_history a
             LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = a.billing_status_id
             WHERE a.billing_run_id = ?::uuid
+            AND a.application_id = ?::uuid
             AND NOT EXISTS (
                 SELECT 1 FROM client_subscription_billing.subscription_billing_history b
                 WHERE b.billing_run_id = ?::uuid
                 AND b.subscription_instance_id = a.subscription_instance_id
+                AND b.application_id = ?::uuid
             )
             """;
 
-        return jdbc.queryForList(sql, runA.toString(), runB.toString());
+        return jdbc.queryForList(
+                sql, runA.toString(), requireAppIdStr(), runB.toString(), requireAppIdStr());
     }
 
     /**
@@ -122,14 +141,17 @@ public class CompareRepository {
             FROM client_subscription_billing.subscription_billing_history b
             LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = b.billing_status_id
             WHERE b.billing_run_id = ?::uuid
+            AND b.application_id = ?::uuid
             AND NOT EXISTS (
                 SELECT 1 FROM client_subscription_billing.subscription_billing_history a
                 WHERE a.billing_run_id = ?::uuid
                 AND a.subscription_instance_id = b.subscription_instance_id
+                AND a.application_id = ?::uuid
             )
             """;
 
-        return jdbc.queryForList(sql, runB.toString(), runA.toString());
+        return jdbc.queryForList(
+                sql, runB.toString(), requireAppIdStr(), runA.toString(), requireAppIdStr());
     }
 
     /**
@@ -142,12 +164,15 @@ public class CompareRepository {
             WHERE br.due_date < (
                 SELECT due_date FROM client_subscription_billing.billing_run
                 WHERE billing_run_id = ?::uuid
+                  AND application_id = ?::uuid
             )
+              AND br.application_id = ?::uuid
             ORDER BY br.due_date DESC, br.created_on DESC
             LIMIT 1
             """;
 
-        List<UUID> results = jdbc.query(sql, new Object[]{billingRunId.toString()}, 
+        List<UUID> results = jdbc.query(sql,
+                new Object[]{billingRunId.toString(), requireAppIdStr(), requireAppIdStr()},
                 (rs, rowNum) -> (UUID) rs.getObject("billing_run_id"));
         
         return results.isEmpty() ? null : results.get(0);
@@ -159,9 +184,11 @@ public class CompareRepository {
                 SELECT COUNT(1)
                 FROM client_subscription_billing.billing_run br
                 WHERE br.billing_run_id = ?::uuid
+                  AND br.application_id = ?::uuid
                 """,
                 Integer.class,
-                billingRunId.toString());
+                billingRunId.toString(),
+                requireAppIdStr());
         return n != null && n > 0;
     }
 
@@ -179,9 +206,10 @@ public class CompareRepository {
                 JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
                 WHERE bsr.stage_run_id = ?::uuid
                   AND bsc.stage_code = ?
+                  AND bsr.application_id = ?::uuid
                 LIMIT 1
                 """,
-                new Object[]{runId.toString(), stageCode},
+                new Object[]{runId.toString(), stageCode, requireAppIdStr()},
                 (rs, rowNum) -> (UUID) rs.getObject("billing_run_id"));
         return results.isEmpty() ? null : results.get(0);
     }
@@ -276,13 +304,16 @@ public class CompareRepository {
                         0
                     ) AS amount_total
                 FROM client_subscription_billing.billing_stage_run bsr
-                JOIN client_subscription_billing.billing_run br ON br.billing_run_id = bsr.billing_run_id
+                JOIN client_subscription_billing.billing_run br
+                  ON br.billing_run_id = bsr.billing_run_id
+                 AND br.application_id = bsr.application_id
                 JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
                 JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
                 LEFT JOIN locations.location loc ON loc.location_id = br.location_id
-                WHERE 1=1
+                WHERE br.application_id = ?::uuid
                 """);
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         if (stageCode != null && !stageCode.isBlank()) {
             sql.append(" AND bsc.stage_code = ?");
             params.add(stageCode);
@@ -320,12 +351,15 @@ public class CompareRepository {
         StringBuilder sql = new StringBuilder("""
                 SELECT COUNT(1)
                 FROM client_subscription_billing.billing_stage_run bsr
-                JOIN client_subscription_billing.billing_run br ON br.billing_run_id = bsr.billing_run_id
+                JOIN client_subscription_billing.billing_run br
+                  ON br.billing_run_id = bsr.billing_run_id
+                 AND br.application_id = bsr.application_id
                 JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
                 LEFT JOIN locations.location loc ON loc.location_id = br.location_id
-                WHERE 1=1
+                WHERE br.application_id = ?::uuid
                 """);
         List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
         if (stageCode != null && !stageCode.isBlank()) {
             sql.append(" AND bsc.stage_code = ?");
             params.add(stageCode);
@@ -372,7 +406,9 @@ public class CompareRepository {
             String search,
             String severity) {
         params.add(new SqlParameterValue(Types.OTHER, leftRunId));
+        params.add(new SqlParameterValue(Types.OTHER, requireAppId()));
         params.add(new SqlParameterValue(Types.OTHER, rightRunId));
+        params.add(new SqlParameterValue(Types.OTHER, requireAppId()));
         String term = search == null ? "" : search.trim();
         String like = "%" + term + "%";
         String normalizedSeverity = (severity == null || severity.isBlank() || "ALL".equalsIgnoreCase(severity))
@@ -643,17 +679,21 @@ public class CompareRepository {
                     JOIN client_subscription_billing.subscription_billing_schedule sbs
                       ON sbs.billing_date IS NOT NULL
                      AND sbs.billing_date <= br.due_date
+                     AND sbs.application_id = br.application_id
                     LEFT JOIN transactions.invoice inv
                       ON inv.invoice_id = sbs.invoice_id
+                     AND inv.application_id = br.application_id
                      AND COALESCE(inv.is_active, true) = true
                     LEFT JOIN transactions.lu_invoice_status invs_dp
                       ON invs_dp.invoice_status_id = inv.invoice_status_id
                     JOIN client_subscription_billing.subscription_instance si
                       ON si.subscription_instance_id = sbs.subscription_instance_id
+                     AND si.application_id = br.application_id
                     JOIN billing_config.subscription_instance_status sis
                       ON sis.subscription_instance_status_id = si.subscription_instance_status_id
                     JOIN client_subscription_billing.subscription_plan sp
                       ON sp.subscription_plan_id = sbs.subscription_plan_id
+                     AND sp.application_id = br.application_id
                      AND COALESCE(sp.is_active, true) = true
                     LEFT JOIN client_agreements.client_agreement ca ON ca.client_agreement_id = sp.client_agreement_id
                     LEFT JOIN agreements.agreement a ON a.agreement_id = ca.agreement_id
@@ -694,6 +734,7 @@ public class CompareRepository {
                           AND COALESCE(cct.is_active, true) = true
                     ) ch ON true
                     WHERE br.billing_run_id = ?::uuid
+                      AND br.application_id = ?::uuid
                       AND sis.status_name = 'ACTIVE'
                       AND (
                             sbs.invoice_id IS NULL
@@ -722,13 +763,17 @@ public class CompareRepository {
                         COALESCE(sp.subscription_plan_code, a.agreement_name, '') AS plan_name
                     FROM (
                         SELECT DISTINCT ON (h0.invoice_id)
-                            h0.invoice_id, h0.subscription_instance_id, h0.billing_status_id, h0.invoice_total_amount
+                            h0.invoice_id, h0.subscription_instance_id, h0.billing_status_id,
+                            h0.invoice_total_amount, h0.application_id
                         FROM client_subscription_billing.subscription_billing_history h0
                         WHERE h0.billing_run_id = ?::uuid
+                          AND h0.application_id = ?::uuid
                           AND COALESCE(h0.is_mock, false) = false
                         ORDER BY h0.invoice_id, h0.billing_attempt_on DESC NULLS LAST, h0.created_on DESC NULLS LAST
                     ) h
-                    LEFT JOIN transactions.invoice i ON i.invoice_id = h.invoice_id
+                    LEFT JOIN transactions.invoice i
+                      ON i.invoice_id = h.invoice_id
+                     AND i.application_id = h.application_id
                     LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = h.billing_status_id
                     LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id
                     LEFT JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = h.subscription_instance_id
@@ -772,6 +817,7 @@ public class CompareRepository {
                     FROM client_subscription_billing.subscription_billing_history h2
                     WHERE h2.invoice_id = i.invoice_id
                       AND h2.billing_run_id = i.billing_run_id
+                      AND h2.application_id = i.application_id
                     ORDER BY h2.billing_attempt_on DESC NULLS LAST, h2.created_on DESC NULLS LAST
                     LIMIT 1
                 ) h ON true
@@ -808,6 +854,7 @@ public class CompareRepository {
                       AND COALESCE(cc.is_active, true) = true
                 ) ch ON true
                 WHERE i.billing_run_id = ?::uuid
+                  AND i.application_id = ?::uuid
                   AND COALESCE(i.is_active, true) = true
                 """;
     }

@@ -1,5 +1,6 @@
 package io.clubone.billing.repo;
 
+import io.clubone.billing.security.AccessContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -29,6 +30,14 @@ public class InvoiceGenerationRepository {
 
     public InvoiceGenerationRepository(@Qualifier("cluboneJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+    }
+
+    private static UUID requireAppId() {
+        return AccessContext.applicationId();
+    }
+
+    private static String requireAppIdStr() {
+        return requireAppId().toString();
     }
 
     /**
@@ -70,7 +79,8 @@ public class InvoiceGenerationRepository {
                 is_active,
                 billing_run_id,
                 client_agreement_id,
-                created_on
+                created_on,
+                application_id
             )
             SELECT
                 gen_random_uuid(),
@@ -86,7 +96,8 @@ public class InvoiceGenerationRepository {
                 true,
                 ?::uuid,
                 ?::uuid,
-                now()
+                now(),
+                ?::uuid
             RETURNING invoice_id
             """;
 
@@ -100,7 +111,8 @@ public class InvoiceGenerationRepository {
                 disc,
                 tot,
                 billingRunId != null ? billingRunId.toString() : null,
-                clientAgreementId != null ? clientAgreementId.toString() : null);
+                clientAgreementId != null ? clientAgreementId.toString() : null,
+                requireAppIdStr());
     }
 
     /**
@@ -163,6 +175,7 @@ public class InvoiceGenerationRepository {
                     JOIN billing_config.billing_schedule_status bss
                         ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
                     WHERE sbs.subscription_instance_id = ?::uuid
+                      AND sbs.application_id = ?::uuid
                       AND sbs.cycle_number = ?
                       AND bss.status_code IN """
                 + SCHEDULE_STATUS_OPEN_FOR_INVOICE
@@ -176,6 +189,7 @@ public class InvoiceGenerationRepository {
                     billing_run_id = ?::uuid
                 FROM candidate c
                 WHERE sbs.billing_schedule_id = c.billing_schedule_id
+                  AND sbs.application_id = ?::uuid
                 RETURNING sbs.billing_schedule_id
                 """;
         try {
@@ -183,9 +197,11 @@ public class InvoiceGenerationRepository {
                     sql,
                     rs -> rs.next() ? (UUID) rs.getObject("billing_schedule_id") : null,
                     subscriptionInstanceId.toString(),
+                    requireAppIdStr(),
                     cycleNumber,
                     invoiceId.toString(),
-                    billingRunId != null ? billingRunId.toString() : null);
+                    billingRunId != null ? billingRunId.toString() : null,
+                    requireAppIdStr());
             if (linked != null) {
                 log.info(
                         "subscription_billing_schedule linked (by cycle): billing_schedule_id={} invoice_id={} billing_run_id={} subscription_instance_id={} cycle_number={}",
@@ -216,6 +232,7 @@ public class InvoiceGenerationRepository {
                     JOIN billing_config.billing_schedule_status bss
                         ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
                     WHERE sbs.subscription_instance_id = ?::uuid
+                      AND sbs.application_id = ?::uuid
                       AND sbs.billing_date = ?::date
                       AND bss.status_code IN """
                 + SCHEDULE_STATUS_OPEN_FOR_INVOICE
@@ -229,6 +246,7 @@ public class InvoiceGenerationRepository {
                     billing_run_id = ?::uuid
                 FROM candidate c
                 WHERE sbs.billing_schedule_id = c.billing_schedule_id
+                  AND sbs.application_id = ?::uuid
                 RETURNING sbs.billing_schedule_id
                 """;
         try {
@@ -236,9 +254,11 @@ public class InvoiceGenerationRepository {
                     sql,
                     rs -> rs.next() ? (UUID) rs.getObject("billing_schedule_id") : null,
                     subscriptionInstanceId.toString(),
+                    requireAppIdStr(),
                     paymentDueDate,
                     invoiceId.toString(),
-                    billingRunId != null ? billingRunId.toString() : null);
+                    billingRunId != null ? billingRunId.toString() : null,
+                    requireAppIdStr());
             if (linked != null) {
                 log.info(
                         "subscription_billing_schedule linked (by billing_date): billing_schedule_id={} invoice_id={} billing_run_id={} subscription_instance_id={} billing_date={}",
@@ -280,10 +300,12 @@ public class InvoiceGenerationRepository {
                     JOIN billing_config.billing_schedule_status bss
                         ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
                     WHERE sbs.subscription_instance_id = ?::uuid
+                      AND sbs.application_id = ?::uuid
                     ORDER BY sbs.cycle_number ASC NULLS LAST, sbs.billing_date ASC NULLS LAST
                     LIMIT 25
                     """,
-                    subscriptionInstanceId.toString());
+                    subscriptionInstanceId.toString(),
+                    requireAppIdStr());
             if (sample.isEmpty()) {
                 log.info(
                         "subscription_billing_schedule diagnostics: no rows at all for subscription_instance_id={} (scheduler may not have created schedule rows yet).",
@@ -300,10 +322,12 @@ public class InvoiceGenerationRepository {
                         SELECT COUNT(1)
                         FROM client_subscription_billing.subscription_billing_schedule sbs
                         WHERE sbs.subscription_instance_id = ?::uuid
+                          AND sbs.application_id = ?::uuid
                           AND sbs.cycle_number = ?
                         """,
                         Integer.class,
                         subscriptionInstanceId.toString(),
+                        requireAppIdStr(),
                         cycleNumber);
                 String eligibleSql =
                         """
@@ -312,6 +336,7 @@ public class InvoiceGenerationRepository {
                         JOIN billing_config.billing_schedule_status bss
                             ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
                         WHERE sbs.subscription_instance_id = ?::uuid
+                          AND sbs.application_id = ?::uuid
                           AND sbs.cycle_number = ?
                           AND bss.status_code IN """
                         + SCHEDULE_STATUS_OPEN_FOR_INVOICE
@@ -319,7 +344,11 @@ public class InvoiceGenerationRepository {
                           AND sbs.invoice_id IS NULL
                         """;
                 Integer eligible = jdbc.queryForObject(
-                        eligibleSql, Integer.class, subscriptionInstanceId.toString(), cycleNumber);
+                        eligibleSql,
+                        Integer.class,
+                        subscriptionInstanceId.toString(),
+                        requireAppIdStr(),
+                        cycleNumber);
                 log.info(
                         "subscription_billing_schedule diagnostics: subscription_instance_id={} cycle_number={} rows_with_same_cycle={} rows_eligible_for_link_open_status_invoice_null={}",
                         subscriptionInstanceId,
@@ -335,6 +364,7 @@ public class InvoiceGenerationRepository {
                         JOIN billing_config.billing_schedule_status bss
                             ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
                         WHERE sbs.subscription_instance_id = ?::uuid
+                          AND sbs.application_id = ?::uuid
                           AND sbs.billing_date = ?::date
                           AND bss.status_code IN """
                         + SCHEDULE_STATUS_OPEN_FOR_INVOICE
@@ -342,7 +372,11 @@ public class InvoiceGenerationRepository {
                           AND sbs.invoice_id IS NULL
                         """;
                 Integer eligibleByDate = jdbc.queryForObject(
-                        byDateSql, Integer.class, subscriptionInstanceId.toString(), paymentDueDate);
+                        byDateSql,
+                        Integer.class,
+                        subscriptionInstanceId.toString(),
+                        requireAppIdStr(),
+                        paymentDueDate);
                 log.info(
                         "subscription_billing_schedule diagnostics: subscription_instance_id={} payment_due_date={} rows_eligible_for_link_by_billing_date_open_status_invoice_null={}",
                         subscriptionInstanceId,
@@ -376,14 +410,23 @@ public class InvoiceGenerationRepository {
         }
         try {
             Boolean exists = jdbc.query(
-                    "SELECT EXISTS (SELECT 1 FROM transactions.invoice_entity WHERE invoice_id = ?::uuid)",
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM transactions.invoice_entity ie
+                        JOIN transactions.invoice i ON i.invoice_id = ie.invoice_id
+                        WHERE ie.invoice_id = ?::uuid
+                          AND i.application_id = ?::uuid
+                    )
+                    """,
                     rs -> {
                         if (!rs.next()) {
                             return false;
                         }
                         return rs.getBoolean(1);
                     },
-                    invoiceId.toString());
+                    invoiceId.toString(),
+                    requireAppIdStr());
             if (Boolean.TRUE.equals(exists)) {
                 return true;
             }
@@ -421,7 +464,8 @@ public class InvoiceGenerationRepository {
                 cycle_number,
                 charge_line_kind_id,
                 client_agreement_id,
-                created_on
+                created_on,
+                application_id
             )
             VALUES (
                 gen_random_uuid(),
@@ -439,7 +483,8 @@ public class InvoiceGenerationRepository {
                 ?,
                 ?::uuid,
                 ?::uuid,
-                CURRENT_TIMESTAMP
+                CURRENT_TIMESTAMP,
+                ?::uuid
             )
             """;
 
@@ -457,7 +502,8 @@ public class InvoiceGenerationRepository {
                     billingScheduleId != null ? billingScheduleId.toString() : null,
                     cycleNumber,
                     chargeLineKindId != null ? chargeLineKindId.toString() : null,
-                    clientAgreementId != null ? clientAgreementId.toString() : null);
+                    clientAgreementId != null ? clientAgreementId.toString() : null,
+                    requireAppIdStr());
             return n > 0;
         } catch (DataAccessException ex) {
             return false;

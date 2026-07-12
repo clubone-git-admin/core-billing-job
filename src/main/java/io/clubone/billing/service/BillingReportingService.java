@@ -21,7 +21,7 @@ import java.util.*;
 public class BillingReportingService {
 
     /** Aligned with export cap in {@code BillingReportsController#effectiveReportLimit}. */
-    private static final int MAX_LIMIT = 1_000_000;
+    private static final int MAX_LIMIT = 50_000;
     private static final Set<String> ALLOWED_METRICS =
             Set.of("revenue", "collection_rate", "failure_rate", "outstanding", "subscription");
     private static final Set<String> ALLOWED_GROUP_BY =

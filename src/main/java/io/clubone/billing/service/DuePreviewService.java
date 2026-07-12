@@ -646,7 +646,9 @@ public class DuePreviewService {
      * @param request The due preview request (must reference an existing billing_run_id)
      * @return Response with billing_run_id, stage_run_id, S3 path and summary
      */
-    @Transactional
+    /**
+     * Not {@code @Transactional}: S3 upload must not hold a DB connection.
+     */
     public Map<String, Object> generateDuePreview(DuePreviewRequest request) {
         log.info("Generating due preview: billRunId={}, dueDate={}, requestLocationId={}, createdBy={}",
                 request.billRunId(), request.dueDate(), request.locationId(), request.createdBy());

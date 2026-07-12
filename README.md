@@ -94,9 +94,50 @@ History:
 curl "http://localhost:8080/api/billing/run/{billingRunId}/history?limit=200"
 ```
 
-## Notes for production hardening (next steps)
-- Use JdbcPagingItemReader for large volume
+## Recent Improvements ✅
+
+### Performance & Scalability
+- ✅ **JdbcPagingItemReader** - Switched from cursor reader for better connection pool management
+- ✅ **Configurable chunk size** - Adjustable via `CLUBONE_BILLING_CHUNK_SIZE` (default: 300)
+- ✅ **Connection pool optimization** - HikariCP configured with optimal settings
+
+### Resilience & Reliability
+- ✅ **Retry logic** - Automatic retry (3 attempts) for transient payment failures with exponential backoff
+- ✅ **Timeout configuration** - Payment service calls respect timeout settings
+- ✅ **Input validation** - Enhanced API validation for dates and parameters
+
+### Code Quality
+- ✅ **BillingStatus enum** - Type-safe status codes instead of hardcoded strings
+- ✅ **Null safety** - Added null checks for payment methods
+- ✅ **Security** - Removed hardcoded passwords
+
+### Monitoring
+- ✅ **Metrics endpoint** - Prometheus metrics enabled
+- ✅ **Enhanced logging** - Retry attempts and errors logged
+
+## Configuration Options
+
+### Environment Variables
+
+**Required:**
+- `CLUBONE_DB_PASSWORD` - Database password (no default, must be set)
+
+**Optional:**
+- `CLUBONE_JDBC_URL` - Database URL
+- `CLUBONE_DB_USER` - Database username (default: clubone_dev_user)
+- `CLUBONE_BILLING_CHUNK_SIZE` - Batch chunk size (default: 300)
+- `CLUBONE_PAYMENT_STRATEGY` - Payment strategy: NOOP or HTTP (default: NOOP)
+- `CLUBONE_PAYMENT_BASE_URL` - Payment service base URL (default: http://localhost:8010)
+- `CLUBONE_PAYMENT_TIMEOUT_MS` - Payment service timeout in ms (default: 8000)
+
+**Connection Pool (Optional):**
+- `CLUBONE_DB_MAX_POOL_SIZE` - Max connections (default: 10)
+- `CLUBONE_DB_MIN_IDLE` - Min idle connections (default: 2)
+- `CLUBONE_DB_CONNECTION_TIMEOUT` - Connection timeout ms (default: 30000)
+
+## Notes for production hardening (future enhancements)
 - Add optimistic locking / SKIP LOCKED when selecting due invoices (avoid multiple runners)
-- Add retry policies for transient payment failures (and separate retry job)
 - Update schedule_status to DUE before processing (or derive by date)
 - In LIVE, persist gateway references to your payment tables if you want full traceability
+- Add circuit breaker pattern for payment service calls
+- Add distributed tracing (Zipkin/Jaeger)
