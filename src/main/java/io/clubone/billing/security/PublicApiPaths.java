@@ -20,7 +20,9 @@ public final class PublicApiPaths {
     if (path == null || path.isEmpty()) {
       return false;
     }
+    // Gateway exposes /crm/health; local/actuator still use /health.
     return path.equals("/health")
+        || path.equals("/crm/health")
         || path.startsWith("/health/")
         || path.equals("/actuator")
         || path.startsWith("/actuator/")
