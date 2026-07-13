@@ -59,7 +59,7 @@ public class ActualChargeJobRunner {
             BillingRepository billingRepository,
             @Value("${clubone.billing.actual-charge.pending.retry-grace-minutes:30}") int pendingRetryGraceMinutes,
             @Value("${clubone.billing.actual-charge.pending.stuck-threshold-minutes:30}") int pendingStuckThresholdMinutes,
-            @Value("${clubone.billing.charge.invoice-page-size:500}") int invoicePageSize,
+            @Value("${clubone.billing.charge.invoice-page-size:100}") int invoicePageSize,
             PaymentServiceFactory paymentServiceFactory) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
@@ -68,7 +68,7 @@ public class ActualChargeJobRunner {
         this.billingRepository = billingRepository;
         this.pendingRetryGraceMinutes = Math.max(1, pendingRetryGraceMinutes);
         this.pendingStuckThresholdMinutes = Math.max(1, pendingStuckThresholdMinutes);
-        this.invoicePageSize = Math.max(50, Math.min(invoicePageSize, 2_000));
+        this.invoicePageSize = Math.max(1, Math.min(invoicePageSize, 500));
         this.livePaymentService = paymentServiceFactory.get(RunMode.LIVE);
     }
 
@@ -216,6 +216,22 @@ public class ActualChargeJobRunner {
                     page.size(),
                     billingRunId);
 
+            List<UUID> pageInvoiceIds = page.stream()
+                    .map(MockInvoiceRow::invoiceId)
+                    .filter(id -> id != null)
+                    .toList();
+            Set<UUID> alreadySuccess =
+                    actualChargeRepository.findSuccessfulLiveInvoiceIds(billingRunId, pageInvoiceIds);
+            Set<UUID> freshPending = actualChargeRepository.findFreshPendingLiveInvoiceIds(
+                    billingRunId, pageInvoiceIds, pendingRetryGraceMinutes);
+            List<UUID> pageSubIds = page.stream()
+                    .map(MockInvoiceRow::subscriptionInstanceId)
+                    .filter(id -> id != null)
+                    .distinct()
+                    .toList();
+            Map<UUID, UUID> paymentMethods =
+                    actualChargeRepository.findClientPaymentMethodIdsForSubscriptionInstances(pageSubIds);
+
             for (MockInvoiceRow row : page) {
                 idx++;
                 processedCount++;
@@ -223,9 +239,9 @@ public class ActualChargeJobRunner {
                 totalSelectedAmount = totalSelectedAmount.add(amt);
                 LoggingUtils.setInvoiceId(row.invoiceId());
 
-                if (actualChargeRepository.hasSuccessfulLiveChargeForInvoiceAndBillingRun(billingRunId, row.invoiceId())) {
+                if (alreadySuccess.contains(row.invoiceId())) {
                     skipped++;
-                    log.info(
+                    log.debug(
                             "actual-charge invoice {}: SKIP (idempotency) invoiceId={} billingRunId={} amount={}",
                             idx,
                             row.invoiceId(),
@@ -233,10 +249,9 @@ public class ActualChargeJobRunner {
                             amt);
                     continue;
                 }
-                if (actualChargeRepository.hasFreshPendingLiveChargeForInvoiceAndBillingRun(
-                        billingRunId, row.invoiceId(), pendingRetryGraceMinutes)) {
+                if (freshPending.contains(row.invoiceId())) {
                     skipped++;
-                    log.info(
+                    log.debug(
                             "actual-charge invoice {}: SKIP (pending-idempotency) grace={}m invoiceId={} amount={}",
                             idx,
                             pendingRetryGraceMinutes,
@@ -253,8 +268,13 @@ public class ActualChargeJobRunner {
                     continue;
                 }
 
-                var pm = actualChargeRepository.findClientPaymentMethodIdForSubscriptionInstance(row.subscriptionInstanceId());
-                if (pm.isEmpty()) {
+                UUID pmId = paymentMethods.get(row.subscriptionInstanceId());
+                if (pmId == null) {
+                    var pm = actualChargeRepository.findClientPaymentMethodIdForSubscriptionInstance(
+                            row.subscriptionInstanceId());
+                    pmId = pm.orElse(null);
+                }
+                if (pmId == null) {
                     failed++;
                     failedAmount = failedAmount.add(amt);
                     log.warn(
@@ -277,14 +297,23 @@ public class ActualChargeJobRunner {
                 long amountMinor = amt.multiply(BigDecimal.valueOf(100)).setScale(0, RoundingMode.HALF_UP).longValue();
 
                 try {
-                    log.info(
-                            "actual-charge invoice {}: calling PaymentService(LIVE) invoiceId={} amountMinor={} currency={}",
-                            idx,
-                            row.invoiceId(),
-                            amountMinor,
-                            currency);
+                    if (idx == 1 || idx % 25 == 0) {
+                        log.info(
+                                "actual-charge progress {} invoiceId={} amountMinor={} currency={}",
+                                idx,
+                                row.invoiceId(),
+                                amountMinor,
+                                currency);
+                    } else {
+                        log.debug(
+                                "actual-charge invoice {}: calling PaymentService(LIVE) invoiceId={} amountMinor={} currency={}",
+                                idx,
+                                row.invoiceId(),
+                                amountMinor,
+                                currency);
+                    }
                     PaymentResult pr = livePaymentService.billInvoiceRecurring(
-                            row.invoiceId(), row.clientRoleId(), pm.get(), amountMinor, currency);
+                            row.invoiceId(), row.clientRoleId(), pmId, amountMinor, currency);
                     if (pr.isSuccess()) {
                         actualChargeRepository.insertLiveChargeHistoryRow(
                                 row.subscriptionInstanceId(),

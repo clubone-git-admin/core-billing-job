@@ -7,6 +7,7 @@ import org.springframework.stereotype.Component;
 @ConfigurationProperties(prefix = "clubone.billing")
 public class BillingJobProperties {
 	private int chunkSize = 300;
+	private int readerPageSize = 50;
 	private boolean updateInvoice = false;
 	private boolean updateSchedule = true;
 	
@@ -39,6 +40,14 @@ public class BillingJobProperties {
 
 	public void setChunkSize(int chunkSize) {
 		this.chunkSize = chunkSize;
+	}
+
+	public int getReaderPageSize() {
+		return readerPageSize;
+	}
+
+	public void setReaderPageSize(int readerPageSize) {
+		this.readerPageSize = readerPageSize;
 	}
 
 	public boolean isPreventDuplicateAcrossRuns() {

@@ -102,12 +102,13 @@ public class DueInvoiceReaderConfig {
       log.info("Reader query WHERE clause: {}", whereClause.toString());
       log.info("Reader query parameters: asOfDate={}, billingRunId={}", asOfDate, billingRunIdStr);
 
+      int pageSize = Math.max(1, Math.min(props.getReaderPageSize() > 0 ? props.getReaderPageSize() : props.getChunkSize(), 200));
       return new JdbcPagingItemReaderBuilder<DueInvoiceRow>()
         .name("dueInvoiceReader")
         .dataSource(dataSource)
         .queryProvider(queryProvider)
         .parameterValues(parameterValues)
-        .pageSize(1000) // Process 1000 records per page
+        .pageSize(pageSize)
         .rowMapper(new DueInvoiceRowMapper())
         .build();
     } catch (Exception e) {

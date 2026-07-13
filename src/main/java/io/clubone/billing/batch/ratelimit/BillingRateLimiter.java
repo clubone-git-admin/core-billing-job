@@ -5,6 +5,7 @@ import io.github.bucket4j.Bucket;
 import io.github.bucket4j.Refill;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -18,36 +19,30 @@ public class BillingRateLimiter {
 
     private static final Logger log = LoggerFactory.getLogger(BillingRateLimiter.class);
 
-    // API rate limit: 100 requests per minute
     private final Bucket apiBucket;
-
-    // Payment service rate limit: 50 calls per second
     private final Bucket paymentBucket;
-
-    // Job execution rate limit: 10 jobs per hour
     private final Bucket jobExecutionBucket;
 
-    public BillingRateLimiter() {
-        // API rate limit: 100 requests per minute
+    public BillingRateLimiter(
+            @Value("${clubone.billing.rate-limit.payment-per-second:8}") int paymentPerSecond) {
+        int payPerSec = Math.max(1, Math.min(paymentPerSecond, 50));
+
         this.apiBucket = Bucket.builder()
             .addLimit(Bandwidth.classic(100, Refill.intervally(100, Duration.ofMinutes(1))))
             .build();
 
-        // Payment service rate limit: 50 calls per second
+        // Keep payment fan-out gentle on small ECS CPU allocations.
         this.paymentBucket = Bucket.builder()
-            .addLimit(Bandwidth.classic(50, Refill.intervally(50, Duration.ofSeconds(1))))
+            .addLimit(Bandwidth.classic(payPerSec, Refill.intervally(payPerSec, Duration.ofSeconds(1))))
             .build();
 
-        // Job execution rate limit: 10 jobs per hour
         this.jobExecutionBucket = Bucket.builder()
             .addLimit(Bandwidth.classic(10, Refill.intervally(10, Duration.ofHours(1))))
             .build();
+
+        log.info("BillingRateLimiter paymentPerSecond={}", payPerSec);
     }
 
-    /**
-     * Try to consume API rate limit token.
-     * @return true if token consumed, false if rate limit exceeded
-     */
     public boolean tryConsumeApi() {
         boolean consumed = apiBucket.tryConsume(1);
         if (!consumed) {
@@ -56,10 +51,6 @@ public class BillingRateLimiter {
         return consumed;
     }
 
-    /**
-     * Try to consume payment service rate limit token.
-     * @return true if token consumed, false if rate limit exceeded
-     */
     public boolean tryConsumePayment() {
         boolean consumed = paymentBucket.tryConsume(1);
         if (!consumed) {
@@ -68,10 +59,6 @@ public class BillingRateLimiter {
         return consumed;
     }
 
-    /**
-     * Try to consume job execution rate limit token.
-     * @return true if token consumed, false if rate limit exceeded
-     */
     public boolean tryConsumeJobExecution() {
         boolean consumed = jobExecutionBucket.tryConsume(1);
         if (!consumed) {
@@ -80,16 +67,10 @@ public class BillingRateLimiter {
         return consumed;
     }
 
-    /**
-     * Get remaining API tokens.
-     */
     public long getRemainingApiTokens() {
         return apiBucket.getAvailableTokens();
     }
 
-    /**
-     * Get remaining payment tokens.
-     */
     public long getRemainingPaymentTokens() {
         return paymentBucket.getAvailableTokens();
     }

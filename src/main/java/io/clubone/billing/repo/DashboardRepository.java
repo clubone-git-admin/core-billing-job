@@ -262,12 +262,20 @@ public class DashboardRepository {
         String whereDlq =
                 buildRunWhere("br", dueDateFrom, dueDateTo, asOfFrom, asOfTo, locationIds, status, currentStage, pDlq);
         String sql =
-                "WITH latest_attempt AS ( "
+                "WITH filtered_runs AS ( "
+                        + "  SELECT br.billing_run_id "
+                        + "  FROM client_subscription_billing.billing_run br "
+                        + "  JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
+                        + "  LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
+                        + whereMain
+                        + "), latest_attempt AS ( "
                         + "  SELECT * FROM ( "
-                        + "    SELECT sbh.*, "
+                        + "    SELECT sbh.invoice_id, sbh.subscription_instance_id, sbh.billing_run_id, sbh.billing_status_id, "
+                        + "      sbh.invoice_total_amount, sbh.is_mock, "
                         + "      ROW_NUMBER() OVER (PARTITION BY COALESCE(CAST(sbh.invoice_id AS TEXT), CAST(sbh.subscription_instance_id AS TEXT)) "
                         + "      ORDER BY sbh.billing_attempt_on DESC NULLS LAST, sbh.created_on DESC NULLS LAST, sbh.subscription_billing_history_id DESC) AS rn "
                         + "    FROM client_subscription_billing.subscription_billing_history sbh "
+                        + "    WHERE sbh.billing_run_id IN (SELECT billing_run_id FROM filtered_runs) "
                         + "  ) t WHERE rn = 1 "
                         + "), unresolved_dlq AS ( "
                         + "  SELECT COUNT(1) AS unresolved_count "
@@ -339,7 +347,8 @@ public class DashboardRepository {
                         + "(SELECT unresolved_count FROM unresolved_dlq) AS unresolved_dlq_count, "
                         + "COALESCE(SUM(pr.la_failure_count),0) AS failure_count "
                         + "FROM per_run pr";
-        List<Object> p = new ArrayList<>(pDlq.size() + pMain.size());
+        List<Object> p = new ArrayList<>(pMain.size() + pDlq.size() + pMain.size());
+        p.addAll(pMain);
         p.addAll(pDlq);
         p.addAll(pMain);
         return jdbc.queryForMap(sql, p.toArray());

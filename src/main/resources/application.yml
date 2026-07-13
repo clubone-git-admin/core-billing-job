@@ -1,5 +1,12 @@
 server:
   port: 9000
+  # Cap HTTP concurrency for 0.5–1 vCPU ECS tasks (default Tomcat is far too large).
+  tomcat:
+    threads:
+      max: 20
+      min-spare: 2
+    accept-count: 50
+    max-connections: 100
 
 # Invoice generation async (POST → after-commit job); set DEBUG for more detail.
 logging:
@@ -7,13 +14,15 @@ logging:
     io.clubone.billing.service.InvoiceGenerationService: INFO
     io.clubone.billing.service.invoicegen: INFO
     io.clubone.billing.repo.InvoiceGenerationRepository: INFO
+    io.clubone.billing.batch.payment.HttpPaymentService: WARN
 
 spring:
   application:
     name: clubone-billing-batch
+  # Platform threads on tiny tasks — virtual threads + Tomcat amplify CPU throttling.
   threads:
     virtual:
-      enabled: true
+      enabled: false
 
   datasource:
     clubone:
@@ -22,8 +31,8 @@ spring:
       password: C1ub0ne@2024!
       driver-class-name: org.postgresql.Driver
       hikari:
-        maximum-pool-size: 20
-        minimum-idle: 4
+        maximum-pool-size: 5
+        minimum-idle: 1
         connection-timeout: 30000
         idle-timeout: 600000
         max-lifetime: 1800000
@@ -65,22 +74,35 @@ resilience4j:
   retry:
     instances:
       paymentService:
-        maxAttempts: 3
+        maxAttempts: 2
         waitDuration: 1s
         enableExponentialBackoff: true
         exponentialBackoffMultiplier: 2
 
 clubone:
   billing:
-    chunk-size: 300
+    # Smaller chunks keep GC/CPU quieter on 0.5 vCPU while preserving outcomes.
+    chunk-size: 50
+    reader-page-size: 50
 
     async:
-      core-pool-size: 2
-      max-pool-size: 4
-      queue-capacity: 8
+      core-pool-size: 1
+      max-pool-size: 2
+      queue-capacity: 16
 
     charge:
-      invoice-page-size: 500
+      invoice-page-size: 100
+
+    actual-charge:
+      pending:
+        poll:
+          enabled: true
+          fixed-delay-ms: 120000
+          batch-size: 50
+          stale-minutes: 2
+
+    rate-limit:
+      payment-per-second: 8
 
     prevent-duplicate-across-runs: true
     use-row-locking: false
@@ -91,6 +113,7 @@ clubone:
     mock-charge:
       skip-currency-check: true
       skip-mandate-max-amount-check: false
+      invoice-page-size: 100
 
     payment:
       strategy: HTTP

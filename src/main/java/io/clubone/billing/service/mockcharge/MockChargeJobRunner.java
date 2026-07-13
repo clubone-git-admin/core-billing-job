@@ -21,10 +21,12 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -50,6 +52,7 @@ public class MockChargeJobRunner {
      * Default false so mock charge enforces mandate max when present; set true only if you intentionally relax it.
      */
     private final boolean skipMandateMaxAmountCheck;
+    private final int invoicePageSize;
 
     private record ValidationResult(
             MockChargeOutcome outcome,
@@ -64,13 +67,15 @@ public class MockChargeJobRunner {
             MockChargeRepository mockChargeRepository,
             AuditLogRepository auditLogRepository,
             @Value("${clubone.billing.mock-charge.skip-currency-check:true}") boolean skipCurrencyCheck,
-            @Value("${clubone.billing.mock-charge.skip-mandate-max-amount-check:false}") boolean skipMandateMaxAmountCheck) {
+            @Value("${clubone.billing.mock-charge.skip-mandate-max-amount-check:false}") boolean skipMandateMaxAmountCheck,
+            @Value("${clubone.billing.mock-charge.invoice-page-size:100}") int invoicePageSize) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
         this.mockChargeRepository = mockChargeRepository;
         this.auditLogRepository = auditLogRepository;
         this.skipCurrencyCheck = skipCurrencyCheck;
         this.skipMandateMaxAmountCheck = skipMandateMaxAmountCheck;
+        this.invoicePageSize = Math.max(1, Math.min(invoicePageSize, 500));
     }
 
     /** Worker completion/failure — {@code entity_type = STAGE_RUN} for audit tab parity with API-driven events. */
@@ -160,36 +165,25 @@ public class MockChargeJobRunner {
                     billingRun.dueDate(),
                     billingRun.locationId());
 
-            List<MockInvoiceRow> invoices = mockChargeRepository.findInvoicesForBillingRun(billingRunId);
-            int rawCount = invoices.size();
+            Set<String> subscriptionFilter = null;
             if (s.summaryJson() != null) {
                 Object opt = s.summaryJson().get("subscription_instance_ids");
                 if (opt instanceof List<?> ids && !ids.isEmpty()) {
-                    log.info("mock-charge job: filtering by subscription_instance_ids filterSize={}", ids.size());
-                    invoices = invoices.stream()
-                            .filter(r -> {
-                                if (r.subscriptionInstanceId() == null) {
-                                    return false;
-                                }
-                                String want = r.subscriptionInstanceId().toString();
-                                for (Object id : ids) {
-                                    if (id != null && want.equals(id.toString())) {
-                                        return true;
-                                    }
-                                }
-                                return false;
-                            })
-                            .toList();
+                    subscriptionFilter = new HashSet<>();
+                    for (Object id : ids) {
+                        if (id != null) {
+                            subscriptionFilter.add(id.toString());
+                        }
+                    }
+                    log.info("mock-charge job: filtering by subscription_instance_ids filterSize={}", subscriptionFilter.size());
                 }
             }
 
-            log.info(
-                    "mock-charge job: invoice candidates rawCount={} afterFilter={} billingRunId={}",
-                    rawCount,
-                    invoices.size(),
-                    billingRunId);
+            Optional<UUID> statusReady = mockChargeRepository.resolveBillingStatusIdForMockCharge("MOCK_EVALUATED");
+            Optional<UUID> statusSkipped = mockChargeRepository.resolveBillingStatusIdForMockCharge("MOCK_SKIPPED_NOT_ELIGIBLE");
+            Optional<UUID> statusError = mockChargeRepository.resolveBillingStatusIdForMockCharge("MOCK_ERROR");
 
-            int total = invoices.size();
+            int total = 0;
             int eligible = 0;
             int blocked = 0;
             BigDecimal totalAmount = BigDecimal.ZERO;
@@ -197,86 +191,121 @@ public class MockChargeJobRunner {
             BigDecimal blockedAmount = BigDecimal.ZERO;
             Map<String, Integer> breakdown = new HashMap<>();
 
+            int offset = 0;
             int idx = 0;
-            for (MockInvoiceRow row : invoices) {
-                idx++;
-                ValidationResult vr = validate(row);
-                BigDecimal amt = row.totalAmount() != null ? row.totalAmount() : BigDecimal.ZERO;
-                totalAmount = totalAmount.add(amt);
+            int rawCount = 0;
+            while (true) {
+                List<MockInvoiceRow> page =
+                        mockChargeRepository.findInvoicesForBillingRun(billingRunId, invoicePageSize, offset);
+                if (page.isEmpty()) {
+                    break;
+                }
+                int rawPageSize = page.size();
+                rawCount += rawPageSize;
+                if (subscriptionFilter != null) {
+                    Set<String> filter = subscriptionFilter;
+                    page = page.stream()
+                            .filter(r -> r.subscriptionInstanceId() != null
+                                    && filter.contains(r.subscriptionInstanceId().toString()))
+                            .toList();
+                }
+                log.info(
+                        "mock-charge job: processing page offset={} rawPageRows={} afterFilter={} billingRunId={}",
+                        offset,
+                        rawPageSize,
+                        page.size(),
+                        billingRunId);
 
-                String billingStatusCode = mapToBillingStatus(vr.outcome());
-                Optional<UUID> statusId = mockChargeRepository.resolveBillingStatusIdForMockCharge(billingStatusCode);
-                if (statusId.isEmpty()) {
-                    log.error(
-                            "mock-charge job: billing_config.billing_status is empty — cannot insert history; invoiceId={}",
-                            row.invoiceId());
-                    continue;
+                for (MockInvoiceRow row : page) {
+                    idx++;
+                    total++;
+                    ValidationResult vr = validate(row);
+                    BigDecimal amt = row.totalAmount() != null ? row.totalAmount() : BigDecimal.ZERO;
+                    totalAmount = totalAmount.add(amt);
+
+                    String billingStatusCode = mapToBillingStatus(vr.outcome());
+                    Optional<UUID> statusId = switch (billingStatusCode) {
+                        case "MOCK_EVALUATED" -> statusReady.isPresent()
+                                ? statusReady
+                                : mockChargeRepository.resolveBillingStatusIdForMockCharge(billingStatusCode);
+                        case "MOCK_ERROR" -> statusError.isPresent()
+                                ? statusError
+                                : mockChargeRepository.resolveBillingStatusIdForMockCharge(billingStatusCode);
+                        default -> statusSkipped.isPresent()
+                                ? statusSkipped
+                                : mockChargeRepository.resolveBillingStatusIdForMockCharge(billingStatusCode);
+                    };
+                    if (statusId.isEmpty()) {
+                        statusId = mockChargeRepository.resolveBillingStatusIdForMockCharge(billingStatusCode);
+                    }
+                    if (statusId.isEmpty()) {
+                        log.error(
+                                "mock-charge job: billing_config.billing_status is empty — cannot insert history; invoiceId={}",
+                                row.invoiceId());
+                        continue;
+                    }
+
+                    boolean mockSuccess =
+                            vr.outcome() == MockChargeOutcome.READY_FOR_CHARGE || vr.outcome() == MockChargeOutcome.ELIGIBLE;
+                    String failureReason = mockSuccess ? null : "[MC]" + vr.outcome().name() + "|" + vr.message();
+                    String mockOutcomeCodeForRow = mockSuccess ? null : vr.outcome().name();
+                    String uiStatus = MockChargeUiMapper.toUiStatus(vr.outcome());
+                    Map<String, Object> details = new HashMap<>();
+                    details.put("message", vr.message());
+                    details.put("outcome", vr.outcome().name());
+                    details.put("checks", vr.checks());
+                    details.put("invoice_currency", skipCurrencyCheck ? vr.mandateCurrency() : vr.invoiceCurrency());
+                    details.put("mandate_currency", vr.mandateCurrency());
+                    details.put("skip_currency_check", skipCurrencyCheck);
+                    details.put("skip_mandate_max_amount_check", skipMandateMaxAmountCheck);
+                    if (idx == 1 || idx % 25 == 0) {
+                        log.info(
+                                "mock-charge job: progress idx={} invoiceId={} outcome={} amount={}",
+                                idx,
+                                row.invoiceId(),
+                                vr.outcome().name(),
+                                amt);
+                    }
+                    if (row.subscriptionInstanceId() != null) {
+                        mockChargeRepository.insertMockHistoryRow(
+                                row.subscriptionInstanceId(),
+                                billingRunId,
+                                stageRunId,
+                                row.invoiceId(),
+                                statusId.get(),
+                                failureReason,
+                                uiStatus,
+                                mockOutcomeCodeForRow,
+                                details,
+                                row.subTotal(),
+                                row.taxAmount(),
+                                row.discountAmount(),
+                                row.totalAmount());
+                    } else {
+                        log.warn("mock-charge job: no subscription_instance_id — history row not inserted invoiceId={}", row.invoiceId());
+                    }
+
+                    breakdown.merge(vr.outcome().name(), 1, Integer::sum);
+                    if (vr.outcome() == MockChargeOutcome.READY_FOR_CHARGE || vr.outcome() == MockChargeOutcome.ELIGIBLE) {
+                        eligible++;
+                        eligibleAmount = eligibleAmount.add(amt);
+                    } else {
+                        blocked++;
+                        blockedAmount = blockedAmount.add(amt);
+                    }
                 }
 
-                boolean mockSuccess =
-                        vr.outcome() == MockChargeOutcome.READY_FOR_CHARGE || vr.outcome() == MockChargeOutcome.ELIGIBLE;
-                // Do not reuse failure_* columns for mandate success — outcome stays in mock_charge_status + details.
-                String failureReason = mockSuccess ? null : "[MC]" + vr.outcome().name() + "|" + vr.message();
-                String mockOutcomeCodeForRow = mockSuccess ? null : vr.outcome().name();
-                String uiStatus = MockChargeUiMapper.toUiStatus(vr.outcome());
-                Map<String, Object> details = new HashMap<>();
-                details.put("message", vr.message());
-                details.put("outcome", vr.outcome().name());
-                details.put("checks", vr.checks());
-                // When skipping currency validation, expose the same code as mandate so UIs that compare strings match.
-                details.put("invoice_currency", skipCurrencyCheck ? vr.mandateCurrency() : vr.invoiceCurrency());
-                details.put("mandate_currency", vr.mandateCurrency());
-                details.put("skip_currency_check", skipCurrencyCheck);
-                details.put("skip_mandate_max_amount_check", skipMandateMaxAmountCheck);
-                log.debug(
-                        "mock-charge job: candidate {}/{} invoiceId={} subscriptionInstanceId={} clientRoleId={} agreementId={} totalAmount={} outcome={} uiStatus={} message={}",
-                        idx,
-                        total,
-                        row.invoiceId(),
-                        row.subscriptionInstanceId(),
-                        row.clientRoleId(),
-                        row.clientAgreementId(),
-                        amt,
-                        vr.outcome().name(),
-                        uiStatus,
-                        vr.message());
-                if (total > 0 && (idx == 1 || idx == total || idx % 25 == 0)) {
-                    log.info(
-                            "mock-charge job: progress {}/{} invoiceId={} outcome={} amount={}",
-                            idx,
-                            total,
-                            row.invoiceId(),
-                            vr.outcome().name(),
-                            amt);
-                }
-                if (row.subscriptionInstanceId() != null) {
-                    mockChargeRepository.insertMockHistoryRow(
-                            row.subscriptionInstanceId(),
-                            billingRunId,
-                            stageRunId,
-                            row.invoiceId(),
-                            statusId.get(),
-                            failureReason,
-                            uiStatus,
-                            mockOutcomeCodeForRow,
-                            details,
-                            row.subTotal(),
-                            row.taxAmount(),
-                            row.discountAmount(),
-                            row.totalAmount());
-                } else {
-                    log.warn("mock-charge job: no subscription_instance_id — history row not inserted invoiceId={}", row.invoiceId());
-                }
-
-                breakdown.merge(vr.outcome().name(), 1, Integer::sum);
-                if (vr.outcome() == MockChargeOutcome.READY_FOR_CHARGE || vr.outcome() == MockChargeOutcome.ELIGIBLE) {
-                    eligible++;
-                    eligibleAmount = eligibleAmount.add(amt);
-                } else {
-                    blocked++;
-                    blockedAmount = blockedAmount.add(amt);
+                offset += invoicePageSize;
+                if (rawPageSize < invoicePageSize) {
+                    break;
                 }
             }
+
+            log.info(
+                    "mock-charge job: invoice candidates rawCount={} afterFilter={} billingRunId={}",
+                    rawCount,
+                    total,
+                    billingRunId);
 
             Map<String, Object> merged = new HashMap<>();
             if (s.summaryJson() != null) {

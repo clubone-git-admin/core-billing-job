@@ -11,9 +11,11 @@ import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -125,6 +127,147 @@ public class ActualChargeRepository {
         } catch (DataAccessException ex) {
             return false;
         }
+    }
+
+    /** Invoice IDs whose latest live attempt is already successful for this billing run. */
+    public Set<UUID> findSuccessfulLiveInvoiceIds(UUID billingRunId, List<UUID> invoiceIds) {
+        Set<UUID> out = new HashSet<>();
+        if (billingRunId == null || invoiceIds == null || invoiceIds.isEmpty()) {
+            return out;
+        }
+        try {
+            String in = placeholders(invoiceIds.size());
+            List<Object> args = new ArrayList<>();
+            args.add(billingRunId.toString());
+            args.add(requireAppIdStr());
+            for (UUID id : invoiceIds) {
+                args.add(id.toString());
+            }
+            List<UUID> rows = jdbc.query(
+                    """
+                    SELECT DISTINCT latest.invoice_id
+                    FROM (
+                      SELECT DISTINCT ON (sbh.invoice_id)
+                             sbh.invoice_id,
+                             bs.status_code
+                      FROM client_subscription_billing.subscription_billing_history sbh
+                      JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
+                      WHERE sbh.billing_run_id = ?::uuid
+                        AND sbh.application_id = ?::uuid
+                        AND COALESCE(sbh.is_mock, false) = false
+                        AND sbh.invoice_id IN (%s)
+                      ORDER BY sbh.invoice_id,
+                               sbh.billing_attempt_on DESC NULLS LAST,
+                               sbh.created_on DESC NULLS LAST,
+                               sbh.subscription_billing_history_id DESC
+                    ) latest
+                    WHERE latest.status_code IN ('LIVE_FINALIZED', 'LIVE_SUCCESS')
+                    """.formatted(in),
+                    (rs, rn) -> (UUID) rs.getObject("invoice_id"),
+                    args.toArray());
+            out.addAll(rows);
+        } catch (Exception ex) {
+            // fall back to empty — caller may still use per-row checks
+        }
+        return out;
+    }
+
+    /** Invoice IDs whose latest live attempt is PENDING_CAPTURE within the freshness window. */
+    public Set<UUID> findFreshPendingLiveInvoiceIds(UUID billingRunId, List<UUID> invoiceIds, int graceMinutes) {
+        Set<UUID> out = new HashSet<>();
+        if (billingRunId == null || invoiceIds == null || invoiceIds.isEmpty()) {
+            return out;
+        }
+        try {
+            String in = placeholders(invoiceIds.size());
+            List<Object> args = new ArrayList<>();
+            args.add(billingRunId.toString());
+            args.add(requireAppIdStr());
+            for (UUID id : invoiceIds) {
+                args.add(id.toString());
+            }
+            args.add(Math.max(1, graceMinutes));
+            List<UUID> rows = jdbc.query(
+                    """
+                    SELECT DISTINCT latest.invoice_id
+                    FROM (
+                      SELECT DISTINCT ON (sbh.invoice_id)
+                             sbh.invoice_id,
+                             bs.status_code,
+                             sbh.billing_attempt_on
+                      FROM client_subscription_billing.subscription_billing_history sbh
+                      JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
+                      WHERE sbh.billing_run_id = ?::uuid
+                        AND sbh.application_id = ?::uuid
+                        AND COALESCE(sbh.is_mock, false) = false
+                        AND sbh.invoice_id IN (%s)
+                      ORDER BY sbh.invoice_id,
+                               sbh.billing_attempt_on DESC NULLS LAST,
+                               sbh.created_on DESC NULLS LAST,
+                               sbh.subscription_billing_history_id DESC
+                    ) latest
+                    WHERE latest.status_code = 'PENDING_CAPTURE'
+                      AND latest.billing_attempt_on >= now() - (? * INTERVAL '1 minute')
+                    """.formatted(in),
+                    (rs, rn) -> (UUID) rs.getObject("invoice_id"),
+                    args.toArray());
+            out.addAll(rows);
+        } catch (Exception ex) {
+            // fall back to empty
+        }
+        return out;
+    }
+
+    /** Maps subscription_instance_id → client_payment_method_id for a page of instances. */
+    public Map<UUID, UUID> findClientPaymentMethodIdsForSubscriptionInstances(List<UUID> subscriptionInstanceIds) {
+        Map<UUID, UUID> out = new HashMap<>();
+        if (subscriptionInstanceIds == null || subscriptionInstanceIds.isEmpty()) {
+            return out;
+        }
+        try {
+            String in = placeholders(subscriptionInstanceIds.size());
+            List<Object> args = new ArrayList<>();
+            for (UUID id : subscriptionInstanceIds) {
+                args.add(id.toString());
+            }
+            args.add(requireAppIdStr());
+            jdbc.query(
+                    """
+                    SELECT si.subscription_instance_id, sp.client_payment_method_id
+                    FROM client_subscription_billing.subscription_instance si
+                    JOIN client_subscription_billing.subscription_plan sp
+                      ON sp.subscription_plan_id = si.subscription_plan_id
+                    WHERE si.subscription_instance_id IN (%s)
+                      AND si.application_id = ?::uuid
+                      AND COALESCE(sp.is_active, true) = true
+                      AND sp.client_payment_method_id IS NOT NULL
+                    """.formatted(in),
+                    rs -> {
+                        while (rs.next()) {
+                            UUID sid = (UUID) rs.getObject("subscription_instance_id");
+                            UUID pmid = (UUID) rs.getObject("client_payment_method_id");
+                            if (sid != null && pmid != null) {
+                                out.put(sid, pmid);
+                            }
+                        }
+                        return null;
+                    },
+                    args.toArray());
+        } catch (Exception ex) {
+            // leave empty; caller falls back per-row
+        }
+        return out;
+    }
+
+    private static String placeholders(int n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append("?::uuid");
+        }
+        return sb.toString();
     }
 
     public Optional<UUID> findClientPaymentMethodIdForSubscriptionInstance(UUID subscriptionInstanceId) {

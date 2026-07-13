@@ -98,7 +98,7 @@ public class HttpPaymentService implements PaymentService {
 			String validateUrl = props.getPayment().getHttp().getBaseUrl() + props.getPayment().getHttp().getValidateMethodPath();
 			Map<String, Object> validateReq = Map.of("clientRoleId", clientRoleId.toString(), "clientPaymentMethodId", clientPaymentMethodId.toString());
 			Map<String, Object> validateResp = postJson("validate-method", validateUrl, validateReq);
-			log.info("billInvoiceRecurring validate-method RESP: invoiceId={} response={}", invoiceId, validateResp);
+			log.debug("billInvoiceRecurring validate-method RESP: invoiceId={} response={}", invoiceId, validateResp);
 
 			Object validObj = validateResp.get("valid");
 			boolean valid = Boolean.TRUE.equals(validObj) || "true".equalsIgnoreCase(String.valueOf(validObj));
@@ -118,7 +118,7 @@ public class HttpPaymentService implements PaymentService {
 					"currency", currencyCode,
 					"paymentTypeCode", props.getPayment().getHttp().getPaymentTypeCode());
 			Map<String, Object> intentResp = postJson("create-intent", createIntentUrl, createIntentReq);
-			log.info("billInvoiceRecurring create-intent RESP: invoiceId={} response={}", invoiceId, intentResp);
+			log.debug("billInvoiceRecurring create-intent RESP: invoiceId={} response={}", invoiceId, intentResp);
 
 			Object intentIdObj = intentResp.get("intentId");
 			Object razorpayOrderIdObj = intentResp.get("razorpayOrderId");
@@ -141,7 +141,7 @@ public class HttpPaymentService implements PaymentService {
 					"runMode", "LIVE",
 					"actorId", props.getPayment().getHttp().getActorId());
 			Map<String, Object> chargeResp = postJson("charge-at-will", chargeUrl, chargeReq);
-			log.info("billInvoiceRecurring charge-at-will RESP: invoiceId={} response={}", invoiceId, chargeResp);
+			log.debug("billInvoiceRecurring charge-at-will RESP: invoiceId={} response={}", invoiceId, chargeResp);
 
 			String status = String.valueOf(chargeResp.getOrDefault("status", "UNKNOWN"));
 			Object clientPaymentTxnIdObj = chargeResp.get("clientPaymentTransactionId");
@@ -281,7 +281,7 @@ public class HttpPaymentService implements PaymentService {
 			}
 		}
 		
-		log.info("HttpPaymentService {} REQ: url={} body={}", callName, url, body);
+		log.debug("HttpPaymentService {} REQ: url={} body={}", callName, url, body);
 
 		HttpHeaders headers = new HttpHeaders();
 		headers.setContentType(MediaType.APPLICATION_JSON);
@@ -292,7 +292,7 @@ public class HttpPaymentService implements PaymentService {
 		int statusCode = resp.getStatusCode().value();
 		Map<String, Object> respBody = resp.getBody();
 
-		log.info("HttpPaymentService {} RESP: url={} statusCode={} body={}", callName, url, statusCode, respBody);
+		log.debug("HttpPaymentService {} RESP: url={} statusCode={} body={}", callName, url, statusCode, respBody);
 		
 		// Clear test mode counter on success
 		if (testMode.isEnabled()) {
