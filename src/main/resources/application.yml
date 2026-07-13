@@ -3,10 +3,10 @@ server:
   # Cap HTTP concurrency for 0.5–1 vCPU ECS tasks (default Tomcat is far too large).
   tomcat:
     threads:
-      max: 20
+      max: 10
       min-spare: 2
-    accept-count: 50
-    max-connections: 100
+    accept-count: 25
+    max-connections: 50
 
 # Invoice generation async (POST → after-commit job); set DEBUG for more detail.
 logging:
@@ -91,18 +91,20 @@ clubone:
       queue-capacity: 16
 
     charge:
-      invoice-page-size: 100
+      invoice-page-size: 50
 
     actual-charge:
       pending:
         poll:
           enabled: true
-          fixed-delay-ms: 120000
-          batch-size: 50
+          # Background only — keep light on tiny ECS tasks.
+          fixed-delay-ms: 300000
+          batch-size: 20
           stale-minutes: 2
 
     rate-limit:
-      payment-per-second: 8
+      # 8/s saturates 0.5–1 vCPU with HTTP capture + retries; pace captures instead.
+      payment-per-second: 2
 
     prevent-duplicate-across-runs: true
     use-row-locking: false
@@ -113,7 +115,7 @@ clubone:
     mock-charge:
       skip-currency-check: true
       skip-mandate-max-amount-check: false
-      invoice-page-size: 100
+      invoice-page-size: 50
 
     payment:
       strategy: HTTP

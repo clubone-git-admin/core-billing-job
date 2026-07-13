@@ -51,12 +51,22 @@ public class BillingRateLimiter {
         return consumed;
     }
 
+    /**
+     * Pace payment captures: wait briefly for a token instead of fail-fast
+     * (fail-fast caused retry storms / CPU spikes on tiny ECS tasks).
+     */
     public boolean tryConsumePayment() {
-        boolean consumed = paymentBucket.tryConsume(1);
-        if (!consumed) {
-            log.warn("Payment service rate limit exceeded. Available tokens: {}", paymentBucket.getAvailableTokens());
+        try {
+            boolean consumed = paymentBucket.asBlocking().tryConsume(1, Duration.ofSeconds(2));
+            if (!consumed) {
+                log.warn("Payment service rate limit exceeded after wait. Available tokens: {}",
+                        paymentBucket.getAvailableTokens());
+            }
+            return consumed;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return false;
         }
-        return consumed;
     }
 
     public boolean tryConsumeJobExecution() {

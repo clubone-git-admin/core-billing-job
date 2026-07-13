@@ -11,6 +11,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -205,17 +207,81 @@ public class MockChargeRepository {
         return n != null ? n : 0;
     }
 
-    /**
-     * Best-effort mandate row for a subscription plan (if columns exist).
-     */
+    public Optional<UUID> findSubscriptionPlanIdForInstance(UUID subscriptionInstanceId) {
+        if (subscriptionInstanceId == null) {
+            return Optional.empty();
+        }
+        Map<UUID, UUID> one = findSubscriptionPlanIdsForInstances(List.of(subscriptionInstanceId));
+        return Optional.ofNullable(one.get(subscriptionInstanceId));
+    }
+
+    /** Batch: subscription_instance_id → subscription_plan_id for one page of invoices. */
+    public Map<UUID, UUID> findSubscriptionPlanIdsForInstances(List<UUID> subscriptionInstanceIds) {
+        Map<UUID, UUID> out = new HashMap<>();
+        if (subscriptionInstanceIds == null || subscriptionInstanceIds.isEmpty()) {
+            return out;
+        }
+        List<UUID> ids = subscriptionInstanceIds.stream().filter(id -> id != null).distinct().toList();
+        if (ids.isEmpty()) {
+            return out;
+        }
+        try {
+            String in = placeholders(ids.size());
+            List<Object> args = new ArrayList<>();
+            args.add(requireAppIdStr());
+            for (UUID id : ids) {
+                args.add(id.toString());
+            }
+            jdbc.query(
+                    """
+                    SELECT subscription_instance_id, subscription_plan_id
+                    FROM client_subscription_billing.subscription_instance
+                    WHERE application_id = ?::uuid
+                      AND subscription_instance_id IN (%s)
+                    """.formatted(in),
+                    rs -> {
+                        out.put(
+                                (UUID) rs.getObject("subscription_instance_id"),
+                                (UUID) rs.getObject("subscription_plan_id"));
+                    },
+                    args.toArray());
+        } catch (DataAccessException ex) {
+            // caller falls back to empty → INVOICE/SUBSCRIPTION inactive paths
+        }
+        return out;
+    }
+
     public Optional<MandateProbe> findActiveMandateForSubscriptionPlan(UUID subscriptionPlanId) {
         if (subscriptionPlanId == null) {
             return Optional.empty();
         }
+        return Optional.ofNullable(findActiveMandatesForSubscriptionPlans(List.of(subscriptionPlanId)).get(subscriptionPlanId));
+    }
+
+    /**
+     * Best-effort latest active mandate per subscription plan (one query for a page).
+     */
+    public Map<UUID, MandateProbe> findActiveMandatesForSubscriptionPlans(List<UUID> subscriptionPlanIds) {
+        Map<UUID, MandateProbe> out = new HashMap<>();
+        if (subscriptionPlanIds == null || subscriptionPlanIds.isEmpty()) {
+            return out;
+        }
+        List<UUID> ids = subscriptionPlanIds.stream().filter(id -> id != null).distinct().toList();
+        if (ids.isEmpty()) {
+            return out;
+        }
         try {
-            List<MandateProbe> rows = jdbc.query(
+            String in = placeholders(ids.size());
+            List<Object> args = new ArrayList<>();
+            args.add(requireAppIdStr());
+            for (UUID id : ids) {
+                args.add(id.toString());
+            }
+            jdbc.query(
                     """
-                    SELECT cgm.client_gateway_mandate_id,
+                    SELECT DISTINCT ON (cgm.subscription_plan_id)
+                           cgm.subscription_plan_id,
+                           cgm.client_gateway_mandate_id,
                            cgm.mandate_status_id,
                            lgs.code AS mandate_status_code,
                            cgm.mandate_start_date,
@@ -227,48 +293,42 @@ public class MockChargeRepository {
                       ON lgs.gateway_mandate_status_id = cgm.mandate_status_id
                     JOIN client_subscription_billing.subscription_plan sp
                       ON sp.subscription_plan_id = cgm.subscription_plan_id
-                    WHERE cgm.subscription_plan_id = ?::uuid
-                      AND sp.application_id = ?::uuid
+                    WHERE sp.application_id = ?::uuid
+                      AND cgm.subscription_plan_id IN (%s)
                       AND COALESCE(cgm.is_active, true) = true
-                    ORDER BY cgm.created_on DESC NULLS LAST
-                    LIMIT 1
-                    """,
-                    (rs, rn) -> new MandateProbe(
-                            (UUID) rs.getObject("client_gateway_mandate_id"),
-                            (UUID) rs.getObject("mandate_status_id"),
-                            rs.getString("mandate_status_code"),
-                            rs.getObject("mandate_start_date", java.sql.Timestamp.class),
-                            rs.getObject("mandate_end_date", java.sql.Timestamp.class),
-                            rs.getObject("mandate_max_amount_minor") != null ? rs.getLong("mandate_max_amount_minor") : null,
-                            rs.getString("mandate_currency")),
-                    subscriptionPlanId.toString(),
-                    requireAppIdStr());
-            return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+                    ORDER BY cgm.subscription_plan_id, cgm.created_on DESC NULLS LAST
+                    """.formatted(in),
+                    rs -> {
+                        UUID planId = (UUID) rs.getObject("subscription_plan_id");
+                        out.put(
+                                planId,
+                                new MandateProbe(
+                                        (UUID) rs.getObject("client_gateway_mandate_id"),
+                                        (UUID) rs.getObject("mandate_status_id"),
+                                        rs.getString("mandate_status_code"),
+                                        rs.getObject("mandate_start_date", java.sql.Timestamp.class),
+                                        rs.getObject("mandate_end_date", java.sql.Timestamp.class),
+                                        rs.getObject("mandate_max_amount_minor") != null
+                                                ? rs.getLong("mandate_max_amount_minor")
+                                                : null,
+                                        rs.getString("mandate_currency")));
+                    },
+                    args.toArray());
         } catch (DataAccessException ex) {
-            return Optional.empty();
+            return out;
         }
+        return out;
     }
 
-    public Optional<UUID> findSubscriptionPlanIdForInstance(UUID subscriptionInstanceId) {
-        if (subscriptionInstanceId == null) {
-            return Optional.empty();
+    private static String placeholders(int n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append("?::uuid");
         }
-        try {
-            UUID id = jdbc.query(
-                    """
-                    SELECT subscription_plan_id
-                    FROM client_subscription_billing.subscription_instance
-                    WHERE subscription_instance_id = ?::uuid
-                      AND application_id = ?::uuid
-                    LIMIT 1
-                    """,
-                    rs -> rs.next() ? (UUID) rs.getObject("subscription_plan_id") : null,
-                    subscriptionInstanceId.toString(),
-                    requireAppIdStr());
-            return Optional.ofNullable(id);
-        } catch (DataAccessException ex) {
-            return Optional.empty();
-        }
+        return sb.toString();
     }
 
     public void insertMockHistoryRow(

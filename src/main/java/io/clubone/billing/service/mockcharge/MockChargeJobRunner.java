@@ -68,14 +68,14 @@ public class MockChargeJobRunner {
             AuditLogRepository auditLogRepository,
             @Value("${clubone.billing.mock-charge.skip-currency-check:true}") boolean skipCurrencyCheck,
             @Value("${clubone.billing.mock-charge.skip-mandate-max-amount-check:false}") boolean skipMandateMaxAmountCheck,
-            @Value("${clubone.billing.mock-charge.invoice-page-size:100}") int invoicePageSize) {
+            @Value("${clubone.billing.mock-charge.invoice-page-size:50}") int invoicePageSize) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
         this.mockChargeRepository = mockChargeRepository;
         this.auditLogRepository = auditLogRepository;
         this.skipCurrencyCheck = skipCurrencyCheck;
         this.skipMandateMaxAmountCheck = skipMandateMaxAmountCheck;
-        this.invoicePageSize = Math.max(1, Math.min(invoicePageSize, 500));
+        this.invoicePageSize = Math.max(1, Math.min(invoicePageSize, 100));
     }
 
     /** Worker completion/failure — {@code entity_type = STAGE_RUN} for audit tab parity with API-driven events. */
@@ -216,10 +216,21 @@ public class MockChargeJobRunner {
                         page.size(),
                         billingRunId);
 
+                List<UUID> instanceIds = page.stream()
+                        .map(MockInvoiceRow::subscriptionInstanceId)
+                        .filter(id -> id != null)
+                        .distinct()
+                        .toList();
+                Map<UUID, UUID> planByInstance =
+                        mockChargeRepository.findSubscriptionPlanIdsForInstances(instanceIds);
+                Map<UUID, MandateProbe> mandateByPlan =
+                        mockChargeRepository.findActiveMandatesForSubscriptionPlans(
+                                planByInstance.values().stream().distinct().toList());
+
                 for (MockInvoiceRow row : page) {
                     idx++;
                     total++;
-                    ValidationResult vr = validate(row);
+                    ValidationResult vr = validate(row, planByInstance, mandateByPlan);
                     BigDecimal amt = row.totalAmount() != null ? row.totalAmount() : BigDecimal.ZERO;
                     totalAmount = totalAmount.add(amt);
 
@@ -258,8 +269,8 @@ public class MockChargeJobRunner {
                     details.put("mandate_currency", vr.mandateCurrency());
                     details.put("skip_currency_check", skipCurrencyCheck);
                     details.put("skip_mandate_max_amount_check", skipMandateMaxAmountCheck);
-                    if (idx == 1 || idx % 25 == 0) {
-                        log.info(
+                    if (idx == 1 || idx % 100 == 0) {
+                        log.debug(
                                 "mock-charge job: progress idx={} invoiceId={} outcome={} amount={}",
                                 idx,
                                 row.invoiceId(),
@@ -381,8 +392,10 @@ public class MockChargeJobRunner {
         return "MOCK_SKIPPED_NOT_ELIGIBLE";
     }
 
-    private ValidationResult validate(MockInvoiceRow row) {
-        MockChargeRepository repo = mockChargeRepository;
+    private ValidationResult validate(
+            MockInvoiceRow row,
+            Map<UUID, UUID> planByInstance,
+            Map<UUID, MandateProbe> mandateByPlan) {
         Map<String, Boolean> checks = new LinkedHashMap<>();
         checks.put("mandate_active", false);
         checks.put("within_validity", false);
@@ -404,16 +417,15 @@ public class MockChargeJobRunner {
         if (total.compareTo(BigDecimal.ZERO) <= 0) {
             return new ValidationResult(MockChargeOutcome.INVOICE_INVALID, "non-positive total", checks, invCur, manCur);
         }
-        Optional<UUID> planId = repo.findSubscriptionPlanIdForInstance(row.subscriptionInstanceId());
-        if (planId.isEmpty()) {
+        UUID planId = planByInstance != null ? planByInstance.get(row.subscriptionInstanceId()) : null;
+        if (planId == null) {
             return new ValidationResult(
                     MockChargeOutcome.SUBSCRIPTION_INACTIVE, "subscription plan not found", checks, invCur, manCur);
         }
-        Optional<MandateProbe> mandate = repo.findActiveMandateForSubscriptionPlan(planId.get());
-        if (mandate.isEmpty()) {
+        MandateProbe mp = mandateByPlan != null ? mandateByPlan.get(planId) : null;
+        if (mp == null) {
             return new ValidationResult(MockChargeOutcome.MANDATE_NOT_FOUND, "no mandate for plan", checks, invCur, manCur);
         }
-        MandateProbe mp = mandate.get();
         manCur = mp.mandateCurrency();
         String code = mp.mandateStatusCode();
         boolean mandateActive = code != null && (code.equalsIgnoreCase("ACTIVE") || code.equalsIgnoreCase("APPROVED"));

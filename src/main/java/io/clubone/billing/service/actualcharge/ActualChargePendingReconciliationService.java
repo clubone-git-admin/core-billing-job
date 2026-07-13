@@ -32,7 +32,7 @@ public class ActualChargePendingReconciliationService {
     public ActualChargePendingReconciliationService(
             ActualChargeRepository actualChargeRepository,
             BillingRepository billingRepository,
-            @Value("${clubone.billing.actual-charge.pending.poll.batch-size:200}") int pollBatchSize,
+            @Value("${clubone.billing.actual-charge.pending.poll.batch-size:20}") int pollBatchSize,
             @Value("${clubone.billing.actual-charge.pending.poll.stale-minutes:2}") int staleMinutes) {
         this.actualChargeRepository = actualChargeRepository;
         this.billingRepository = billingRepository;
@@ -40,25 +40,67 @@ public class ActualChargePendingReconciliationService {
         this.staleMinutes = Math.max(1, staleMinutes);
     }
 
+    /**
+     * HTTP-triggered reconcile: scopes to the caller's application when actor context is present.
+     */
     @Transactional
     public Map<String, Object> reconcilePendingCharges() {
+        return reconcilePendingCharges(
+                actualChargeRepository.findPendingLiveRowsForReconciliation(pollBatchSize, staleMinutes));
+    }
+
+    /**
+     * Scheduled poller reconcile: cross-tenant, no actor/auth required.
+     * Uses each row's {@code applicationId} for gateway lookup and history updates.
+     * Not one long transaction — avoids holding a DB connection across the batch.
+     */
+    public Map<String, Object> reconcilePendingChargesForPoller() {
+        return reconcilePendingCharges(
+                actualChargeRepository.findAllPendingLiveRowsForReconciliation(pollBatchSize, staleMinutes),
+                true);
+    }
+
+    private Map<String, Object> reconcilePendingCharges(
+            List<ActualChargeRepository.PendingChargeRow> pendingRows) {
+        return reconcilePendingCharges(pendingRows, false);
+    }
+
+    private Map<String, Object> reconcilePendingCharges(
+            List<ActualChargeRepository.PendingChargeRow> pendingRows,
+            boolean batchGatewayLookup) {
         UUID finalizedStatusId = billingRepository.resolveBillingStatusIdByCode(BillingStatus.LIVE_FINALIZED.getCode());
         UUID failedStatusId = billingRepository.resolveBillingStatusIdByCode(BillingStatus.LIVE_PAYMENT_FAILED.getCode());
         if (finalizedStatusId == null || failedStatusId == null) {
             throw new IllegalStateException("Missing billing_status rows for LIVE_FINALIZED or LIVE_PAYMENT_FAILED");
         }
 
-        List<ActualChargeRepository.PendingChargeRow> pendingRows =
-                actualChargeRepository.findPendingLiveRowsForReconciliation(pollBatchSize, staleMinutes);
         int inspected = pendingRows.size();
         int finalized = 0;
         int failed = 0;
         int unchanged = 0;
 
+        Map<String, String> gatewayByKey = Map.of();
+        if (batchGatewayLookup && !pendingRows.isEmpty()) {
+            List<ActualChargeRepository.GatewayStatusKey> keys = pendingRows.stream()
+                    .filter(r -> r.applicationId() != null && r.clientPaymentTransactionId() != null)
+                    .map(r -> new ActualChargeRepository.GatewayStatusKey(
+                            r.applicationId(), r.clientPaymentTransactionId()))
+                    .distinct()
+                    .toList();
+            gatewayByKey = actualChargeRepository.findGatewayTransactionStatuses(keys);
+        }
+
         for (ActualChargeRepository.PendingChargeRow row : pendingRows) {
-            String gatewayStatus = normalize(actualChargeRepository.findGatewayTransactionStatus(
-                    row.clientPaymentTransactionId(),
-                    row.applicationId()));
+            String gatewayStatus;
+            if (batchGatewayLookup) {
+                gatewayStatus = normalize(gatewayByKey.get(
+                        ActualChargeRepository.gatewayStatusMapKey(
+                                row.applicationId(), row.clientPaymentTransactionId())));
+            } else {
+                gatewayStatus = normalize(actualChargeRepository.findGatewayTransactionStatus(
+                        row.clientPaymentTransactionId(),
+                        row.applicationId()));
+            }
             if (gatewayStatus == null || gatewayStatus.isBlank()) {
                 unchanged++;
                 continue;

@@ -24,7 +24,8 @@ public class ActualChargePendingPoller {
     @Scheduled(fixedDelayString = "${clubone.billing.actual-charge.pending.poll.fixed-delay-ms:60000}")
     public void reconcilePendingCharges() {
         try {
-            reconciliationService.reconcilePendingCharges();
+            // No HTTP actor — cross-tenant scan using each row's application_id.
+            reconciliationService.reconcilePendingChargesForPoller();
         } catch (Exception ex) {
             log.error("actual-charge pending poller failed", ex);
         }

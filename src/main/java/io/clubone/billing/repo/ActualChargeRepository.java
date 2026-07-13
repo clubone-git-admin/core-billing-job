@@ -366,14 +366,22 @@ public class ActualChargeRepository {
     }
 
     /**
-     * Pending live captures ready for gateway reconciliation.
-     * <ul>
-     *   <li>HTTP (actor present): scoped to the caller's {@code application_id}</li>
-     *   <li>Scheduled poller (no actor): cross-tenant scan — each row carries its {@code applicationId}</li>
-     * </ul>
+     * Pending live captures for gateway reconciliation (HTTP / actor-scoped when context is present).
      */
     public List<PendingChargeRow> findPendingLiveRowsForReconciliation(int limit, int staleMinutes) {
-        Optional<UUID> scopedApp = optionalAppId();
+        return findPendingLiveRowsForReconciliation(limit, staleMinutes, optionalAppId().orElse(null));
+    }
+
+    /**
+     * Cross-tenant pending scan for the scheduled poller. Does not read {@link AccessContext}/{@link TenantContext}.
+     * Each row carries its own {@code applicationId} for subsequent status updates.
+     */
+    public List<PendingChargeRow> findAllPendingLiveRowsForReconciliation(int limit, int staleMinutes) {
+        return findPendingLiveRowsForReconciliation(limit, staleMinutes, null);
+    }
+
+    private List<PendingChargeRow> findPendingLiveRowsForReconciliation(
+            int limit, int staleMinutes, UUID applicationIdOrNull) {
         StringBuilder sql = new StringBuilder("""
                 SELECT
                     sbh.application_id,
@@ -392,9 +400,9 @@ public class ActualChargeRepository {
                 """);
         List<Object> args = new ArrayList<>();
         args.add(Math.max(1, staleMinutes));
-        if (scopedApp.isPresent()) {
+        if (applicationIdOrNull != null) {
             sql.append(" AND sbh.application_id = ?::uuid ");
-            args.add(scopedApp.get().toString());
+            args.add(applicationIdOrNull.toString());
         }
         sql.append("""
                 ORDER BY sbh.billing_attempt_on ASC
@@ -423,21 +431,71 @@ public class ActualChargeRepository {
         if (clientPaymentTransactionId == null || applicationId == null) {
             return null;
         }
-        List<String> rows = jdbc.query(
+        Map<String, String> one =
+                findGatewayTransactionStatuses(List.of(new GatewayStatusKey(applicationId, clientPaymentTransactionId)));
+        return one.get(gatewayStatusMapKey(applicationId, clientPaymentTransactionId));
+    }
+
+    /**
+     * Batch gateway status lookup for pending poller (avoids 1 query per pending row).
+     * Map key = {@code applicationId|clientPaymentTransactionId}.
+     */
+    public Map<String, String> findGatewayTransactionStatuses(List<GatewayStatusKey> keys) {
+        Map<String, String> out = new HashMap<>();
+        if (keys == null || keys.isEmpty()) {
+            return out;
+        }
+        List<UUID> txIds = new ArrayList<>();
+        for (GatewayStatusKey k : keys) {
+            if (k != null && k.applicationId() != null && k.clientPaymentTransactionId() != null) {
+                txIds.add(k.clientPaymentTransactionId());
+            }
+        }
+        if (txIds.isEmpty()) {
+            return out;
+        }
+        // Deduplicate while preserving order for stable IN lists.
+        List<UUID> distinctTx = txIds.stream().distinct().toList();
+        String in = placeholders(distinctTx.size());
+        List<Object> args = new ArrayList<>();
+        for (UUID id : distinctTx) {
+            args.add(id.toString());
+        }
+        List<GatewayStatusKey> wanted = keys.stream()
+                .filter(k -> k != null && k.applicationId() != null && k.clientPaymentTransactionId() != null)
+                .distinct()
+                .toList();
+        Set<String> wantedKeys = new HashSet<>();
+        for (GatewayStatusKey k : wanted) {
+            wantedKeys.add(gatewayStatusMapKey(k.applicationId(), k.clientPaymentTransactionId()));
+        }
+        jdbc.query(
                 """
-                SELECT UPPER(pgts.status_code) AS gateway_status
+                SELECT cpt.application_id,
+                       cpt.client_payment_transaction_id,
+                       UPPER(pgts.status_code) AS gateway_status
                 FROM client_payments.client_payment_transaction cpt
                 JOIN payment_gateway.lu_payment_gateway_transaction_status pgts
                   ON pgts.payment_gateway_transaction_status_id = cpt.payment_gateway_transaction_status_id
-                WHERE cpt.client_payment_transaction_id = ?::uuid
-                  AND cpt.application_id = ?::uuid
-                LIMIT 1
-                """,
-                (rs, i) -> rs.getString("gateway_status"),
-                clientPaymentTransactionId.toString(),
-                applicationId.toString());
-        return rows.isEmpty() ? null : rows.get(0);
+                WHERE cpt.client_payment_transaction_id IN (%s)
+                """.formatted(in),
+                rs -> {
+                    UUID appId = (UUID) rs.getObject("application_id");
+                    UUID txId = (UUID) rs.getObject("client_payment_transaction_id");
+                    String key = gatewayStatusMapKey(appId, txId);
+                    if (wantedKeys.contains(key)) {
+                        out.put(key, rs.getString("gateway_status"));
+                    }
+                },
+                args.toArray());
+        return out;
     }
+
+    public static String gatewayStatusMapKey(UUID applicationId, UUID clientPaymentTransactionId) {
+        return applicationId + "|" + clientPaymentTransactionId;
+    }
+
+    public record GatewayStatusKey(UUID applicationId, UUID clientPaymentTransactionId) {}
 
     public PendingChargeRow findLatestPendingByClientPaymentTransactionId(UUID clientPaymentTransactionId) {
         if (clientPaymentTransactionId == null) {
