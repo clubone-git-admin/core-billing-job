@@ -7,14 +7,18 @@ import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.CrmDashboardRepository;
 import io.clubone.billing.repo.DashboardRepository;
 import io.clubone.billing.repo.LocationLevelRepository;
+import io.clubone.billing.security.TenantContext;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.YearMonth;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 
 /**
  * Service for dashboard operations.
@@ -520,45 +524,51 @@ public class DashboardService {
         List<UUID> locs = resolveLocations(null, locationLevelId, includeChildLocations);
         LocalDate monthStart = toDate.withDayOfMonth(1);
 
+        // Capture request ThreadLocal — worker threads do not inherit TenantContext.
+        final TenantContext tenantCtx = TenantContext.get();
+
         // Contract payload only needs a few billing fields — do NOT call full getOverview
         // (that path runs 15+ heavy queries the UI never reads here).
-        java.util.concurrent.CompletableFuture<Map<String, Object>> summaryF =
-                java.util.concurrent.CompletableFuture.supplyAsync(
+        CompletableFuture<Map<String, Object>> summaryF =
+                supplyAsyncWithTenant(tenantCtx,
                         () -> dashboardRepository.getOverviewSummary(
-                                fromDate, toDate, null, null, locs, null, null),
-                        CONTRACT_EXEC);
-        java.util.concurrent.CompletableFuture<List<Map<String, Object>>> billedF =
-                java.util.concurrent.CompletableFuture.supplyAsync(
+                                fromDate, toDate, null, null, locs, null, null));
+        CompletableFuture<List<Map<String, Object>>> billedF =
+                supplyAsyncWithTenant(tenantCtx,
                         () -> dashboardRepository.getOverviewBilledCollectedDaily(
-                                fromDate, toDate, null, null, locs, null, null),
-                        CONTRACT_EXEC);
-        java.util.concurrent.CompletableFuture<Map<String, Object>> membersF =
-                java.util.concurrent.CompletableFuture.supplyAsync(
-                        () -> crmDashboardRepository.getMemberCounts(locs), CONTRACT_EXEC);
-        java.util.concurrent.CompletableFuture<Number> checkinsMtdF =
-                java.util.concurrent.CompletableFuture.supplyAsync(
-                        () -> crmDashboardRepository.getCheckinsMtd(locs, monthStart, toDate), CONTRACT_EXEC);
-        java.util.concurrent.CompletableFuture<List<Map<String, Object>>> checkinDailyF =
-                java.util.concurrent.CompletableFuture.supplyAsync(
-                        () -> crmDashboardRepository.getCheckinTrendDaily(locs, fromDate, toDate),
-                        CONTRACT_EXEC);
-        java.util.concurrent.CompletableFuture<Map<String, Long>> genderF =
-                java.util.concurrent.CompletableFuture.supplyAsync(
-                        () -> crmDashboardRepository.getGenderBuckets(locs), CONTRACT_EXEC);
-        java.util.concurrent.CompletableFuture<List<Map<String, Object>>> topPlansF =
-                java.util.concurrent.CompletableFuture.supplyAsync(
-                        () -> crmDashboardRepository.getTopPlansByAgreement(locs, 10), CONTRACT_EXEC);
-        java.util.concurrent.CompletableFuture<List<Map<String, Object>>> recentF =
-                java.util.concurrent.CompletableFuture.supplyAsync(
-                        () -> crmDashboardRepository.getRecentRegistrations(locs, 10), CONTRACT_EXEC);
-        java.util.concurrent.CompletableFuture<List<Map<String, Object>>> membershipStatusF =
-                java.util.concurrent.CompletableFuture.supplyAsync(
-                        () -> crmDashboardRepository.getMembershipStatusBuckets(locs), CONTRACT_EXEC);
+                                fromDate, toDate, null, null, locs, null, null));
+        CompletableFuture<Map<String, Object>> membersF =
+                supplyAsyncWithTenant(tenantCtx, () -> crmDashboardRepository.getMemberCounts(locs));
+        CompletableFuture<Number> checkinsMtdF =
+                supplyAsyncWithTenant(tenantCtx,
+                        () -> crmDashboardRepository.getCheckinsMtd(locs, monthStart, toDate));
+        CompletableFuture<List<Map<String, Object>>> checkinDailyF =
+                supplyAsyncWithTenant(tenantCtx,
+                        () -> crmDashboardRepository.getCheckinTrendDaily(locs, fromDate, toDate));
+        CompletableFuture<Map<String, Long>> genderF =
+                supplyAsyncWithTenant(tenantCtx, () -> crmDashboardRepository.getGenderBuckets(locs));
+        CompletableFuture<List<Map<String, Object>>> topPlansF =
+                supplyAsyncWithTenant(tenantCtx,
+                        () -> crmDashboardRepository.getTopPlansByAgreement(locs, 10));
+        CompletableFuture<List<Map<String, Object>>> recentF =
+                supplyAsyncWithTenant(tenantCtx,
+                        () -> crmDashboardRepository.getRecentRegistrations(locs, 10));
+        CompletableFuture<List<Map<String, Object>>> membershipStatusF =
+                supplyAsyncWithTenant(tenantCtx,
+                        () -> crmDashboardRepository.getMembershipStatusBuckets(locs));
 
-        java.util.concurrent.CompletableFuture.allOf(
-                        summaryF, billedF, membersF, checkinsMtdF, checkinDailyF,
-                        genderF, topPlansF, recentF, membershipStatusF)
-                .join();
+        try {
+            CompletableFuture.allOf(
+                            summaryF, billedF, membersF, checkinsMtdF, checkinDailyF,
+                            genderF, topPlansF, recentF, membershipStatusF)
+                    .join();
+        } catch (CompletionException ex) {
+            Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+            if (cause instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new IllegalStateException("Dashboard overview fan-out failed", cause);
+        }
 
         Map<String, Object> summaryRaw = summaryF.join();
         double totalAmount = num(summaryRaw.get("total_amount")).doubleValue();
@@ -701,6 +711,28 @@ public class DashboardService {
         out.put("recentRegistrations", recentRegistrations);
         out.put("alerts", alerts);
         return out;
+    }
+
+    /**
+     * Run async work with the request {@link TenantContext} restored onto the worker thread
+     * (ThreadLocal is not inherited by {@link ExecutorService} threads).
+     */
+    private static <T> CompletableFuture<T> supplyAsyncWithTenant(TenantContext ctx, Supplier<T> supplier) {
+        return CompletableFuture.supplyAsync(() -> {
+            TenantContext previous = TenantContext.get();
+            try {
+                if (ctx != null) {
+                    TenantContext.set(ctx);
+                }
+                return supplier.get();
+            } finally {
+                if (previous != null) {
+                    TenantContext.set(previous);
+                } else {
+                    TenantContext.clear();
+                }
+            }
+        }, CONTRACT_EXEC);
     }
 
     @SuppressWarnings("unchecked")
