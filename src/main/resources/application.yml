@@ -31,9 +31,10 @@ spring:
       password: C1ub0ne@2024!
       driver-class-name: org.postgresql.Driver
       hikari:
-        maximum-pool-size: 5
-        minimum-idle: 1
-        connection-timeout: 30000
+        # Sized for dashboard contract fan-out (4 workers) + other requests on small tasks.
+        maximum-pool-size: 8
+        minimum-idle: 2
+        connection-timeout: 15000
         idle-timeout: 600000
         max-lifetime: 1800000
         leak-detection-threshold: 60000

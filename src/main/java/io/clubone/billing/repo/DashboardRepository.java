@@ -703,7 +703,7 @@ public class DashboardRepository {
                     + ") ";
 
     /**
-     * Daily billed vs collected for runs/invoices in scope (same filters as overview summary).
+     * Daily billed vs collected — scopes history to filtered runs first (avoids windowing the entire SBH table).
      */
     public List<Map<String, Object>> getOverviewBilledCollectedDaily(
             LocalDate dueDateFrom,
@@ -716,18 +716,32 @@ public class DashboardRepository {
         List<Object> p = new ArrayList<>();
         String where = buildRunWhere("br", dueDateFrom, dueDateTo, asOfFrom, asOfTo, locationIds, status, currentStage, p);
         String sql =
-                LATEST_ATTEMPT_CTE
-                        + ", sbh_by_run AS ( "
-                        + "  SELECT br.billing_run_id, br.due_date, br.summary_json, UPPER(brs.status_code) AS run_status, "
-                        + "         COALESCE(SUM(la.invoice_total_amount), 0) AS from_la_billed, "
-                        + "         COALESCE(SUM(CASE WHEN bs.is_success = true THEN la.invoice_total_amount ELSE 0 END), 0) AS from_la_collected "
+                "WITH filtered_runs AS ( "
+                        + "  SELECT br.billing_run_id, br.due_date, br.summary_json, UPPER(brs.status_code) AS run_status "
                         + "  FROM client_subscription_billing.billing_run br "
                         + "  JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
                         + "  LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
-                        + "  LEFT JOIN latest_attempt la ON la.billing_run_id = br.billing_run_id "
-                        + "  LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = la.billing_status_id "
                         + where
-                        + "  GROUP BY br.billing_run_id, br.due_date, br.summary_json, brs.status_code "
+                        + "), latest_attempt AS ( "
+                        + "  SELECT * FROM ( "
+                        + "    SELECT sbh.billing_run_id, sbh.invoice_total_amount, sbh.billing_status_id, sbh.is_mock, "
+                        + "      ROW_NUMBER() OVER ( "
+                        + "        PARTITION BY sbh.billing_run_id, "
+                        + "                     COALESCE(CAST(sbh.invoice_id AS TEXT), CAST(sbh.subscription_instance_id AS TEXT)) "
+                        + "        ORDER BY sbh.billing_attempt_on DESC NULLS LAST, sbh.created_on DESC NULLS LAST, "
+                        + "                 sbh.subscription_billing_history_id DESC) AS rn "
+                        + "    FROM client_subscription_billing.subscription_billing_history sbh "
+                        + "    WHERE sbh.billing_run_id IN (SELECT billing_run_id FROM filtered_runs) "
+                        + "      AND COALESCE(sbh.is_mock, false) = false "
+                        + "  ) t WHERE rn = 1 "
+                        + "), sbh_by_run AS ( "
+                        + "  SELECT fr.billing_run_id, fr.due_date, fr.summary_json, fr.run_status, "
+                        + "         COALESCE(SUM(la.invoice_total_amount), 0) AS from_la_billed, "
+                        + "         COALESCE(SUM(CASE WHEN bs.is_success = true THEN la.invoice_total_amount ELSE 0 END), 0) AS from_la_collected "
+                        + "  FROM filtered_runs fr "
+                        + "  LEFT JOIN latest_attempt la ON la.billing_run_id = fr.billing_run_id "
+                        + "  LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = la.billing_status_id "
+                        + "  GROUP BY fr.billing_run_id, fr.due_date, fr.summary_json, fr.run_status "
                         + ") "
                         + "SELECT TO_CHAR(due_date, 'YYYY-MM-DD') AS date, "
                         + "COALESCE(SUM(CASE "

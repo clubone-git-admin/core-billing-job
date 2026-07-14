@@ -13,6 +13,8 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.YearMonth;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Service for dashboard operations.
@@ -25,6 +27,15 @@ public class DashboardService {
     private final BillingRunRepository billingRunRepository;
     private final CrmDashboardRepository crmDashboardRepository;
     private static final Set<String> ALLOWED_SEGMENTS = Set.of("7D", "30D", "MTD", "YTD");
+
+    /** Bounded pool for contract overview fan-out (matches modest Hikari sizing). */
+    private static final ExecutorService CONTRACT_EXEC = Executors.newFixedThreadPool(
+            4,
+            r -> {
+                Thread t = new Thread(r, "dashboard-contract");
+                t.setDaemon(true);
+                return t;
+            });
 
     public DashboardService(
             DashboardRepository dashboardRepository,
@@ -506,23 +517,63 @@ public class DashboardService {
             }
         }
 
-        // Do not pass fromDate/toDate as as-of: that filters on DATE(br.created_on) and excludes runs
-        // whose due_date is in range but were created earlier/later — while KPI total_invoiced can
-        // still be non-zero (e.g. resolveInvoicedTotals uses run_health, which is due-date only).
-        Map<String, Object> base = getOverview(
-                fromDate, toDate, null, null, null, locationLevelId, includeChildLocations,
-                null, null, 10, 0, 200, 0);
+        List<UUID> locs = resolveLocations(null, locationLevelId, includeChildLocations);
+        LocalDate monthStart = toDate.withDayOfMonth(1);
 
-        @SuppressWarnings("unchecked")
-        Map<String, Object> summary = base.get("summary") instanceof Map<?, ?> m ? (Map<String, Object>) (Map<?, ?>) m : Map.of();
-        @SuppressWarnings("unchecked")
-        Map<String, Object> trends = base.get("trends") instanceof Map<?, ?> m ? (Map<String, Object>) (Map<?, ?>) m : Map.of();
-        @SuppressWarnings("unchecked")
-        Map<String, Object> charts = base.get("charts") instanceof Map<?, ?> m ? (Map<String, Object>) (Map<?, ?>) m : Map.of();
+        // Contract payload only needs a few billing fields — do NOT call full getOverview
+        // (that path runs 15+ heavy queries the UI never reads here).
+        java.util.concurrent.CompletableFuture<Map<String, Object>> summaryF =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        () -> dashboardRepository.getOverviewSummary(
+                                fromDate, toDate, null, null, locs, null, null),
+                        CONTRACT_EXEC);
+        java.util.concurrent.CompletableFuture<List<Map<String, Object>>> billedF =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        () -> dashboardRepository.getOverviewBilledCollectedDaily(
+                                fromDate, toDate, null, null, locs, null, null),
+                        CONTRACT_EXEC);
+        java.util.concurrent.CompletableFuture<Map<String, Object>> membersF =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        () -> crmDashboardRepository.getMemberCounts(locs), CONTRACT_EXEC);
+        java.util.concurrent.CompletableFuture<Number> checkinsMtdF =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        () -> crmDashboardRepository.getCheckinsMtd(locs, monthStart, toDate), CONTRACT_EXEC);
+        java.util.concurrent.CompletableFuture<List<Map<String, Object>>> checkinDailyF =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        () -> crmDashboardRepository.getCheckinTrendDaily(locs, fromDate, toDate),
+                        CONTRACT_EXEC);
+        java.util.concurrent.CompletableFuture<Map<String, Long>> genderF =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        () -> crmDashboardRepository.getGenderBuckets(locs), CONTRACT_EXEC);
+        java.util.concurrent.CompletableFuture<List<Map<String, Object>>> topPlansF =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        () -> crmDashboardRepository.getTopPlansByAgreement(locs, 10), CONTRACT_EXEC);
+        java.util.concurrent.CompletableFuture<List<Map<String, Object>>> recentF =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        () -> crmDashboardRepository.getRecentRegistrations(locs, 10), CONTRACT_EXEC);
+        java.util.concurrent.CompletableFuture<List<Map<String, Object>>> membershipStatusF =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        () -> crmDashboardRepository.getMembershipStatusBuckets(locs), CONTRACT_EXEC);
 
-        List<Map<String, Object>> billedCollected = asMapList(trends.get("billed_collected"));
-        // Align with the requested date range: DB only returns days that have billing runs, so we
-        // densify to one point per day (zeros when no run / no amounts).
+        java.util.concurrent.CompletableFuture.allOf(
+                        summaryF, billedF, membersF, checkinsMtdF, checkinDailyF,
+                        genderF, topPlansF, recentF, membershipStatusF)
+                .join();
+
+        Map<String, Object> summaryRaw = summaryF.join();
+        double totalAmount = num(summaryRaw.get("total_amount")).doubleValue();
+        double collectedAmount = num(summaryRaw.get("collected_amount")).doubleValue();
+        double atRiskAmount = num(summaryRaw.get("at_risk_amount")).doubleValue();
+        double inFlightAmount = num(summaryRaw.get("in_flight_amount")).doubleValue();
+        double outstandingAr = Math.max(0.0, inFlightAmount + atRiskAmount);
+        long unresolvedDlq = num(summaryRaw.get("unresolved_dlq_count")).longValue();
+        long failureCount = num(summaryRaw.get("failure_count")).longValue();
+
+        Map<String, Object> summaryForAlerts = new LinkedHashMap<>();
+        summaryForAlerts.put("unresolved_dlq_count", unresolvedDlq);
+        summaryForAlerts.put("failed_payments", failureCount);
+
+        List<Map<String, Object>> billedCollected = safeList(billedF.join());
         Map<String, double[]> billedCollectedByDay = new HashMap<>();
         for (Map<String, Object> p : billedCollected) {
             String d = p.get("date") == null ? null : String.valueOf(p.get("date"));
@@ -546,17 +597,13 @@ public class DashboardService {
             collected.add(v[1]);
         }
 
-        List<UUID> crmLocs = resolveLocations(null, locationLevelId, includeChildLocations);
-        Map<String, Object> memberCounts = crmDashboardRepository.getMemberCounts(crmLocs);
+        Map<String, Object> memberCounts = membersF.join();
         long totalMembers = num(memberCounts.get("total_members")).longValue();
         long activeMemberships = num(memberCounts.get("active_members")).longValue();
-        LocalDate monthStart = toDate.withDayOfMonth(1);
-        long checkinsMtd = crmDashboardRepository.getCheckinsMtd(crmLocs, monthStart, toDate).longValue();
+        long checkinsMtd = checkinsMtdF.join().longValue();
 
-        List<Map<String, Object>> checkinDaily =
-                crmDashboardRepository.getCheckinTrendDaily(crmLocs, fromDate, toDate);
         Map<String, Long> checkinsByDay = new HashMap<>();
-        for (Map<String, Object> row : checkinDaily) {
+        for (Map<String, Object> row : checkinDailyF.join()) {
             Object day = row.get("day");
             String key =
                     day instanceof java.sql.Date sd
@@ -572,10 +619,9 @@ public class DashboardService {
             checkinValues.add(checkinsByDay.getOrDefault(k, 0L));
         }
 
-        Map<String, Long> gender = crmDashboardRepository.getGenderBuckets(crmLocs);
+        Map<String, Long> gender = genderF.join();
 
-        List<Map<String, Object>> topPlanRows =
-                crmDashboardRepository.getTopPlansByAgreement(crmLocs, 10);
+        List<Map<String, Object>> topPlanRows = topPlansF.join();
         long planMemberSum = topPlanRows.stream().mapToLong(r -> num(r.get("members")).longValue()).sum();
         List<Map<String, Object>> topPlans = new ArrayList<>();
         for (Map<String, Object> row : topPlanRows) {
@@ -591,9 +637,8 @@ public class DashboardService {
                             share));
         }
 
-        List<Map<String, Object>> recentRows = crmDashboardRepository.getRecentRegistrations(crmLocs, 10);
         List<Map<String, Object>> recentRegistrations = new ArrayList<>();
-        for (Map<String, Object> row : recentRows) {
+        for (Map<String, Object> row : recentF.join()) {
             Map<String, Object> rr = new LinkedHashMap<>();
             rr.put("clientRoleId", row.get("client_role_id"));
             rr.put("roleExternalId", row.get("role_external_id"));
@@ -604,7 +649,7 @@ public class DashboardService {
         }
 
         List<Map<String, Object>> membershipStatus = new ArrayList<>();
-        for (Map<String, Object> r : crmDashboardRepository.getMembershipStatusBuckets(crmLocs)) {
+        for (Map<String, Object> r : membershipStatusF.join()) {
             membershipStatus.add(
                     Map.of(
                             "name",
@@ -613,8 +658,7 @@ public class DashboardService {
                             num(r.get("value")).longValue()));
         }
 
-        List<Map<String, Object>> alertsIn = asMapList(charts.get("alerts"));
-        List<Map<String, Object>> alerts = alertsIn.stream().map(a -> {
+        List<Map<String, Object>> alerts = buildAlerts(summaryForAlerts).stream().map(a -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("type", String.valueOf(a.getOrDefault("title", "INFO")).toUpperCase(Locale.ROOT).replace(' ', '_'));
             m.put("title", String.valueOf(a.getOrDefault("title", "Info")));
@@ -627,9 +671,11 @@ public class DashboardService {
         filters.put("fromDate", fromDate.toString());
         filters.put("toDate", toDate.toString());
         filters.put("segment", seg);
-        // Map.of forbids nulls; optional query params may be absent.
         filters.put("locationLevelId", locationLevelIdRaw != null ? locationLevelIdRaw : "");
         filters.put("locationLabel", locationLabel != null ? locationLabel : "");
+
+        // Prefer collected-range billed when history empty but summary has totals.
+        double revenueMtd = totalAmount > 0 ? totalAmount : collectedAmount;
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("filters", filters);
@@ -637,8 +683,8 @@ public class DashboardService {
                 "totalMembers", Map.of("value", totalMembers, "deltaPct", 0),
                 "activeMemberships", Map.of("value", activeMemberships, "deltaPct", 0),
                 "checkinsMtd", Map.of("value", checkinsMtd, "deltaPct", 0),
-                "revenueMtd", Map.of("value", num(summary.get("total_invoiced")), "deltaPct", 0),
-                "outstandingAr", Map.of("value", num(summary.get("outstanding_amount")), "deltaPct", 0)));
+                "revenueMtd", Map.of("value", revenueMtd, "deltaPct", 0),
+                "outstandingAr", Map.of("value", outstandingAr, "deltaPct", 0)));
         out.put("revenueOverview", Map.of("billed", billed, "collected", collected, "labels", labels));
         out.put("membershipStatus", membershipStatus);
         out.put("checkinTrend", Map.of("labels", checkinLabels, "values", checkinValues));
