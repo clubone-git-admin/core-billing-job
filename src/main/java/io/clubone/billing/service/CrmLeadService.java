@@ -33,17 +33,19 @@ public class CrmLeadService {
     private final CrmCampaignRepository campaignRepository;
     private final CrmContactRepository contactRepository;
     private final LeadConvertRepository leadConvertRepository;
+    private final ClientDashboardProjectionRefresher clientDashboardProjectionRefresher;
     private final LeadWarmthService leadWarmthService;
     private final ObjectMapper objectMapper;
     private final String completionLinkBase;
     private final CrmRequestContext context;
 
-    public CrmLeadService(CrmLeadRepository repository, CrmCampaignRepository campaignRepository, CrmContactRepository contactRepository, LeadConvertRepository leadConvertRepository, LeadWarmthService leadWarmthService, ObjectMapper objectMapper,
+    public CrmLeadService(CrmLeadRepository repository, CrmCampaignRepository campaignRepository, CrmContactRepository contactRepository, LeadConvertRepository leadConvertRepository, ClientDashboardProjectionRefresher clientDashboardProjectionRefresher, LeadWarmthService leadWarmthService, ObjectMapper objectMapper,
                            @Value("${clubone.crm.completion-link-base:}") String completionLinkBase, CrmRequestContext context) {
         this.repository = repository;
         this.campaignRepository = campaignRepository;
         this.contactRepository = contactRepository;
         this.leadConvertRepository = leadConvertRepository;
+        this.clientDashboardProjectionRefresher = clientDashboardProjectionRefresher;
         this.leadWarmthService = leadWarmthService;
         this.objectMapper = objectMapper;
         this.completionLinkBase = completionLinkBase != null ? completionLinkBase : "";
@@ -320,6 +322,8 @@ public class CrmLeadService {
         repository.updateLeadStatus(orgId, leadId, convertedStatusId, context.getActorId());
         repository.updateLeadConvertedIds(orgId, leadId, contactId, opportunityId, context.getActorId());
 
+        clientDashboardProjectionRefresher.scheduleRefreshAfterCommit(clientRoleId);
+
         var row = repository.findLeadSummaryById(orgId, leadId);
         return row == null ? null : mapToSummaryDto(row);
     }
@@ -353,6 +357,9 @@ public class CrmLeadService {
                 (UUID) lead.get("lead_type_id"), (UUID) lead.get("gender_id"), (UUID) lead.get("referred_by_contact_id"), context.getActorId());
         repository.updateLeadStatus(orgId, leadId, convertedStatusId, context.getActorId());
         repository.updateLeadConvertedIds(orgId, leadId, existingContactId, opportunityId, context.getActorId());
+
+        clientDashboardProjectionRefresher.scheduleRefreshAfterCommit(existingClientId);
+
         var row = repository.findLeadSummaryById(orgId, leadId);
         return row == null ? null : mapToSummaryDto(row);
     }

@@ -1,5 +1,7 @@
 package io.clubone.billing.repo;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -15,6 +17,8 @@ import java.util.UUID;
  */
 @Repository
 public class LeadConvertRepository {
+
+    private static final Logger log = LoggerFactory.getLogger(LeadConvertRepository.class);
 
     private final JdbcTemplate jdbc;
 
@@ -238,5 +242,23 @@ public class LeadConvertRepository {
                 homeLocationId, salutationId, firstName, lastName, fullName != null ? fullName : (firstName + " " + lastName).trim(),
                 email, phone, leadTypeId, genderId, referredByContactId, createdBy);
         return id;
+    }
+
+    /** Hydrate {@code clients.client_dashboard_proj} for a client role (search/list dashboard). */
+    public void refreshClientDashboardProjection(UUID clientRoleId) {
+        if (clientRoleId == null) {
+            return;
+        }
+        try {
+            jdbc.execute((java.sql.Connection con) -> {
+                try (var ps = con.prepareStatement("SELECT clients.refresh_client_dashboard_proj(?)")) {
+                    ps.setObject(1, clientRoleId);
+                    ps.execute();
+                }
+                return null;
+            });
+        } catch (Exception ex) {
+            log.warn("refresh_client_dashboard_proj skipped for clientRoleId={}: {}", clientRoleId, ex.getMessage());
+        }
     }
 }
