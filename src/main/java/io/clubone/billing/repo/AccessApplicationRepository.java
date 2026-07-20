@@ -38,18 +38,42 @@ public class AccessApplicationRepository {
 
     /** Stable audit actor for public Join when X-Actor-Id is absent or inactive. */
     public UUID findSystemApplicationUserId(UUID applicationId) {
+        ApplicationUserRef ref = findSystemApplicationUser(applicationId);
+        return ref == null ? null : ref.applicationUserId();
+    }
+
+    public ApplicationUserRef findSystemApplicationUser(UUID applicationId) {
         if (applicationId == null) return null;
         try {
             return jdbc.queryForObject("""
-                SELECT application_user_id
+                SELECT application_user_id, user_id
                 FROM access.access_application_user
                 WHERE application_id = ?
                   AND COALESCE(is_active, true) = true
                 ORDER BY application_user_id
                 LIMIT 1
-                """, UUID.class, applicationId);
+                """, (rs, i) -> new ApplicationUserRef(
+                    (UUID) rs.getObject("application_user_id"),
+                    (UUID) rs.getObject("user_id")), applicationId);
         } catch (org.springframework.dao.EmptyResultDataAccessException e) {
             return null;
         }
+    }
+
+    public UUID findUserIdByApplicationUserId(UUID applicationUserId) {
+        if (applicationUserId == null) return null;
+        try {
+            return jdbc.queryForObject("""
+                SELECT user_id
+                FROM access.access_application_user
+                WHERE application_user_id = ?
+                LIMIT 1
+                """, UUID.class, applicationUserId);
+        } catch (org.springframework.dao.EmptyResultDataAccessException e) {
+            return null;
+        }
+    }
+
+    public record ApplicationUserRef(UUID applicationUserId, UUID userId) {
     }
 }

@@ -106,19 +106,24 @@ public class CrmContextInterceptor implements HandlerInterceptor {
         }
 
         UUID actorId;
+        UUID userId;
         TenantContext tenant = TenantContext.get();
         if (tenant != null) {
             actorId = tenant.applicationUserId();
+            userId = tenant.userId();
         } else if (joinConvert) {
             // Public Join: ignore stale/inactive X-Actor-Id; use a tenant app user for audit columns.
-            actorId = accessApplicationRepository.findSystemApplicationUserId(applicationId);
-            if (actorId == null) {
+            AccessApplicationRepository.ApplicationUserRef systemUser =
+                    accessApplicationRepository.findSystemApplicationUser(applicationId);
+            if (systemUser == null || systemUser.applicationUserId() == null || systemUser.userId() == null) {
                 log.warn("Join convert: no active application user for applicationId={}", applicationId);
                 response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
                 response.setContentType("application/json");
                 response.getWriter().write("{\"error\":\"No active application user available for public lead convert\"}");
                 return false;
             }
+            actorId = systemUser.applicationUserId();
+            userId = systemUser.userId();
         } else {
             try {
                 actorId = UUID.fromString(actorIdStr.trim());
@@ -129,12 +134,21 @@ public class CrmContextInterceptor implements HandlerInterceptor {
                 response.getWriter().write("{\"error\":\"X-Actor-Id must be a valid UUID\"}");
                 return false;
             }
+            userId = accessApplicationRepository.findUserIdByApplicationUserId(actorId);
+            if (userId == null) {
+                log.warn("CRM request actor has no access_user mapping: applicationUserId={}", actorId);
+                response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+                response.setContentType("application/json");
+                response.getWriter().write("{\"error\":\"X-Actor-Id is not a valid application user\"}");
+                return false;
+            }
         }
 
         context.setApplicationId(applicationId);
         context.setOrgClientId(orgClientId);
         context.setLocationId(locationId);
         context.setActorId(actorId);
+        context.setUserId(userId);
         return true;
     }
 }

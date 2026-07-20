@@ -310,7 +310,7 @@ public class CrmLeadService {
 
         UUID ownerUserId = (UUID) lead.get("owner_user_id");
         if (ownerUserId == null) {
-            ownerUserId = context.getActorId();
+            ownerUserId = context.getUserId();
         }
 
         UUID opportunityId = leadConvertRepository.insertOpportunity(
@@ -348,7 +348,7 @@ public class CrmLeadService {
         }
         UUID ownerUserId = (UUID) lead.get("owner_user_id");
         if (ownerUserId == null) {
-            ownerUserId = context.getActorId();
+            ownerUserId = context.getUserId();
         }
         UUID opportunityId = leadConvertRepository.insertOpportunity(
                 orgId, existingClientId, opportunityStageId, existingContactId, ownerUserId,
