@@ -35,4 +35,21 @@ public class AccessApplicationRepository {
             return null;
         }
     }
+
+    /** Stable audit actor for public Join when X-Actor-Id is absent or inactive. */
+    public UUID findSystemApplicationUserId(UUID applicationId) {
+        if (applicationId == null) return null;
+        try {
+            return jdbc.queryForObject("""
+                SELECT application_user_id
+                FROM access.access_application_user
+                WHERE application_id = ?
+                  AND COALESCE(is_active, true) = true
+                ORDER BY application_user_id
+                LIMIT 1
+                """, UUID.class, applicationId);
+        } catch (org.springframework.dao.EmptyResultDataAccessException e) {
+            return null;
+        }
+    }
 }

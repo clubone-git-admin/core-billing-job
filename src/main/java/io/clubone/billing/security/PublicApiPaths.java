@@ -5,7 +5,7 @@ import jakarta.servlet.http.HttpServletRequest;
 /**
  * Paths that do not require tenant headers:
  * health, actuator (including Spring Batch actuator), swagger/OpenAPI docs only.
- * No TenantOptionalApiPaths bypass.
+ * Join lead-convert uses {@link TenantOptionalApiPaths} (optional actor), not this list.
  */
 public final class PublicApiPaths {
 

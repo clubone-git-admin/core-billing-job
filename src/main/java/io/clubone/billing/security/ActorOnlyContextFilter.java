@@ -26,7 +26,8 @@ import lombok.extern.slf4j.Slf4j;
 /**
  * Hard-cutover tenant filter. Required headers:
  * X-Actor-Id, X-Location-Id, application-id (must match actor application).
- * No optional / fallback tenant paths.
+ *
+ * <p>Join lead-convert ({@link TenantOptionalApiPaths}) may proceed without a valid actor.
  */
 @Component
 @Slf4j
@@ -65,6 +66,13 @@ public class ActorOnlyContextFilter extends OncePerRequestFilter {
         req.getHeader("application-id"),
         firstNonBlank(req.getHeader("X-Application-Id"), req.getHeader("X-App-Id")));
 
+    final boolean optionalPath = TenantOptionalApiPaths.isOptional(path, method);
+    if (optionalPath && !hasAllTenantHeaders(actorHeader, locationHeader, appHeader)) {
+      log.debug("Optional tenant headers for {} {} (partial or missing headers)", method, path);
+      proceedWithoutTenantContext(req, res, chain);
+      return;
+    }
+
     if (actorHeader == null || actorHeader.isBlank()) {
       FilterErrorWriter.write(res, 400, "bad_request", "X-Actor-Id header is required");
       return;
@@ -97,11 +105,21 @@ public class ActorOnlyContextFilter extends OncePerRequestFilter {
 
     ActorCtx ctx = cache.get(actorId, workingLoc, this::loadActorCtx);
     if (ctx == null || !ctx.isUserActive() || !ctx.isAppActive()) {
+      if (optionalPath) {
+        log.debug("Optional path {}: actor inactive/missing — proceeding without tenant", path);
+        proceedWithoutTenantContext(req, res, chain);
+        return;
+      }
       FilterErrorWriter.write(res, 403, "forbidden", "Actor inactive or not found");
       return;
     }
 
     if (!locationAccessValidator.canAccessLocation(actorId, workingLoc, ctx.accessibleLevelIds())) {
+      if (optionalPath) {
+        log.debug("Optional path {}: location not accessible — proceeding without tenant", path);
+        proceedWithoutTenantContext(req, res, chain);
+        return;
+      }
       FilterErrorWriter.write(res, 403, "forbidden", "X-Location-Id is not accessible to this actor");
       return;
     }
@@ -144,6 +162,28 @@ public class ActorOnlyContextFilter extends OncePerRequestFilter {
       TenantContext.clear();
       SecurityContextHolder.clearContext();
     }
+  }
+
+  private void proceedWithoutTenantContext(
+      HttpServletRequest req, HttpServletResponse res, FilterChain chain)
+      throws IOException, ServletException {
+    var auth = new UsernamePasswordAuthenticationToken(
+        "crm-join-optional",
+        null,
+        List.of(new SimpleGrantedAuthority("ROLE_POS_OPTIONAL")));
+    SecurityContextHolder.getContext().setAuthentication(auth);
+    try {
+      chain.doFilter(req, res);
+    } finally {
+      TenantContext.clear();
+      SecurityContextHolder.clearContext();
+    }
+  }
+
+  private static boolean hasAllTenantHeaders(String actor, String location, String application) {
+    return actor != null && !actor.isBlank()
+        && location != null && !location.isBlank()
+        && application != null && !application.isBlank();
   }
 
   private ActorCtx loadActorCtx(UUID applicationUserId, UUID workingLocation) {
