@@ -9,19 +9,20 @@ import io.clubone.billing.api.baseobject.Docs;
 import io.clubone.billing.api.baseobject.Version;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
-import lombok.extern.slf4j.Slf4j;
 
+/**
+ * Liveness endpoint for ECS/ALB ({@code /crm/health}). Kept allocation-light so it
+ * still returns under load when Tomcat threads are constrained.
+ */
 @RestController
-@Slf4j
 @Tag(name = "Health Check", description = "View, configured health checkings data")
 public class HealthCheckController {
 
 	@Autowired(required = false)
 	private BuildProperties buildProperties;
 
-	@GetMapping({"/crm/health"})
+	@GetMapping({"/crm/health", "/health"})
 	public Version getVersion(HttpServletRequest httpServletRequest) {
-		log.debug("inside getVersion() method start");
 		Docs docs = new Docs();
 		String buildTime = (buildProperties != null && buildProperties.get("time") != null)
 				? String.valueOf(buildProperties.get("time"))
@@ -31,7 +32,6 @@ public class HealthCheckController {
 		Version version = new Version();
 		version.setVersion(getClass().getPackage().getImplementationVersion());
 		version.setDocs(docs);
-		log.debug("inside getVersion() method end");
 		return version;
 	}
 }

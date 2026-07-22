@@ -1,12 +1,13 @@
 server:
   port: 9000
-  # Cap HTTP concurrency for 0.5–1 vCPU ECS tasks (default Tomcat is far too large).
+  # Sized for 1 vCPU / 1GB ECS tasks. Keep headroom so ALB + container health checks
+  # are not starved when CRM/billing traffic spikes (was 10 and caused restart loops).
   tomcat:
     threads:
-      max: 10
-      min-spare: 2
-    accept-count: 25
-    max-connections: 50
+      max: 50
+      min-spare: 5
+    accept-count: 100
+    max-connections: 200
 
 # Invoice generation async (POST → after-commit job); set DEBUG for more detail.
 logging:
@@ -31,8 +32,8 @@ spring:
       password: C1ub0ne@2024!
       driver-class-name: org.postgresql.Driver
       hikari:
-        # Sized for dashboard contract fan-out (4 workers) + other requests on small tasks.
-        maximum-pool-size: 8
+        # Align with Tomcat concurrency; leave room below Postgres max_connections.
+        maximum-pool-size: 12
         minimum-idle: 2
         connection-timeout: 15000
         idle-timeout: 600000
