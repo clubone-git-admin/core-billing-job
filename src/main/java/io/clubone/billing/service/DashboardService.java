@@ -7,7 +7,10 @@ import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.CrmDashboardRepository;
 import io.clubone.billing.repo.DashboardRepository;
 import io.clubone.billing.repo.LocationLevelRepository;
+import io.clubone.billing.security.AccessContext;
 import io.clubone.billing.security.TenantContext;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -18,6 +21,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
@@ -32,14 +36,21 @@ public class DashboardService {
     private final CrmDashboardRepository crmDashboardRepository;
     private static final Set<String> ALLOWED_SEGMENTS = Set.of("7D", "30D", "MTD", "YTD");
 
-    /** Bounded pool for contract overview fan-out (matches modest Hikari sizing). */
+    /** Bounded pool for contract overview fan-out (2 tasks: finance + CRM). */
     private static final ExecutorService CONTRACT_EXEC = Executors.newFixedThreadPool(
-            4,
+            2,
             r -> {
                 Thread t = new Thread(r, "dashboard-contract");
                 t.setDaemon(true);
                 return t;
             });
+
+    /** Short TTL — overview is analytical; repeat loads within 30s hit memory. */
+    private final Cache<String, Map<String, Object>> contractOverviewCache =
+            Caffeine.newBuilder()
+                    .expireAfterWrite(30, TimeUnit.SECONDS)
+                    .maximumSize(256)
+                    .build();
 
     public DashboardService(
             DashboardRepository dashboardRepository,
@@ -524,44 +535,51 @@ public class DashboardService {
         List<UUID> locs = resolveLocations(null, locationLevelId, includeChildLocations);
         LocalDate monthStart = toDate.withDayOfMonth(1);
 
+        String cacheKey =
+                AccessContext.applicationId()
+                        + "|"
+                        + fromDate
+                        + "|"
+                        + toDate
+                        + "|"
+                        + seg
+                        + "|"
+                        + (locationLevelIdRaw == null ? "" : locationLevelIdRaw.trim())
+                        + "|"
+                        + includeChildLocations;
+        Map<String, Object> cached = contractOverviewCache.getIfPresent(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+
         // Capture request ThreadLocal — worker threads do not inherit TenantContext.
         final TenantContext tenantCtx = TenantContext.get();
 
-        // Contract payload only needs a few billing fields — do NOT call full getOverview
-        // (that path runs 15+ heavy queries the UI never reads here).
-        CompletableFuture<Map<String, Object>> summaryF =
-                supplyAsyncWithTenant(tenantCtx,
-                        () -> dashboardRepository.getOverviewSummary(
-                                fromDate, toDate, null, null, locs, null, null));
-        CompletableFuture<List<Map<String, Object>>> billedF =
-                supplyAsyncWithTenant(tenantCtx,
-                        () -> dashboardRepository.getOverviewBilledCollectedDaily(
-                                fromDate, toDate, null, null, locs, null, null));
-        CompletableFuture<Map<String, Object>> membersF =
-                supplyAsyncWithTenant(tenantCtx, () -> crmDashboardRepository.getMemberCounts(locs));
-        CompletableFuture<Number> checkinsMtdF =
-                supplyAsyncWithTenant(tenantCtx,
-                        () -> crmDashboardRepository.getCheckinsMtd(locs, monthStart, toDate));
-        CompletableFuture<List<Map<String, Object>>> checkinDailyF =
-                supplyAsyncWithTenant(tenantCtx,
-                        () -> crmDashboardRepository.getCheckinTrendDaily(locs, fromDate, toDate));
-        CompletableFuture<Map<String, Long>> genderF =
-                supplyAsyncWithTenant(tenantCtx, () -> crmDashboardRepository.getGenderBuckets(locs));
-        CompletableFuture<List<Map<String, Object>>> topPlansF =
-                supplyAsyncWithTenant(tenantCtx,
-                        () -> crmDashboardRepository.getTopPlansByAgreement(locs, 10));
-        CompletableFuture<List<Map<String, Object>>> recentF =
-                supplyAsyncWithTenant(tenantCtx,
-                        () -> crmDashboardRepository.getRecentRegistrations(locs, 10));
-        CompletableFuture<List<Map<String, Object>>> membershipStatusF =
-                supplyAsyncWithTenant(tenantCtx,
-                        () -> crmDashboardRepository.getMembershipStatusBuckets(locs));
+        // Two cheap parallel jobs: finance (run summary_json only) + CRM bundle (one connection).
+        CompletableFuture<Map<String, Object>> financeF =
+                supplyAsyncWithTenant(
+                        tenantCtx,
+                        () -> {
+                            Map<String, Object> summary =
+                                    dashboardRepository.getContractOverviewSummary(
+                                            fromDate, toDate, locs);
+                            List<Map<String, Object>> daily =
+                                    dashboardRepository.getContractOverviewBilledCollectedDaily(
+                                            fromDate, toDate, locs);
+                            Map<String, Object> finance = new LinkedHashMap<>();
+                            finance.put("summary", summary);
+                            finance.put("daily", daily);
+                            return finance;
+                        });
+        CompletableFuture<Map<String, Object>> crmF =
+                supplyAsyncWithTenant(
+                        tenantCtx,
+                        () ->
+                                crmDashboardRepository.loadContractOverviewCrm(
+                                        locs, fromDate, toDate, monthStart, toDate));
 
         try {
-            CompletableFuture.allOf(
-                            summaryF, billedF, membersF, checkinsMtdF, checkinDailyF,
-                            genderF, topPlansF, recentF, membershipStatusF)
-                    .join();
+            CompletableFuture.allOf(financeF, crmF).join();
         } catch (CompletionException ex) {
             Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
             if (cause instanceof RuntimeException re) {
@@ -570,7 +588,13 @@ public class DashboardService {
             throw new IllegalStateException("Dashboard overview fan-out failed", cause);
         }
 
-        Map<String, Object> summaryRaw = summaryF.join();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> summaryRaw =
+                (Map<String, Object>) financeF.join().get("summary");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> billedCollected =
+                (List<Map<String, Object>>) financeF.join().get("daily");
+
         double totalAmount = num(summaryRaw.get("total_amount")).doubleValue();
         double collectedAmount = num(summaryRaw.get("collected_amount")).doubleValue();
         double atRiskAmount = num(summaryRaw.get("at_risk_amount")).doubleValue();
@@ -583,9 +607,8 @@ public class DashboardService {
         summaryForAlerts.put("unresolved_dlq_count", unresolvedDlq);
         summaryForAlerts.put("failed_payments", failureCount);
 
-        List<Map<String, Object>> billedCollected = safeList(billedF.join());
         Map<String, double[]> billedCollectedByDay = new HashMap<>();
-        for (Map<String, Object> p : billedCollected) {
+        for (Map<String, Object> p : safeList(billedCollected)) {
             String d = p.get("date") == null ? null : String.valueOf(p.get("date"));
             if (d == null || d.isBlank()) {
                 continue;
@@ -607,13 +630,18 @@ public class DashboardService {
             collected.add(v[1]);
         }
 
-        Map<String, Object> memberCounts = membersF.join();
+        Map<String, Object> crm = crmF.join();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> memberCounts = (Map<String, Object>) crm.get("members");
         long totalMembers = num(memberCounts.get("total_members")).longValue();
         long activeMemberships = num(memberCounts.get("active_members")).longValue();
-        long checkinsMtd = checkinsMtdF.join().longValue();
+        long checkinsMtd = num(crm.get("checkinsMtd")).longValue();
 
         Map<String, Long> checkinsByDay = new HashMap<>();
-        for (Map<String, Object> row : checkinDailyF.join()) {
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> checkinDailyRows =
+                (List<Map<String, Object>>) crm.get("checkinDaily");
+        for (Map<String, Object> row : safeList(checkinDailyRows)) {
             Object day = row.get("day");
             String key =
                     day instanceof java.sql.Date sd
@@ -629,12 +657,20 @@ public class DashboardService {
             checkinValues.add(checkinsByDay.getOrDefault(k, 0L));
         }
 
-        Map<String, Long> gender = genderF.join();
+        @SuppressWarnings("unchecked")
+        Map<String, Long> genderRaw = (Map<String, Long>) crm.get("gender");
+        Map<String, Long> gender =
+                genderRaw != null
+                        ? genderRaw
+                        : Map.of("maleCount", 0L, "femaleCount", 0L, "otherGenderCount", 0L);
 
-        List<Map<String, Object>> topPlanRows = topPlansF.join();
-        long planMemberSum = topPlanRows.stream().mapToLong(r -> num(r.get("members")).longValue()).sum();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> topPlanRows =
+                (List<Map<String, Object>>) crm.get("topPlans");
+        long planMemberSum =
+                safeList(topPlanRows).stream().mapToLong(r -> num(r.get("members")).longValue()).sum();
         List<Map<String, Object>> topPlans = new ArrayList<>();
-        for (Map<String, Object> row : topPlanRows) {
+        for (Map<String, Object> row : safeList(topPlanRows)) {
             long m = num(row.get("members")).longValue();
             double share = planMemberSum > 0 ? (m * 1.0 / planMemberSum) : 0.0;
             topPlans.add(
@@ -648,7 +684,10 @@ public class DashboardService {
         }
 
         List<Map<String, Object>> recentRegistrations = new ArrayList<>();
-        for (Map<String, Object> row : recentF.join()) {
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> recentRows =
+                (List<Map<String, Object>>) crm.get("recent");
+        for (Map<String, Object> row : safeList(recentRows)) {
             Map<String, Object> rr = new LinkedHashMap<>();
             rr.put("clientRoleId", row.get("client_role_id"));
             rr.put("roleExternalId", row.get("role_external_id"));
@@ -659,7 +698,10 @@ public class DashboardService {
         }
 
         List<Map<String, Object>> membershipStatus = new ArrayList<>();
-        for (Map<String, Object> r : membershipStatusF.join()) {
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> statusRows =
+                (List<Map<String, Object>>) crm.get("membershipStatus");
+        for (Map<String, Object> r : safeList(statusRows)) {
             membershipStatus.add(
                     Map.of(
                             "name",
@@ -710,6 +752,8 @@ public class DashboardService {
         out.put("topPlans", topPlans);
         out.put("recentRegistrations", recentRegistrations);
         out.put("alerts", alerts);
+
+        contractOverviewCache.put(cacheKey, out);
         return out;
     }
 

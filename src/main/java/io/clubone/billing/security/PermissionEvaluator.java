@@ -39,6 +39,10 @@ public class PermissionEvaluator {
     if (ctx == null) {
       return false;
     }
+    if (ctx.isExternal() && (ctx.hasScope("billing:write") || ctx.hasScope("billing:read")
+        || ctx.hasScope("reconciliation:write") || ctx.hasScope("reconciliation:read"))) {
+      return true;
+    }
     for (String role : ctx.roles()) {
       if (role == null) {
         continue;
@@ -55,6 +59,9 @@ public class PermissionEvaluator {
   public boolean canOperatePos() {
     var ctx = TenantContext.get();
     if (ctx == null || !ctx.isUserActive()) return false;
+    if (ctx.isExternal() && (ctx.hasScope("billing:write") || ctx.hasScope("crm:write"))) {
+      return true;
+    }
     // Any non-empty role set from get_actor_context means staff/POS user
     return ctx.roles() != null && !ctx.roles().isEmpty()
         || isAdmin()

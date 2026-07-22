@@ -38,7 +38,10 @@ public class TenantContext {
   private final String userName;
   private final String userEmail;
   private final String loggedInTimezone;
+  private final boolean external;
+  private final String externalClientId;
 
+  /** Workforce / actor principal. */
   public TenantContext(
       UUID applicationUserId,
       UUID userId,
@@ -53,6 +56,27 @@ public class TenantContext {
       String userName,
       String userEmail,
       String loggedInTimezone) {
+    this(applicationUserId, userId, applicationId, orgClientId, userActive, appActive, roles, scopes,
+        accessibleLevelIds, workingLocation, userName, userEmail, loggedInTimezone, false, null);
+  }
+
+  /** Workforce or external partner principal. */
+  public TenantContext(
+      UUID applicationUserId,
+      UUID userId,
+      UUID applicationId,
+      UUID orgClientId,
+      boolean userActive,
+      boolean appActive,
+      Collection<String> roles,
+      Collection<String> scopes,
+      Collection<UUID> accessibleLevelIds,
+      UUID workingLocation,
+      String userName,
+      String userEmail,
+      String loggedInTimezone,
+      boolean external,
+      String externalClientId) {
     this.applicationUserId = Objects.requireNonNull(applicationUserId, "applicationUserId");
     this.userId = Objects.requireNonNull(userId, "userId");
     this.applicationId = Objects.requireNonNull(applicationId, "applicationId");
@@ -66,6 +90,8 @@ public class TenantContext {
     this.userName = userName;
     this.userEmail = userEmail;
     this.loggedInTimezone = loggedInTimezone;
+    this.external = external;
+    this.externalClientId = externalClientId;
   }
 
   public UUID applicationUserId() {
@@ -130,5 +156,13 @@ public class TenantContext {
 
   public String loggedInTimezone() {
     return loggedInTimezone;
+  }
+
+  public boolean isExternal() {
+    return external;
+  }
+
+  public String externalClientId() {
+    return externalClientId;
   }
 }

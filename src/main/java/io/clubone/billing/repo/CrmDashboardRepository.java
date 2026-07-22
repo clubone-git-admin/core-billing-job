@@ -21,30 +21,65 @@ public class CrmDashboardRepository {
     }
 
     /**
+     * Loads all CRM slices for the contract overview in one call (sequential on one connection).
+     * Prefer this over fanning out many parallel queries against a small Hikari pool.
+     */
+    public Map<String, Object> loadContractOverviewCrm(
+            List<UUID> locationIds,
+            LocalDate from,
+            LocalDate to,
+            LocalDate monthStart,
+            LocalDate asOf) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("members", getMemberCounts(locationIds));
+        out.put("checkinsMtd", getCheckinsMtd(locationIds, monthStart, asOf));
+        out.put("checkinDaily", getCheckinTrendDaily(locationIds, from, to));
+        out.put("gender", getGenderBuckets(locationIds));
+        out.put("topPlans", getTopPlansByAgreement(locationIds, 10));
+        out.put("recent", getRecentRegistrations(locationIds, 10));
+        out.put("membershipStatus", getMembershipStatusBuckets(locationIds));
+        return out;
+    }
+
+    /**
      * Total active {@code client_role} rows, and distinct clients with an ACTIVE agreement.
      */
     public Map<String, Object> getMemberCounts(List<UUID> locationIds) {
+        boolean scoped = locationIds != null && !locationIds.isEmpty();
         String locCr = locationClause("cr.location_id", locationIds);
-        String sql =
-                "SELECT "
-                        + "(SELECT COUNT(*)::bigint FROM clients.client_role cr "
-                        + " WHERE COALESCE(cr.is_active, true) = true "
-                        + locCr
-                        + ") AS total_members, "
-                        + "(SELECT COUNT(DISTINCT ca.client_role_id)::bigint "
-                        + " FROM client_agreements.client_agreement ca "
-                        + " JOIN client_agreements.lu_client_agreement_status st "
-                        + "   ON st.client_agreement_status_id = ca.client_agreement_status_id "
-                        + " JOIN clients.client_role cr ON cr.client_role_id = ca.client_role_id "
-                        + " WHERE ca.is_active = true "
-                        + "   AND COALESCE(cr.is_active, true) = true "
-                        + "   AND st.code = 'ACTIVE' "
-                        + locCr
-                        + ") AS active_members";
-        // location params appear twice (total + active)
+        String sql;
         List<Object> p = new ArrayList<>();
-        p.addAll(params(locationIds));
-        p.addAll(params(locationIds));
+        if (scoped) {
+            sql =
+                    "SELECT "
+                            + "(SELECT COUNT(*)::bigint FROM clients.client_role cr "
+                            + " WHERE COALESCE(cr.is_active, true) = true "
+                            + locCr
+                            + ") AS total_members, "
+                            + "(SELECT COUNT(DISTINCT ca.client_role_id)::bigint "
+                            + " FROM client_agreements.client_agreement ca "
+                            + " JOIN client_agreements.lu_client_agreement_status st "
+                            + "   ON st.client_agreement_status_id = ca.client_agreement_status_id "
+                            + " JOIN clients.client_role cr ON cr.client_role_id = ca.client_role_id "
+                            + " WHERE ca.is_active = true "
+                            + "   AND COALESCE(cr.is_active, true) = true "
+                            + "   AND st.code = 'ACTIVE' "
+                            + locCr
+                            + ") AS active_members";
+            p.addAll(params(locationIds));
+            p.addAll(params(locationIds));
+        } else {
+            // Unscoped: avoid joining client_role twice; use partial indexes on active rows.
+            sql =
+                    "SELECT "
+                            + "(SELECT COUNT(*)::bigint FROM clients.client_role cr "
+                            + " WHERE COALESCE(cr.is_active, true) = true) AS total_members, "
+                            + "(SELECT COUNT(DISTINCT ca.client_role_id)::bigint "
+                            + " FROM client_agreements.client_agreement ca "
+                            + " JOIN client_agreements.lu_client_agreement_status st "
+                            + "   ON st.client_agreement_status_id = ca.client_agreement_status_id "
+                            + " WHERE ca.is_active = true AND st.code = 'ACTIVE') AS active_members";
+        }
         return jdbc.queryForMap(sql, p.toArray());
     }
 
@@ -89,34 +124,57 @@ public class CrmDashboardRepository {
 
     /**
      * Gender buckets: Male, Female, Non-binary/other.
-     * Resolves type id once; filters {@code client_role} first when location-scoped.
+     * Unscoped path skips {@code client_role} join (characteristic type filter is enough).
      */
     public Map<String, Long> getGenderBuckets(List<UUID> locationIds) {
-        String loc = locationClause("cr.location_id", locationIds);
-        String sql =
-                "WITH gender_type AS ( "
-                        + "  SELECT cct.client_characteristic_type_id "
-                        + "  FROM clients.client_characteristic_type cct "
-                        + "  WHERE cct.name = 'Gender' AND cct.is_active = true "
-                        + "  LIMIT 1 "
-                        + ") "
-                        + "SELECT COALESCE(LOWER(TRIM(v.value)), LOWER(TRIM(cc.characteristic)), '') AS bucket, "
-                        + "COUNT(DISTINCT cc.client_role_id)::bigint AS cnt "
-                        + "FROM clients.client_characteristic cc "
-                        + "JOIN gender_type gt ON gt.client_characteristic_type_id = cc.client_characteristic_type_id "
-                        + "JOIN clients.client_role cr ON cr.client_role_id = cc.client_role_id "
-                        + "LEFT JOIN clients.client_characteristic_values v "
-                        + "  ON v.client_characteristic_values_id = cc.client_characteristic_values_id "
-                        + "WHERE cc.is_active = true "
-                        + "  AND COALESCE(cr.is_active, true) = true "
-                        + "  AND (cc.valid_thru IS NULL OR cc.valid_thru > CURRENT_TIMESTAMP) "
-                        + loc
-                        + " GROUP BY 1";
+        boolean scoped = locationIds != null && !locationIds.isEmpty();
+        String sql;
+        List<Object> bind = new ArrayList<>();
+        if (scoped) {
+            String loc = locationClause("cr.location_id", locationIds);
+            sql =
+                    "WITH gender_type AS ( "
+                            + "  SELECT cct.client_characteristic_type_id "
+                            + "  FROM clients.client_characteristic_type cct "
+                            + "  WHERE cct.name = 'Gender' AND cct.is_active = true "
+                            + "  LIMIT 1 "
+                            + ") "
+                            + "SELECT COALESCE(LOWER(TRIM(v.value)), LOWER(TRIM(cc.characteristic)), '') AS bucket, "
+                            + "COUNT(DISTINCT cc.client_role_id)::bigint AS cnt "
+                            + "FROM clients.client_characteristic cc "
+                            + "JOIN gender_type gt ON gt.client_characteristic_type_id = cc.client_characteristic_type_id "
+                            + "JOIN clients.client_role cr ON cr.client_role_id = cc.client_role_id "
+                            + "LEFT JOIN clients.client_characteristic_values v "
+                            + "  ON v.client_characteristic_values_id = cc.client_characteristic_values_id "
+                            + "WHERE cc.is_active = true "
+                            + "  AND COALESCE(cr.is_active, true) = true "
+                            + "  AND (cc.valid_thru IS NULL OR cc.valid_thru > CURRENT_TIMESTAMP) "
+                            + loc
+                            + " GROUP BY 1";
+            bind.addAll(params(locationIds));
+        } else {
+            sql =
+                    "WITH gender_type AS ( "
+                            + "  SELECT cct.client_characteristic_type_id "
+                            + "  FROM clients.client_characteristic_type cct "
+                            + "  WHERE cct.name = 'Gender' AND cct.is_active = true "
+                            + "  LIMIT 1 "
+                            + ") "
+                            + "SELECT COALESCE(LOWER(TRIM(v.value)), LOWER(TRIM(cc.characteristic)), '') AS bucket, "
+                            + "COUNT(DISTINCT cc.client_role_id)::bigint AS cnt "
+                            + "FROM clients.client_characteristic cc "
+                            + "JOIN gender_type gt ON gt.client_characteristic_type_id = cc.client_characteristic_type_id "
+                            + "LEFT JOIN clients.client_characteristic_values v "
+                            + "  ON v.client_characteristic_values_id = cc.client_characteristic_values_id "
+                            + "WHERE cc.is_active = true "
+                            + "  AND (cc.valid_thru IS NULL OR cc.valid_thru > CURRENT_TIMESTAMP) "
+                            + " GROUP BY 1";
+        }
 
         long male = 0;
         long female = 0;
         long other = 0;
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, params(locationIds).toArray());
+        List<Map<String, Object>> rows = jdbc.queryForList(sql, bind.toArray());
         for (Map<String, Object> r : rows) {
             String b = String.valueOf(r.get("bucket"));
             long c = ((Number) r.get("cnt")).longValue();
@@ -211,21 +269,38 @@ public class CrmDashboardRepository {
      * Members per {@code client_agreement} status.
      */
     public List<Map<String, Object>> getMembershipStatusBuckets(List<UUID> locationIds) {
-        String loc = locationClause("cr.location_id", locationIds);
-        String sql =
-                "SELECT COALESCE(NULLIF(TRIM(st.name), ''), st.code) AS name, "
-                        + "COUNT(DISTINCT ca.client_role_id)::bigint AS value "
-                        + "FROM client_agreements.client_agreement ca "
-                        + "INNER JOIN clients.client_role cr ON cr.client_role_id = ca.client_role_id "
-                        + "INNER JOIN client_agreements.lu_client_agreement_status st "
-                        + "  ON st.client_agreement_status_id = ca.client_agreement_status_id "
-                        + "WHERE ca.is_active = true "
-                        + "  AND COALESCE(st.is_active, true) = true "
-                        + "  AND COALESCE(cr.is_active, true) = true "
-                        + loc
-                        + " GROUP BY st.client_agreement_status_id, st.code, st.name "
-                        + "ORDER BY COUNT(DISTINCT ca.client_role_id) DESC NULLS LAST, st.code";
-        return jdbc.queryForList(sql, params(locationIds).toArray());
+        boolean scoped = locationIds != null && !locationIds.isEmpty();
+        String sql;
+        List<Object> bind = new ArrayList<>();
+        if (scoped) {
+            String loc = locationClause("cr.location_id", locationIds);
+            sql =
+                    "SELECT COALESCE(NULLIF(TRIM(st.name), ''), st.code) AS name, "
+                            + "COUNT(DISTINCT ca.client_role_id)::bigint AS value "
+                            + "FROM client_agreements.client_agreement ca "
+                            + "INNER JOIN clients.client_role cr ON cr.client_role_id = ca.client_role_id "
+                            + "INNER JOIN client_agreements.lu_client_agreement_status st "
+                            + "  ON st.client_agreement_status_id = ca.client_agreement_status_id "
+                            + "WHERE ca.is_active = true "
+                            + "  AND COALESCE(st.is_active, true) = true "
+                            + "  AND COALESCE(cr.is_active, true) = true "
+                            + loc
+                            + " GROUP BY st.client_agreement_status_id, st.code, st.name "
+                            + "ORDER BY COUNT(DISTINCT ca.client_role_id) DESC NULLS LAST, st.code";
+            bind.addAll(params(locationIds));
+        } else {
+            sql =
+                    "SELECT COALESCE(NULLIF(TRIM(st.name), ''), st.code) AS name, "
+                            + "COUNT(DISTINCT ca.client_role_id)::bigint AS value "
+                            + "FROM client_agreements.client_agreement ca "
+                            + "INNER JOIN client_agreements.lu_client_agreement_status st "
+                            + "  ON st.client_agreement_status_id = ca.client_agreement_status_id "
+                            + "WHERE ca.is_active = true "
+                            + "  AND COALESCE(st.is_active, true) = true "
+                            + " GROUP BY st.client_agreement_status_id, st.code, st.name "
+                            + "ORDER BY COUNT(DISTINCT ca.client_role_id) DESC NULLS LAST, st.code";
+        }
+        return jdbc.queryForList(sql, bind.toArray());
     }
 
     private static String locationClause(String column, List<UUID> locationIds) {

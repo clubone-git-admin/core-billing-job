@@ -703,6 +703,106 @@ public class DashboardRepository {
                     + ") ";
 
     /**
+     * Contract overview finance KPIs from {@code billing_run.summary_json} only.
+     * Avoids subscription_billing_history window functions / stage laterals (those timeout under load).
+     */
+    public Map<String, Object> getContractOverviewSummary(
+            LocalDate dueDateFrom,
+            LocalDate dueDateTo,
+            List<UUID> locationIds) {
+        List<Object> pMain = new ArrayList<>();
+        String whereMain =
+                buildRunWhere("br", dueDateFrom, dueDateTo, null, null, locationIds, null, null, pMain);
+        List<Object> pDlq = new ArrayList<>();
+        String whereDlq =
+                buildRunWhere("br", dueDateFrom, dueDateTo, null, null, locationIds, null, null, pDlq);
+        String runAmt =
+                "COALESCE("
+                        + "NULLIF(TRIM(br.summary_json->>'total_amount'), '')::numeric, "
+                        + "NULLIF(TRIM(br.summary_json->>'eligible_total_amount'), '')::numeric, "
+                        + "0)";
+        String failCnt =
+                "COALESCE("
+                        + "NULLIF(TRIM(br.summary_json->>'failure_count'), '')::bigint, "
+                        + "0)";
+        String sql =
+                "WITH runs AS ( "
+                        + "  SELECT br.billing_run_id, UPPER(COALESCE(brs.status_code, '')) AS status_code, "
+                        + "         "
+                        + runAmt
+                        + " AS amt, "
+                        + "         "
+                        + failCnt
+                        + " AS fail_cnt "
+                        + "  FROM client_subscription_billing.billing_run br "
+                        + "  JOIN billing_config.billing_run_status brs "
+                        + "    ON brs.billing_run_status_id = br.billing_run_status_id "
+                        + "  LEFT JOIN billing_config.billing_stage_code bsc "
+                        + "    ON bsc.billing_stage_code_id = br.current_stage_code_id "
+                        + whereMain
+                        + "), unresolved_dlq AS ( "
+                        + "  SELECT COUNT(1)::bigint AS unresolved_count "
+                        + "  FROM client_subscription_billing.billing_dead_letter_queue dlq "
+                        + "  JOIN client_subscription_billing.billing_run br ON br.billing_run_id = dlq.billing_run_id "
+                        + "  JOIN billing_config.billing_run_status brs "
+                        + "    ON brs.billing_run_status_id = br.billing_run_status_id "
+                        + "  LEFT JOIN billing_config.billing_stage_code bsc "
+                        + "    ON bsc.billing_stage_code_id = br.current_stage_code_id "
+                        + whereDlq.replace("WHERE ", "WHERE COALESCE(dlq.resolved, false) = false AND ")
+                        + ") "
+                        + "SELECT "
+                        + "COALESCE(SUM(r.amt), 0) AS total_amount, "
+                        + "COALESCE(SUM(CASE WHEN r.status_code LIKE 'COMPLETED%' THEN r.amt ELSE 0 END), 0) "
+                        + "  AS collected_amount, "
+                        + "COALESCE(SUM(CASE WHEN r.status_code IN "
+                        + "  ('RUNNING','INITIATED','IN_PROGRESS','SCHEDULED','WAITING','IDLE') "
+                        + "  THEN r.amt ELSE 0 END), 0) AS in_flight_amount, "
+                        + "COALESCE(SUM(CASE WHEN r.status_code LIKE 'FAILED%' OR r.status_code = 'FAILED_SYSTEM' "
+                        + "  THEN r.amt ELSE 0 END), 0) AS at_risk_amount, "
+                        + "COALESCE(SUM(r.fail_cnt), 0) AS failure_count, "
+                        + "(SELECT unresolved_count FROM unresolved_dlq) AS unresolved_dlq_count "
+                        + "FROM runs r";
+        List<Object> p = new ArrayList<>(pMain.size() + pDlq.size());
+        p.addAll(pMain);
+        p.addAll(pDlq);
+        return jdbc.queryForMap(sql, p.toArray());
+    }
+
+    /**
+     * Contract overview daily billed/collected from run {@code summary_json} (no SBH).
+     */
+    public List<Map<String, Object>> getContractOverviewBilledCollectedDaily(
+            LocalDate dueDateFrom,
+            LocalDate dueDateTo,
+            List<UUID> locationIds) {
+        List<Object> p = new ArrayList<>();
+        String where =
+                buildRunWhere("br", dueDateFrom, dueDateTo, null, null, locationIds, null, null, p);
+        String runAmt =
+                "COALESCE("
+                        + "NULLIF(TRIM(br.summary_json->>'total_amount'), '')::numeric, "
+                        + "NULLIF(TRIM(br.summary_json->>'eligible_total_amount'), '')::numeric, "
+                        + "0)";
+        String sql =
+                "SELECT TO_CHAR(br.due_date, 'YYYY-MM-DD') AS date, "
+                        + "COALESCE(SUM("
+                        + runAmt
+                        + "), 0) AS billed, "
+                        + "COALESCE(SUM(CASE WHEN UPPER(COALESCE(brs.status_code, '')) LIKE 'COMPLETED%' "
+                        + "  THEN "
+                        + runAmt
+                        + " ELSE 0 END), 0) AS collected "
+                        + "FROM client_subscription_billing.billing_run br "
+                        + "JOIN billing_config.billing_run_status brs "
+                        + "  ON brs.billing_run_status_id = br.billing_run_status_id "
+                        + "LEFT JOIN billing_config.billing_stage_code bsc "
+                        + "  ON bsc.billing_stage_code_id = br.current_stage_code_id "
+                        + where
+                        + " GROUP BY br.due_date ORDER BY br.due_date";
+        return jdbc.queryForList(sql, p.toArray());
+    }
+
+    /**
      * Daily billed vs collected — scopes history to filtered runs first (avoids windowing the entire SBH table).
      */
     public List<Map<String, Object>> getOverviewBilledCollectedDaily(

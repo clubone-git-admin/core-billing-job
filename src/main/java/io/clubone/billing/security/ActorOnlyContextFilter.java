@@ -49,6 +49,11 @@ public class ActorOnlyContextFilter extends OncePerRequestFilter {
     if ("OPTIONS".equalsIgnoreCase(req.getMethod())) {
       return true;
     }
+    if (Boolean.TRUE.equals(req.getAttribute(ExternalAuth.REQUEST_ATTR))
+        || (req.getHeader(ExternalAuth.HEADER_CLIENT_ID) != null
+            && !req.getHeader(ExternalAuth.HEADER_CLIENT_ID).isBlank())) {
+      return true;
+    }
     return PublicApiPaths.isPublic(req);
   }
 
