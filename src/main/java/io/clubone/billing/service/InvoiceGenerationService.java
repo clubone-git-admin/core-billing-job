@@ -327,7 +327,7 @@ public class InvoiceGenerationService {
             }
             log.info("invoice-generation: stage already RUNNING — publishing async job so generation can complete: stageRunId={}",
                     target.stageRunId());
-            applicationEventPublisher.publishEvent(new InvoiceGenerationQueuedEvent(target.stageRunId()));
+            applicationEventPublisher.publishEvent(InvoiceGenerationQueuedEvent.of(target.stageRunId()));
             auditInvoiceGenerationStage(
                     "JOB_REPUBLISHED",
                     target.stageRunId(),
@@ -345,7 +345,7 @@ public class InvoiceGenerationService {
             }
             log.info("invoice-generation: stage {} — republishing job in case prior worker did not run: stageRunId={}",
                     status, target.stageRunId());
-            applicationEventPublisher.publishEvent(new InvoiceGenerationQueuedEvent(target.stageRunId()));
+            applicationEventPublisher.publishEvent(InvoiceGenerationQueuedEvent.of(target.stageRunId()));
             auditInvoiceGenerationStage(
                     "JOB_REPUBLISHED",
                     target.stageRunId(),
@@ -425,7 +425,7 @@ public class InvoiceGenerationService {
         boolean queuedStatusApplied = stageRunRepository.trySetStageRunStatusByCode(stageRunId, "QUEUED");
         log.info("invoice-generation enqueued: stageRunId={} billingRunId={} queuedStatusInDb={} (false means use PENDING until worker)",
                 stageRunId, billingRun.billingRunId(), queuedStatusApplied);
-        applicationEventPublisher.publishEvent(new InvoiceGenerationQueuedEvent(stageRunId));
+        applicationEventPublisher.publishEvent(InvoiceGenerationQueuedEvent.of(stageRunId));
         String actor = "system";
         if (fresh != null && fresh.summaryJson() != null && fresh.summaryJson().get("triggered_by") != null) {
             actor = String.valueOf(fresh.summaryJson().get("triggered_by")).trim();

@@ -12,6 +12,8 @@ import java.time.OffsetDateTime;
 import java.util.*;
 
 import io.clubone.billing.security.AccessContext;
+import io.clubone.billing.security.TenantContext;
+import io.clubone.billing.security.TenantContexts;
 /**
  * Repository for stage run operations.
  */
@@ -30,6 +32,31 @@ public class StageRunRepository {
         return AccessContext.applicationId().toString();
     }
 
+    /**
+     * Auth-free lookup for async/batch workers: resolve application + location from the stage run row
+     * (no {@link AccessContext} / request ThreadLocal required).
+     *
+     * @return background {@link io.clubone.billing.security.TenantContext}, or null if stage run missing
+     */
+    public TenantContext resolveBackgroundTenant(UUID stageRunId) {
+        if (stageRunId == null) {
+            return null;
+        }
+        List<TenantContext> rows = jdbc.query(
+                """
+                SELECT bsr.application_id, br.location_id
+                FROM client_subscription_billing.billing_stage_run bsr
+                JOIN client_subscription_billing.billing_run br
+                  ON br.billing_run_id = bsr.billing_run_id
+                WHERE bsr.stage_run_id = ?::uuid
+                LIMIT 1
+                """,
+                (rs, i) -> TenantContexts.forBackgroundJob(
+                        (UUID) rs.getObject("application_id"),
+                        (UUID) rs.getObject("location_id")),
+                stageRunId.toString());
+        return rows.isEmpty() ? null : rows.get(0);
+    }
 
     /**
      * Find all stages for a billing run.
