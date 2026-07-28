@@ -13,6 +13,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -114,6 +115,23 @@ public class GlobalExceptionHandler {
                 requestId
         );
         
+        return ResponseEntity.badRequest().body(new ErrorResponse(error));
+    }
+
+    /** Invalid path/query types (e.g. non-UUID {@code accountId}) — not a server failure. */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ErrorResponse> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
+        String name = e.getName() != null ? e.getName() : "parameter";
+        String required = e.getRequiredType() != null ? e.getRequiredType().getSimpleName() : "expected type";
+        String message = "Invalid " + name + ": must be a valid " + required;
+        log.warn("Type mismatch: {}", message);
+        String requestId = UUID.randomUUID().toString();
+        ErrorResponse.ErrorDetail error = new ErrorResponse.ErrorDetail(
+                "VALIDATION_ERROR",
+                message,
+                Map.of("request_id", requestId, "parameter", name),
+                requestId
+        );
         return ResponseEntity.badRequest().body(new ErrorResponse(error));
     }
 
