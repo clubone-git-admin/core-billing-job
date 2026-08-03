@@ -124,51 +124,69 @@ public class CrmDashboardRepository {
 
     /**
      * Gender buckets: Male, Female, Non-binary/other.
-     * Unscoped path skips {@code client_role} join (characteristic type filter is enough).
+     * One latest Gender characteristic per active {@code client_role} (avoids double-counting
+     * members that have multiple historical / conflicting Gender rows).
      */
     public Map<String, Long> getGenderBuckets(List<UUID> locationIds) {
         boolean scoped = locationIds != null && !locationIds.isEmpty();
-        String sql;
+        String loc = scoped ? locationClause("cr.location_id", locationIds) : "";
+        String sql =
+                "WITH gender_type AS ( "
+                        + "  SELECT cct.client_characteristic_type_id "
+                        + "  FROM clients.client_characteristic_type cct "
+                        + "  WHERE LOWER(TRIM(cct.name)) = 'gender' "
+                        + "    AND COALESCE(cct.is_active, true) = true "
+                        + "  ORDER BY cct.client_characteristic_type_id "
+                        + "  LIMIT 1 "
+                        + "), ranked AS ( "
+                        + "  SELECT cc.client_role_id, "
+                        + "         LOWER(TRIM(COALESCE( "
+                        + "           NULLIF(TRIM(v.value), ''), "
+                        + "           NULLIF(TRIM(cc.characteristic), ''), "
+                        + "           '' "
+                        + "         ))) AS bucket_raw, "
+                        + "         ROW_NUMBER() OVER ( "
+                        + "           PARTITION BY cc.client_role_id "
+                        + "           ORDER BY cc.valid_from DESC NULLS LAST, "
+                        + "                    cc.created_on DESC NULLS LAST, "
+                        + "                    CASE WHEN cc.client_characteristic_values_id IS NOT NULL THEN 0 ELSE 1 END, "
+                        + "                    cc.client_characteristic_id DESC "
+                        + "         ) AS rn "
+                        + "  FROM clients.client_characteristic cc "
+                        + "  JOIN gender_type gt "
+                        + "    ON gt.client_characteristic_type_id = cc.client_characteristic_type_id "
+                        + "  JOIN clients.client_role cr ON cr.client_role_id = cc.client_role_id "
+                        + "  LEFT JOIN clients.client_characteristic_values v "
+                        + "    ON v.client_characteristic_values_id = COALESCE( "
+                        + "         cc.client_characteristic_values_id, "
+                        + "         CASE "
+                        + "           WHEN cc.characteristic ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' "
+                        + "           THEN cc.characteristic::uuid "
+                        + "           ELSE NULL "
+                        + "         END "
+                        + "       ) "
+                        + "  WHERE COALESCE(cc.is_active, true) = true "
+                        + "    AND COALESCE(cr.is_active, true) = true "
+                        + "    AND (cc.valid_thru IS NULL OR cc.valid_thru > CURRENT_TIMESTAMP) "
+                        + loc
+                        + "), normalized AS ( "
+                        + "  SELECT CASE "
+                        + "           WHEN bucket_raw IN ('m', 'male', 'man', 'boy') THEN 'male' "
+                        + "           WHEN bucket_raw IN ('f', 'female', 'woman', 'girl', 'w') THEN 'female' "
+                        + "           WHEN bucket_raw = '' THEN NULL "
+                        + "           ELSE 'other' "
+                        + "         END AS bucket "
+                        + "  FROM ranked "
+                        + "  WHERE rn = 1 "
+                        + ") "
+                        + "SELECT bucket, COUNT(*)::bigint AS cnt "
+                        + "FROM normalized "
+                        + "WHERE bucket IS NOT NULL "
+                        + "GROUP BY bucket";
+
         List<Object> bind = new ArrayList<>();
         if (scoped) {
-            String loc = locationClause("cr.location_id", locationIds);
-            sql =
-                    "WITH gender_type AS ( "
-                            + "  SELECT cct.client_characteristic_type_id "
-                            + "  FROM clients.client_characteristic_type cct "
-                            + "  WHERE cct.name = 'Gender' AND cct.is_active = true "
-                            + "  LIMIT 1 "
-                            + ") "
-                            + "SELECT COALESCE(LOWER(TRIM(v.value)), LOWER(TRIM(cc.characteristic)), '') AS bucket, "
-                            + "COUNT(DISTINCT cc.client_role_id)::bigint AS cnt "
-                            + "FROM clients.client_characteristic cc "
-                            + "JOIN gender_type gt ON gt.client_characteristic_type_id = cc.client_characteristic_type_id "
-                            + "JOIN clients.client_role cr ON cr.client_role_id = cc.client_role_id "
-                            + "LEFT JOIN clients.client_characteristic_values v "
-                            + "  ON v.client_characteristic_values_id = cc.client_characteristic_values_id "
-                            + "WHERE cc.is_active = true "
-                            + "  AND COALESCE(cr.is_active, true) = true "
-                            + "  AND (cc.valid_thru IS NULL OR cc.valid_thru > CURRENT_TIMESTAMP) "
-                            + loc
-                            + " GROUP BY 1";
             bind.addAll(params(locationIds));
-        } else {
-            sql =
-                    "WITH gender_type AS ( "
-                            + "  SELECT cct.client_characteristic_type_id "
-                            + "  FROM clients.client_characteristic_type cct "
-                            + "  WHERE cct.name = 'Gender' AND cct.is_active = true "
-                            + "  LIMIT 1 "
-                            + ") "
-                            + "SELECT COALESCE(LOWER(TRIM(v.value)), LOWER(TRIM(cc.characteristic)), '') AS bucket, "
-                            + "COUNT(DISTINCT cc.client_role_id)::bigint AS cnt "
-                            + "FROM clients.client_characteristic cc "
-                            + "JOIN gender_type gt ON gt.client_characteristic_type_id = cc.client_characteristic_type_id "
-                            + "LEFT JOIN clients.client_characteristic_values v "
-                            + "  ON v.client_characteristic_values_id = cc.client_characteristic_values_id "
-                            + "WHERE cc.is_active = true "
-                            + "  AND (cc.valid_thru IS NULL OR cc.valid_thru > CURRENT_TIMESTAMP) "
-                            + " GROUP BY 1";
         }
 
         long male = 0;
@@ -181,6 +199,7 @@ public class CrmDashboardRepository {
             switch (b) {
                 case "male" -> male += c;
                 case "female" -> female += c;
+                case "other" -> other += c;
                 default -> other += c;
             }
         }

@@ -703,8 +703,9 @@ public class DashboardRepository {
                     + ") ";
 
     /**
-     * Contract overview finance KPIs from {@code billing_run.summary_json} only.
-     * Avoids subscription_billing_history window functions / stage laterals (those timeout under load).
+     * Contract overview finance KPIs.
+     * Prefers latest non-mock SBH attempt amounts; falls back to {@code billing_run.summary_json}
+     * when history is empty (common when summary_json totals were never written).
      */
     public Map<String, Object> getContractOverviewSummary(
             LocalDate dueDateFrom,
@@ -716,30 +717,81 @@ public class DashboardRepository {
         List<Object> pDlq = new ArrayList<>();
         String whereDlq =
                 buildRunWhere("br", dueDateFrom, dueDateTo, null, null, locationIds, null, null, pDlq);
-        String runAmt =
+        String summaryAmt =
                 "COALESCE("
-                        + "NULLIF(TRIM(br.summary_json->>'total_amount'), '')::numeric, "
-                        + "NULLIF(TRIM(br.summary_json->>'eligible_total_amount'), '')::numeric, "
+                        + "NULLIF(TRIM(fr.summary_json->>'total_amount'), '')::numeric, "
+                        + "NULLIF(TRIM(fr.summary_json->>'eligible_total_amount'), '')::numeric, "
+                        + "NULLIF(TRIM(fr.summary_json->>'totalAmount'), '')::numeric, "
+                        + "NULLIF(TRIM(fr.summary_json->>'billed_amount'), '')::numeric, "
+                        + "NULLIF(TRIM(fr.summary_json->>'collected_amount'), '')::numeric, "
                         + "0)";
         String failCnt =
                 "COALESCE("
-                        + "NULLIF(TRIM(br.summary_json->>'failure_count'), '')::bigint, "
+                        + "NULLIF(TRIM(fr.summary_json->>'failure_count'), '')::bigint, "
                         + "0)";
         String sql =
-                "WITH runs AS ( "
+                "WITH filtered_runs AS ( "
                         + "  SELECT br.billing_run_id, UPPER(COALESCE(brs.status_code, '')) AS status_code, "
-                        + "         "
-                        + runAmt
-                        + " AS amt, "
-                        + "         "
-                        + failCnt
-                        + " AS fail_cnt "
+                        + "         br.summary_json "
                         + "  FROM client_subscription_billing.billing_run br "
                         + "  JOIN billing_config.billing_run_status brs "
                         + "    ON brs.billing_run_status_id = br.billing_run_status_id "
                         + "  LEFT JOIN billing_config.billing_stage_code bsc "
                         + "    ON bsc.billing_stage_code_id = br.current_stage_code_id "
                         + whereMain
+                        + "), latest_attempt AS ( "
+                        + "  SELECT * FROM ( "
+                        + "    SELECT sbh.billing_run_id, sbh.invoice_total_amount, sbh.billing_status_id, "
+                        + "      ROW_NUMBER() OVER ( "
+                        + "        PARTITION BY sbh.billing_run_id, "
+                        + "                     COALESCE(CAST(sbh.invoice_id AS TEXT), CAST(sbh.subscription_instance_id AS TEXT)) "
+                        + "        ORDER BY sbh.billing_attempt_on DESC NULLS LAST, sbh.created_on DESC NULLS LAST, "
+                        + "                 sbh.subscription_billing_history_id DESC) AS rn "
+                        + "    FROM client_subscription_billing.subscription_billing_history sbh "
+                        + "    WHERE sbh.billing_run_id IN (SELECT billing_run_id FROM filtered_runs) "
+                        + "      AND COALESCE(sbh.is_mock, false) = false "
+                        + "  ) t WHERE rn = 1 "
+                        + "), per_run AS ( "
+                        + "  SELECT fr.billing_run_id, fr.status_code, "
+                        + "         COALESCE(SUM(la.invoice_total_amount), 0) AS la_billed, "
+                        + "         COALESCE(SUM(CASE WHEN bs.is_success = true THEN la.invoice_total_amount ELSE 0 END), 0) "
+                        + "           AS la_collected, "
+                        + "         COALESCE(SUM(CASE WHEN bs.is_success IS NULL THEN la.invoice_total_amount ELSE 0 END), 0) "
+                        + "           AS la_in_flight, "
+                        + "         COALESCE(SUM(CASE WHEN bs.is_failure = true THEN la.invoice_total_amount ELSE 0 END), 0) "
+                        + "           AS la_at_risk, "
+                        + "         COUNT(*) FILTER (WHERE bs.is_failure = true) AS la_fail_cnt, "
+                        + "         "
+                        + summaryAmt
+                        + " AS summary_amt, "
+                        + "         "
+                        + failCnt
+                        + " AS summary_fail_cnt "
+                        + "  FROM filtered_runs fr "
+                        + "  LEFT JOIN latest_attempt la ON la.billing_run_id = fr.billing_run_id "
+                        + "  LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = la.billing_status_id "
+                        + "  GROUP BY fr.billing_run_id, fr.status_code, fr.summary_json "
+                        + "), run_amt AS ( "
+                        + "  SELECT "
+                        + "    CASE WHEN la_billed > 0 THEN la_billed ELSE summary_amt END AS billed, "
+                        + "    CASE "
+                        + "      WHEN la_collected > 0 THEN la_collected "
+                        + "      WHEN la_billed <= 0 AND status_code LIKE 'COMPLETED%' THEN summary_amt "
+                        + "      ELSE la_collected "
+                        + "    END AS collected, "
+                        + "    CASE "
+                        + "      WHEN la_billed > 0 THEN la_in_flight "
+                        + "      WHEN status_code IN ('RUNNING','INITIATED','IN_PROGRESS','SCHEDULED','WAITING','IDLE') "
+                        + "        THEN summary_amt "
+                        + "      ELSE 0 "
+                        + "    END AS in_flight, "
+                        + "    CASE "
+                        + "      WHEN la_billed > 0 THEN la_at_risk "
+                        + "      WHEN status_code LIKE 'FAILED%' OR status_code = 'FAILED_SYSTEM' THEN summary_amt "
+                        + "      ELSE 0 "
+                        + "    END AS at_risk, "
+                        + "    GREATEST(la_fail_cnt, summary_fail_cnt) AS fail_cnt "
+                        + "  FROM per_run "
                         + "), unresolved_dlq AS ( "
                         + "  SELECT COUNT(1)::bigint AS unresolved_count "
                         + "  FROM client_subscription_billing.billing_dead_letter_queue dlq "
@@ -751,17 +803,13 @@ public class DashboardRepository {
                         + whereDlq.replace("WHERE ", "WHERE COALESCE(dlq.resolved, false) = false AND ")
                         + ") "
                         + "SELECT "
-                        + "COALESCE(SUM(r.amt), 0) AS total_amount, "
-                        + "COALESCE(SUM(CASE WHEN r.status_code LIKE 'COMPLETED%' THEN r.amt ELSE 0 END), 0) "
-                        + "  AS collected_amount, "
-                        + "COALESCE(SUM(CASE WHEN r.status_code IN "
-                        + "  ('RUNNING','INITIATED','IN_PROGRESS','SCHEDULED','WAITING','IDLE') "
-                        + "  THEN r.amt ELSE 0 END), 0) AS in_flight_amount, "
-                        + "COALESCE(SUM(CASE WHEN r.status_code LIKE 'FAILED%' OR r.status_code = 'FAILED_SYSTEM' "
-                        + "  THEN r.amt ELSE 0 END), 0) AS at_risk_amount, "
+                        + "COALESCE(SUM(r.billed), 0) AS total_amount, "
+                        + "COALESCE(SUM(r.collected), 0) AS collected_amount, "
+                        + "COALESCE(SUM(r.in_flight), 0) AS in_flight_amount, "
+                        + "COALESCE(SUM(r.at_risk), 0) AS at_risk_amount, "
                         + "COALESCE(SUM(r.fail_cnt), 0) AS failure_count, "
                         + "(SELECT unresolved_count FROM unresolved_dlq) AS unresolved_dlq_count "
-                        + "FROM runs r";
+                        + "FROM run_amt r";
         List<Object> p = new ArrayList<>(pMain.size() + pDlq.size());
         p.addAll(pMain);
         p.addAll(pDlq);
@@ -769,7 +817,7 @@ public class DashboardRepository {
     }
 
     /**
-     * Contract overview daily billed/collected from run {@code summary_json} (no SBH).
+     * Contract overview daily billed/collected — SBH latest attempts with summary_json fallback.
      */
     public List<Map<String, Object>> getContractOverviewBilledCollectedDaily(
             LocalDate dueDateFrom,
@@ -778,27 +826,127 @@ public class DashboardRepository {
         List<Object> p = new ArrayList<>();
         String where =
                 buildRunWhere("br", dueDateFrom, dueDateTo, null, null, locationIds, null, null, p);
-        String runAmt =
-                "COALESCE("
-                        + "NULLIF(TRIM(br.summary_json->>'total_amount'), '')::numeric, "
-                        + "NULLIF(TRIM(br.summary_json->>'eligible_total_amount'), '')::numeric, "
-                        + "0)";
         String sql =
-                "SELECT TO_CHAR(br.due_date, 'YYYY-MM-DD') AS date, "
-                        + "COALESCE(SUM("
-                        + runAmt
-                        + "), 0) AS billed, "
-                        + "COALESCE(SUM(CASE WHEN UPPER(COALESCE(brs.status_code, '')) LIKE 'COMPLETED%' "
-                        + "  THEN "
-                        + runAmt
-                        + " ELSE 0 END), 0) AS collected "
-                        + "FROM client_subscription_billing.billing_run br "
-                        + "JOIN billing_config.billing_run_status brs "
-                        + "  ON brs.billing_run_status_id = br.billing_run_status_id "
-                        + "LEFT JOIN billing_config.billing_stage_code bsc "
-                        + "  ON bsc.billing_stage_code_id = br.current_stage_code_id "
+                "WITH filtered_runs AS ( "
+                        + "  SELECT br.billing_run_id, "
+                        + "         COALESCE(br.due_date, DATE(br.created_on)) AS bucket_date, "
+                        + "         br.summary_json, UPPER(COALESCE(brs.status_code, '')) AS run_status "
+                        + "  FROM client_subscription_billing.billing_run br "
+                        + "  JOIN billing_config.billing_run_status brs "
+                        + "    ON brs.billing_run_status_id = br.billing_run_status_id "
+                        + "  LEFT JOIN billing_config.billing_stage_code bsc "
+                        + "    ON bsc.billing_stage_code_id = br.current_stage_code_id "
                         + where
-                        + " GROUP BY br.due_date ORDER BY br.due_date";
+                        + "), latest_attempt AS ( "
+                        + "  SELECT * FROM ( "
+                        + "    SELECT sbh.billing_run_id, sbh.invoice_total_amount, sbh.billing_status_id, "
+                        + "      ROW_NUMBER() OVER ( "
+                        + "        PARTITION BY sbh.billing_run_id, "
+                        + "                     COALESCE(CAST(sbh.invoice_id AS TEXT), CAST(sbh.subscription_instance_id AS TEXT)) "
+                        + "        ORDER BY sbh.billing_attempt_on DESC NULLS LAST, sbh.created_on DESC NULLS LAST, "
+                        + "                 sbh.subscription_billing_history_id DESC) AS rn "
+                        + "    FROM client_subscription_billing.subscription_billing_history sbh "
+                        + "    WHERE sbh.billing_run_id IN (SELECT billing_run_id FROM filtered_runs) "
+                        + "      AND COALESCE(sbh.is_mock, false) = false "
+                        + "  ) t WHERE rn = 1 "
+                        + "), sbh_by_run AS ( "
+                        + "  SELECT fr.billing_run_id, fr.bucket_date, fr.summary_json, fr.run_status, "
+                        + "         COALESCE(SUM(la.invoice_total_amount), 0) AS from_la_billed, "
+                        + "         COALESCE(SUM(CASE WHEN bs.is_success = true THEN la.invoice_total_amount ELSE 0 END), 0) "
+                        + "           AS from_la_collected "
+                        + "  FROM filtered_runs fr "
+                        + "  LEFT JOIN latest_attempt la ON la.billing_run_id = fr.billing_run_id "
+                        + "  LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = la.billing_status_id "
+                        + "  GROUP BY fr.billing_run_id, fr.bucket_date, fr.summary_json, fr.run_status "
+                        + ") "
+                        + "SELECT TO_CHAR(bucket_date, 'YYYY-MM-DD') AS date, "
+                        + "COALESCE(SUM(CASE "
+                        + "  WHEN from_la_billed > 0 THEN from_la_billed "
+                        + "  ELSE COALESCE(NULLIF(TRIM(summary_json->>'total_amount'), '')::numeric, "
+                        + "                NULLIF(TRIM(summary_json->>'eligible_total_amount'), '')::numeric, "
+                        + "                NULLIF(TRIM(summary_json->>'totalAmount'), '')::numeric, "
+                        + "                NULLIF(TRIM(summary_json->>'billed_amount'), '')::numeric, "
+                        + "                0) "
+                        + "END), 0) AS billed, "
+                        + "COALESCE(SUM(CASE "
+                        + "  WHEN from_la_collected > 0 THEN from_la_collected "
+                        + "  WHEN from_la_billed <= 0 AND run_status LIKE 'COMPLETED%' THEN "
+                        + "       COALESCE(NULLIF(TRIM(summary_json->>'total_amount'), '')::numeric, "
+                        + "                NULLIF(TRIM(summary_json->>'eligible_total_amount'), '')::numeric, "
+                        + "                NULLIF(TRIM(summary_json->>'collected_amount'), '')::numeric, "
+                        + "                0) "
+                        + "  ELSE 0 END), 0) AS collected "
+                        + "FROM sbh_by_run "
+                        + "WHERE bucket_date IS NOT NULL "
+                        + "GROUP BY bucket_date ORDER BY bucket_date";
+        return jdbc.queryForList(sql, p.toArray());
+    }
+
+    /**
+     * Contract overview monthly billed/collected (YTD charts) — SBH + summary_json fallback.
+     * Label date is the first day of each month ({@code YYYY-MM-01}) for FE axis parsing.
+     */
+    public List<Map<String, Object>> getContractOverviewBilledCollectedMonthly(
+            LocalDate dueDateFrom,
+            LocalDate dueDateTo,
+            List<UUID> locationIds) {
+        List<Object> p = new ArrayList<>();
+        String where =
+                buildRunWhere("br", dueDateFrom, dueDateTo, null, null, locationIds, null, null, p);
+        String sql =
+                "WITH filtered_runs AS ( "
+                        + "  SELECT br.billing_run_id, "
+                        + "         COALESCE(br.due_date, DATE(br.created_on)) AS bucket_date, "
+                        + "         br.summary_json, UPPER(COALESCE(brs.status_code, '')) AS run_status "
+                        + "  FROM client_subscription_billing.billing_run br "
+                        + "  JOIN billing_config.billing_run_status brs "
+                        + "    ON brs.billing_run_status_id = br.billing_run_status_id "
+                        + "  LEFT JOIN billing_config.billing_stage_code bsc "
+                        + "    ON bsc.billing_stage_code_id = br.current_stage_code_id "
+                        + where
+                        + "), latest_attempt AS ( "
+                        + "  SELECT * FROM ( "
+                        + "    SELECT sbh.billing_run_id, sbh.invoice_total_amount, sbh.billing_status_id, "
+                        + "      ROW_NUMBER() OVER ( "
+                        + "        PARTITION BY sbh.billing_run_id, "
+                        + "                     COALESCE(CAST(sbh.invoice_id AS TEXT), CAST(sbh.subscription_instance_id AS TEXT)) "
+                        + "        ORDER BY sbh.billing_attempt_on DESC NULLS LAST, sbh.created_on DESC NULLS LAST, "
+                        + "                 sbh.subscription_billing_history_id DESC) AS rn "
+                        + "    FROM client_subscription_billing.subscription_billing_history sbh "
+                        + "    WHERE sbh.billing_run_id IN (SELECT billing_run_id FROM filtered_runs) "
+                        + "      AND COALESCE(sbh.is_mock, false) = false "
+                        + "  ) t WHERE rn = 1 "
+                        + "), sbh_by_run AS ( "
+                        + "  SELECT fr.billing_run_id, fr.bucket_date, fr.summary_json, fr.run_status, "
+                        + "         COALESCE(SUM(la.invoice_total_amount), 0) AS from_la_billed, "
+                        + "         COALESCE(SUM(CASE WHEN bs.is_success = true THEN la.invoice_total_amount ELSE 0 END), 0) "
+                        + "           AS from_la_collected "
+                        + "  FROM filtered_runs fr "
+                        + "  LEFT JOIN latest_attempt la ON la.billing_run_id = fr.billing_run_id "
+                        + "  LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = la.billing_status_id "
+                        + "  GROUP BY fr.billing_run_id, fr.bucket_date, fr.summary_json, fr.run_status "
+                        + ") "
+                        + "SELECT TO_CHAR(date_trunc('month', bucket_date), 'YYYY-MM-01') AS date, "
+                        + "COALESCE(SUM(CASE "
+                        + "  WHEN from_la_billed > 0 THEN from_la_billed "
+                        + "  ELSE COALESCE(NULLIF(TRIM(summary_json->>'total_amount'), '')::numeric, "
+                        + "                NULLIF(TRIM(summary_json->>'eligible_total_amount'), '')::numeric, "
+                        + "                NULLIF(TRIM(summary_json->>'totalAmount'), '')::numeric, "
+                        + "                NULLIF(TRIM(summary_json->>'billed_amount'), '')::numeric, "
+                        + "                0) "
+                        + "END), 0) AS billed, "
+                        + "COALESCE(SUM(CASE "
+                        + "  WHEN from_la_collected > 0 THEN from_la_collected "
+                        + "  WHEN from_la_billed <= 0 AND run_status LIKE 'COMPLETED%' THEN "
+                        + "       COALESCE(NULLIF(TRIM(summary_json->>'total_amount'), '')::numeric, "
+                        + "                NULLIF(TRIM(summary_json->>'eligible_total_amount'), '')::numeric, "
+                        + "                NULLIF(TRIM(summary_json->>'collected_amount'), '')::numeric, "
+                        + "                0) "
+                        + "  ELSE 0 END), 0) AS collected "
+                        + "FROM sbh_by_run "
+                        + "WHERE bucket_date IS NOT NULL "
+                        + "GROUP BY date_trunc('month', bucket_date) "
+                        + "ORDER BY date_trunc('month', bucket_date)";
         return jdbc.queryForList(sql, p.toArray());
     }
 
@@ -1114,11 +1262,19 @@ public class DashboardRepository {
                 .append(".application_id = ?::uuid ");
         params.add(requireAppIdStr());
         if (dueDateFrom != null) {
-            w.append("AND ").append(runAlias).append(".due_date >= ?::date ");
+            w.append("AND COALESCE(")
+                    .append(runAlias)
+                    .append(".due_date, DATE(")
+                    .append(runAlias)
+                    .append(".created_on)) >= ?::date ");
             params.add(dueDateFrom);
         }
         if (dueDateTo != null) {
-            w.append("AND ").append(runAlias).append(".due_date <= ?::date ");
+            w.append("AND COALESCE(")
+                    .append(runAlias)
+                    .append(".due_date, DATE(")
+                    .append(runAlias)
+                    .append(".created_on)) <= ?::date ");
             params.add(dueDateTo);
         }
         if (asOfFrom != null) {

@@ -534,6 +534,43 @@ public class DashboardService {
 
         List<UUID> locs = resolveLocations(null, locationLevelId, includeChildLocations);
         LocalDate monthStart = toDate.withDayOfMonth(1);
+        LocalDate yearStart = LocalDate.of(toDate.getYear(), 1, 1);
+
+        // Chart window from segment, anchored on toDate, then clipped to the report range.
+        LocalDate chartFrom =
+                switch (seg) {
+                    case "7D" -> toDate.minusDays(6);
+                    case "30D" -> toDate.minusDays(29);
+                    case "MTD" -> monthStart;
+                    case "YTD" -> yearStart;
+                    default -> toDate.minusDays(6);
+                };
+        LocalDate chartTo = toDate;
+        if (chartFrom.isBefore(fromDate)) {
+            chartFrom = fromDate;
+        }
+        if (chartTo.isAfter(toDate)) {
+            chartTo = toDate;
+        }
+        if (chartFrom.isAfter(chartTo)) {
+            chartFrom = chartTo;
+        }
+
+        // KPI tiles are labeled MTD — always use calendar month → toDate (not the chart/segment window).
+        LocalDate kpiFrom = monthStart;
+        if (kpiFrom.isAfter(toDate)) {
+            kpiFrom = toDate;
+        }
+        long kpiDays = java.time.temporal.ChronoUnit.DAYS.between(kpiFrom, toDate) + 1;
+        LocalDate priorKpiTo = kpiFrom.minusDays(1);
+        LocalDate priorKpiFrom = priorKpiTo.minusDays(Math.max(kpiDays, 1) - 1);
+
+        final boolean ytdMonthly = "YTD".equals(seg);
+        final LocalDate chartFromF = chartFrom;
+        final LocalDate chartToF = chartTo;
+        final LocalDate kpiFromF = kpiFrom;
+        final LocalDate priorKpiFromF = priorKpiFrom;
+        final LocalDate priorKpiToF = priorKpiTo;
 
         String cacheKey =
                 AccessContext.applicationId()
@@ -546,7 +583,8 @@ public class DashboardService {
                         + "|"
                         + (locationLevelIdRaw == null ? "" : locationLevelIdRaw.trim())
                         + "|"
-                        + includeChildLocations;
+                        + includeChildLocations
+                        + "|v4";
         Map<String, Object> cached = contractOverviewCache.getIfPresent(cacheKey);
         if (cached != null) {
             return cached;
@@ -555,28 +593,52 @@ public class DashboardService {
         // Capture request ThreadLocal — worker threads do not inherit TenantContext.
         final TenantContext tenantCtx = TenantContext.get();
 
-        // Two cheap parallel jobs: finance (run summary_json only) + CRM bundle (one connection).
         CompletableFuture<Map<String, Object>> financeF =
                 supplyAsyncWithTenant(
                         tenantCtx,
                         () -> {
                             Map<String, Object> summary =
                                     dashboardRepository.getContractOverviewSummary(
-                                            fromDate, toDate, locs);
-                            List<Map<String, Object>> daily =
-                                    dashboardRepository.getContractOverviewBilledCollectedDaily(
-                                            fromDate, toDate, locs);
+                                            kpiFromF, toDate, locs);
+                            Map<String, Object> priorSummary =
+                                    dashboardRepository.getContractOverviewSummary(
+                                            priorKpiFromF, priorKpiToF, locs);
+                            List<Map<String, Object>> seriesRows =
+                                    ytdMonthly
+                                            ? dashboardRepository
+                                                    .getContractOverviewBilledCollectedMonthly(
+                                                            chartFromF, chartToF, locs)
+                                            : dashboardRepository
+                                                    .getContractOverviewBilledCollectedDaily(
+                                                            chartFromF, chartToF, locs);
                             Map<String, Object> finance = new LinkedHashMap<>();
                             finance.put("summary", summary);
-                            finance.put("daily", daily);
+                            finance.put("priorSummary", priorSummary);
+                            finance.put("series", seriesRows);
                             return finance;
                         });
         CompletableFuture<Map<String, Object>> crmF =
                 supplyAsyncWithTenant(
                         tenantCtx,
-                        () ->
-                                crmDashboardRepository.loadContractOverviewCrm(
-                                        locs, fromDate, toDate, monthStart, toDate));
+                        () -> {
+                            LocalDate checkinLoadFrom = chartFromF;
+                            LocalDate checkinLoadTo = chartToF;
+                            if (ytdMonthly) {
+                                // Trend card stays daily; load last 30 days instead of full year.
+                                checkinLoadFrom = toDate.minusDays(29);
+                                if (checkinLoadFrom.isBefore(fromDate)) {
+                                    checkinLoadFrom = fromDate;
+                                }
+                            }
+                            Map<String, Object> crm =
+                                    crmDashboardRepository.loadContractOverviewCrm(
+                                            locs, checkinLoadFrom, checkinLoadTo, kpiFromF, toDate);
+                            Number priorCheckins =
+                                    crmDashboardRepository.getCheckinsMtd(
+                                            locs, priorKpiFromF, priorKpiToF);
+                            crm.put("priorCheckinsMtd", priorCheckins);
+                            return crm;
+                        });
 
         try {
             CompletableFuture.allOf(financeF, crmF).join();
@@ -592,8 +654,11 @@ public class DashboardService {
         Map<String, Object> summaryRaw =
                 (Map<String, Object>) financeF.join().get("summary");
         @SuppressWarnings("unchecked")
+        Map<String, Object> priorSummaryRaw =
+                (Map<String, Object>) financeF.join().get("priorSummary");
+        @SuppressWarnings("unchecked")
         List<Map<String, Object>> billedCollected =
-                (List<Map<String, Object>>) financeF.join().get("daily");
+                (List<Map<String, Object>>) financeF.join().get("series");
 
         double totalAmount = num(summaryRaw.get("total_amount")).doubleValue();
         double collectedAmount = num(summaryRaw.get("collected_amount")).doubleValue();
@@ -603,17 +668,22 @@ public class DashboardService {
         long unresolvedDlq = num(summaryRaw.get("unresolved_dlq_count")).longValue();
         long failureCount = num(summaryRaw.get("failure_count")).longValue();
 
-        Map<String, Object> summaryForAlerts = new LinkedHashMap<>();
-        summaryForAlerts.put("unresolved_dlq_count", unresolvedDlq);
-        summaryForAlerts.put("failed_payments", failureCount);
+        double priorTotalAmount = num(priorSummaryRaw.get("total_amount")).doubleValue();
+        double priorCollectedAmount = num(priorSummaryRaw.get("collected_amount")).doubleValue();
+        double priorOutstanding =
+                Math.max(
+                        0.0,
+                        num(priorSummaryRaw.get("in_flight_amount")).doubleValue()
+                                + num(priorSummaryRaw.get("at_risk_amount")).doubleValue());
+        double priorRevenue = priorTotalAmount > 0 ? priorTotalAmount : priorCollectedAmount;
 
-        Map<String, double[]> billedCollectedByDay = new HashMap<>();
+        Map<String, double[]> billedCollectedByBucket = new HashMap<>();
         for (Map<String, Object> p : safeList(billedCollected)) {
             String d = p.get("date") == null ? null : String.valueOf(p.get("date"));
             if (d == null || d.isBlank()) {
                 continue;
             }
-            billedCollectedByDay.put(
+            billedCollectedByBucket.put(
                     d,
                     new double[] {
                         num(p.get("billed")).doubleValue(), num(p.get("collected")).doubleValue()
@@ -622,12 +692,24 @@ public class DashboardService {
         List<Number> billed = new ArrayList<>();
         List<Number> collected = new ArrayList<>();
         List<String> labels = new ArrayList<>();
-        for (LocalDate d = fromDate; !d.isAfter(toDate); d = d.plusDays(1)) {
-            String k = d.toString();
-            labels.add(k);
-            double[] v = billedCollectedByDay.getOrDefault(k, new double[] {0.0, 0.0});
-            billed.add(v[0]);
-            collected.add(v[1]);
+        if (ytdMonthly) {
+            YearMonth startYm = YearMonth.from(chartFromF);
+            YearMonth endYm = YearMonth.from(chartToF);
+            for (YearMonth ym = startYm; !ym.isAfter(endYm); ym = ym.plusMonths(1)) {
+                String k = ym.atDay(1).toString();
+                labels.add(k);
+                double[] v = billedCollectedByBucket.getOrDefault(k, new double[] {0.0, 0.0});
+                billed.add(v[0]);
+                collected.add(v[1]);
+            }
+        } else {
+            for (LocalDate d = chartFromF; !d.isAfter(chartToF); d = d.plusDays(1)) {
+                String k = d.toString();
+                labels.add(k);
+                double[] v = billedCollectedByBucket.getOrDefault(k, new double[] {0.0, 0.0});
+                billed.add(v[0]);
+                collected.add(v[1]);
+            }
         }
 
         Map<String, Object> crm = crmF.join();
@@ -636,6 +718,7 @@ public class DashboardService {
         long totalMembers = num(memberCounts.get("total_members")).longValue();
         long activeMemberships = num(memberCounts.get("active_members")).longValue();
         long checkinsMtd = num(crm.get("checkinsMtd")).longValue();
+        long priorCheckinsMtd = num(crm.get("priorCheckinsMtd")).longValue();
 
         Map<String, Long> checkinsByDay = new HashMap<>();
         @SuppressWarnings("unchecked")
@@ -651,7 +734,15 @@ public class DashboardService {
         }
         List<String> checkinLabels = new ArrayList<>();
         List<Number> checkinValues = new ArrayList<>();
-        for (LocalDate d = fromDate; !d.isAfter(toDate); d = d.plusDays(1)) {
+        LocalDate checkinFrom = chartFromF;
+        LocalDate checkinTo = chartToF;
+        if (ytdMonthly) {
+            checkinFrom = toDate.minusDays(29);
+            if (checkinFrom.isBefore(fromDate)) {
+                checkinFrom = fromDate;
+            }
+        }
+        for (LocalDate d = checkinFrom; !d.isAfter(checkinTo); d = d.plusDays(1)) {
             String k = d.toString();
             checkinLabels.add(k);
             checkinValues.add(checkinsByDay.getOrDefault(k, 0L));
@@ -673,14 +764,11 @@ public class DashboardService {
         for (Map<String, Object> row : safeList(topPlanRows)) {
             long m = num(row.get("members")).longValue();
             double share = planMemberSum > 0 ? (m * 1.0 / planMemberSum) : 0.0;
-            topPlans.add(
-                    Map.of(
-                            "name",
-                            String.valueOf(row.getOrDefault("name", "Unknown")),
-                            "members",
-                            m,
-                            "share",
-                            share));
+            Map<String, Object> plan = new LinkedHashMap<>();
+            plan.put("name", String.valueOf(row.getOrDefault("name", "Unknown")));
+            plan.put("members", m);
+            plan.put("share", share);
+            topPlans.add(plan);
         }
 
         List<Map<String, Object>> recentRegistrations = new ArrayList<>();
@@ -689,11 +777,17 @@ public class DashboardService {
                 (List<Map<String, Object>>) crm.get("recent");
         for (Map<String, Object> row : safeList(recentRows)) {
             Map<String, Object> rr = new LinkedHashMap<>();
+            String name = row.get("name") != null ? String.valueOf(row.get("name")) : "";
+            String plan =
+                    row.get("plan_name") != null ? String.valueOf(row.get("plan_name")) : "";
+            String dateStr = toIsoDate(row.get("created_on"));
             rr.put("clientRoleId", row.get("client_role_id"));
             rr.put("roleExternalId", row.get("role_external_id"));
-            rr.put("name", row.get("name") != null ? String.valueOf(row.get("name")) : "");
-            rr.put("registeredOn", row.get("created_on"));
-            rr.put("planName", row.get("plan_name") != null ? String.valueOf(row.get("plan_name")) : "");
+            rr.put("name", name);
+            rr.put("plan", plan);
+            rr.put("planName", plan);
+            rr.put("date", dateStr);
+            rr.put("registeredOn", dateStr);
             recentRegistrations.add(rr);
         }
 
@@ -701,23 +795,25 @@ public class DashboardService {
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> statusRows =
                 (List<Map<String, Object>>) crm.get("membershipStatus");
+        long statusSum =
+                safeList(statusRows).stream().mapToLong(r -> num(r.get("value")).longValue()).sum();
         for (Map<String, Object> r : safeList(statusRows)) {
-            membershipStatus.add(
-                    Map.of(
-                            "name",
-                            String.valueOf(r.get("name")),
-                            "value",
-                            num(r.get("value")).longValue()));
+            long count = num(r.get("value")).longValue();
+            Map<String, Object> bucket = new LinkedHashMap<>();
+            bucket.put("name", String.valueOf(r.get("name")));
+            bucket.put("count", count);
+            bucket.put("value", count);
+            bucket.put("pct", round1(pct(count, statusSum)));
+            membershipStatus.add(bucket);
         }
 
-        List<Map<String, Object>> alerts = buildAlerts(summaryForAlerts).stream().map(a -> {
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("type", String.valueOf(a.getOrDefault("title", "INFO")).toUpperCase(Locale.ROOT).replace(' ', '_'));
-            m.put("title", String.valueOf(a.getOrDefault("title", "Info")));
-            m.put("message", String.valueOf(a.getOrDefault("name", a.getOrDefault("title", "Info"))));
-            m.put("ageText", "now");
-            return m;
-        }).toList();
+        Map<String, Object> summaryForAlerts = new LinkedHashMap<>();
+        summaryForAlerts.put("unresolved_dlq_count", unresolvedDlq);
+        summaryForAlerts.put("failed_payments", failureCount);
+        summaryForAlerts.put("outstanding_ar", outstandingAr);
+        summaryForAlerts.put("revenue_mtd", totalAmount > 0 ? totalAmount : collectedAmount);
+
+        List<Map<String, Object>> alerts = buildContractOverviewAlerts(summaryForAlerts);
 
         Map<String, Object> filters = new LinkedHashMap<>();
         filters.put("fromDate", fromDate.toString());
@@ -725,36 +821,150 @@ public class DashboardService {
         filters.put("segment", seg);
         filters.put("locationLevelId", locationLevelIdRaw != null ? locationLevelIdRaw : "");
         filters.put("locationLabel", locationLabel != null ? locationLabel : "");
+        filters.put("comparisonLabel", "vs prior period");
+        filters.put("chartFromDate", chartFromF.toString());
+        filters.put("chartToDate", chartToF.toString());
 
-        // Prefer collected-range billed when history empty but summary has totals.
         double revenueMtd = totalAmount > 0 ? totalAmount : collectedAmount;
+
+        List<Number> revenueSpark = sparkFrom(collected.isEmpty() ? billed : collected);
+        List<Number> checkinSpark = sparkFrom(checkinValues);
+        List<Number> arSpark = sparkFrom(billed);
+
+        Map<String, Object> kpis = new LinkedHashMap<>();
+        // Members are point-in-time census — no prior snapshot; leave delta at 0.
+        kpis.put("totalMembers", kpiMetric(totalMembers, 0.0, checkinSpark));
+        kpis.put("activeMemberships", kpiMetric(activeMemberships, 0.0, checkinSpark));
+        kpis.put(
+                "checkinsMtd",
+                kpiMetric(checkinsMtd, deltaPct(checkinsMtd, priorCheckinsMtd), checkinSpark));
+        kpis.put(
+                "revenueMtd",
+                kpiMetric(revenueMtd, deltaPct(revenueMtd, priorRevenue), revenueSpark));
+        kpis.put(
+                "outstandingAr",
+                kpiMetric(outstandingAr, deltaPct(outstandingAr, priorOutstanding), arSpark));
+
+        Map<String, Object> revenueOverview = new LinkedHashMap<>();
+        revenueOverview.put("billed", billed);
+        revenueOverview.put("collected", collected);
+        revenueOverview.put("labels", labels);
+
+        Map<String, Object> checkinTrend = new LinkedHashMap<>();
+        checkinTrend.put("labels", checkinLabels);
+        checkinTrend.put("values", checkinValues);
+
+        Map<String, Object> genderDistribution = new LinkedHashMap<>();
+        genderDistribution.put("maleCount", gender.getOrDefault("maleCount", 0L));
+        genderDistribution.put("femaleCount", gender.getOrDefault("femaleCount", 0L));
+        genderDistribution.put("otherGenderCount", gender.getOrDefault("otherGenderCount", 0L));
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("filters", filters);
-        out.put("kpis", Map.of(
-                "totalMembers", Map.of("value", totalMembers, "deltaPct", 0),
-                "activeMemberships", Map.of("value", activeMemberships, "deltaPct", 0),
-                "checkinsMtd", Map.of("value", checkinsMtd, "deltaPct", 0),
-                "revenueMtd", Map.of("value", revenueMtd, "deltaPct", 0),
-                "outstandingAr", Map.of("value", outstandingAr, "deltaPct", 0)));
-        out.put("revenueOverview", Map.of("billed", billed, "collected", collected, "labels", labels));
+        out.put("kpis", kpis);
+        out.put("revenueOverview", revenueOverview);
         out.put("membershipStatus", membershipStatus);
-        out.put("checkinTrend", Map.of("labels", checkinLabels, "values", checkinValues));
-        out.put(
-                "genderDistribution",
-                Map.of(
-                        "maleCount",
-                        gender.getOrDefault("maleCount", 0L),
-                        "femaleCount",
-                        gender.getOrDefault("femaleCount", 0L),
-                        "otherGenderCount",
-                        gender.getOrDefault("otherGenderCount", 0L)));
+        out.put("checkinTrend", checkinTrend);
+        out.put("genderDistribution", genderDistribution);
         out.put("topPlans", topPlans);
         out.put("recentRegistrations", recentRegistrations);
         out.put("alerts", alerts);
 
         contractOverviewCache.put(cacheKey, out);
         return out;
+    }
+
+    private static Map<String, Object> kpiMetric(Number value, double deltaPct, List<Number> series) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("value", value);
+        m.put("deltaPct", round1(deltaPct));
+        m.put("series", series == null ? List.of() : series);
+        return m;
+    }
+
+    private static double deltaPct(double current, double previous) {
+        if (previous == 0.0) {
+            return current > 0.0 ? 100.0 : 0.0;
+        }
+        return ((current - previous) / Math.abs(previous)) * 100.0;
+    }
+
+    private static double round1(double v) {
+        return Math.round(v * 10.0) / 10.0;
+    }
+
+    private static List<Number> sparkFrom(List<? extends Number> values) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        int n = values.size();
+        int from = Math.max(0, n - 14);
+        return new ArrayList<>(values.subList(from, n));
+    }
+
+    private static String toIsoDate(Object raw) {
+        if (raw == null) {
+            return "";
+        }
+        if (raw instanceof java.sql.Timestamp ts) {
+            return ts.toLocalDateTime().toLocalDate().toString();
+        }
+        if (raw instanceof java.sql.Date d) {
+            return d.toLocalDate().toString();
+        }
+        if (raw instanceof java.time.LocalDateTime ldt) {
+            return ldt.toLocalDate().toString();
+        }
+        if (raw instanceof LocalDate ld) {
+            return ld.toString();
+        }
+        if (raw instanceof OffsetDateTime odt) {
+            return odt.toLocalDate().toString();
+        }
+        String s = String.valueOf(raw).trim();
+        if (s.length() >= 10) {
+            return s.substring(0, 10);
+        }
+        return s;
+    }
+
+    private static List<Map<String, Object>> buildContractOverviewAlerts(Map<String, Object> summary) {
+        List<Map<String, Object>> alerts = new ArrayList<>();
+        long dlq = num(summary.get("unresolved_dlq_count")).longValue();
+        if (dlq > 0) {
+            Map<String, Object> a = new LinkedHashMap<>();
+            a.put("type", "DLQ_ITEMS");
+            a.put("title", DashboardApiConstants.ALERT_TITLE_DLQ);
+            a.put("message", dlq + " unresolved billing dead-letter item(s)");
+            a.put("ageText", "now");
+            alerts.add(a);
+        }
+        long failed = num(summary.get("failed_payments")).longValue();
+        if (failed > 0) {
+            Map<String, Object> a = new LinkedHashMap<>();
+            a.put("type", "PAYMENT_FAILURES");
+            a.put("title", DashboardApiConstants.ALERT_TITLE_PAYMENT_FAILURES);
+            a.put("message", failed + " failed payment(s) in the current MTD window");
+            a.put("ageText", "now");
+            alerts.add(a);
+        }
+        double outstanding = num(summary.get("outstanding_ar")).doubleValue();
+        double revenue = num(summary.get("revenue_mtd")).doubleValue();
+        if (outstanding > 0
+                && (revenue <= 0 || outstanding >= revenue * 0.25)) {
+            Map<String, Object> a = new LinkedHashMap<>();
+            a.put("type", "HIGH_OUTSTANDING");
+            a.put("title", "High Outstanding");
+            a.put(
+                    "message",
+                    String.format(
+                            Locale.US,
+                            "Outstanding AR is %.0f — review in-flight and at-risk runs",
+                            outstanding));
+            a.put("ageText", "now");
+            alerts.add(a);
+        }
+        return alerts;
     }
 
     /**
