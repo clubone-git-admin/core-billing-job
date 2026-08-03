@@ -703,6 +703,172 @@ public class DashboardRepository {
                     + ") ";
 
     /**
+     * Home-dashboard finance from {@code transactions.invoice} (invoice_date), not billing_run.due_date.
+     * Billing-run summary_json is often empty in this environment; invoices are the source of truth
+     * for Revenue / AR on {@code GET /api/dashboard/overview}.
+     */
+    public Map<String, Object> getContractOverviewInvoiceSummary(
+            LocalDate from,
+            LocalDate to,
+            List<UUID> locationIds) {
+        boolean scoped = locationIds != null && !locationIds.isEmpty();
+        String locJoin =
+                scoped
+                        ? " JOIN clients.client_role cr ON cr.client_role_id = i.client_role_id "
+                                + "AND COALESCE(cr.is_active, true) = true "
+                                + locationClause("cr.location_id", locationIds)
+                        : "";
+        String sql =
+                "SELECT "
+                        + "COALESCE(SUM(COALESCE(i.total_amount, 0)), 0) AS total_amount, "
+                        + "COALESCE(SUM(CASE WHEN UPPER(COALESCE(invs.status_name, '')) "
+                        + "  IN ('PAID', 'COMPLETED', 'SETTLED', 'SUCCESS') "
+                        + "  THEN COALESCE(i.total_amount, 0) ELSE 0 END), 0) AS collected_amount, "
+                        + "COALESCE(SUM(CASE WHEN UPPER(COALESCE(invs.status_name, '')) "
+                        + "  IN ('FAILED', 'FAILED_PAYMENT', 'DECLINED') "
+                        + "  THEN COALESCE(i.total_amount, 0) ELSE 0 END), 0) AS at_risk_amount, "
+                        + "COUNT(*) FILTER (WHERE UPPER(COALESCE(invs.status_name, '')) "
+                        + "  IN ('FAILED', 'FAILED_PAYMENT', 'DECLINED'))::bigint AS failure_count "
+                        + "FROM transactions.invoice i "
+                        + "LEFT JOIN transactions.lu_invoice_status invs "
+                        + "  ON invs.invoice_status_id = i.invoice_status_id "
+                        + locJoin
+                        + "WHERE i.application_id = ?::uuid "
+                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) >= ?::date "
+                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) <= ?::date "
+                        + "  AND COALESCE(i.is_active, true) = true";
+        List<Object> p = new ArrayList<>();
+        if (scoped) {
+            p.addAll(params(locationIds));
+        }
+        p.add(requireAppIdStr());
+        p.add(from);
+        p.add(to);
+        Map<String, Object> row = jdbc.queryForMap(sql, p.toArray());
+
+        // Outstanding AR = open invoices as-of `to` (not limited to MTD invoice_date window).
+        String openArSql =
+                "SELECT COALESCE(SUM(COALESCE(i.total_amount, 0)), 0) AS outstanding_amount "
+                        + "FROM transactions.invoice i "
+                        + "LEFT JOIN transactions.lu_invoice_status invs "
+                        + "  ON invs.invoice_status_id = i.invoice_status_id "
+                        + locJoin
+                        + "WHERE i.application_id = ?::uuid "
+                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) <= ?::date "
+                        + "  AND COALESCE(i.is_active, true) = true "
+                        + "  AND UPPER(COALESCE(invs.status_name, '')) "
+                        + "    NOT IN ('PAID', 'COMPLETED', 'SETTLED', 'SUCCESS', 'VOID', 'CANCELLED', 'CANCELED')";
+        List<Object> pAr = new ArrayList<>();
+        if (scoped) {
+            pAr.addAll(params(locationIds));
+        }
+        pAr.add(requireAppIdStr());
+        pAr.add(to);
+        Number openAr = jdbc.queryForObject(openArSql, Number.class, pAr.toArray());
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("total_amount", row.get("total_amount"));
+        out.put("collected_amount", row.get("collected_amount"));
+        out.put("in_flight_amount", openAr != null ? openAr : 0);
+        out.put("at_risk_amount", row.get("at_risk_amount"));
+        out.put("failure_count", row.get("failure_count"));
+        out.put("unresolved_dlq_count", 0);
+        return out;
+    }
+
+    public List<Map<String, Object>> getContractOverviewInvoiceDaily(
+            LocalDate from,
+            LocalDate to,
+            List<UUID> locationIds) {
+        boolean scoped = locationIds != null && !locationIds.isEmpty();
+        String locJoin =
+                scoped
+                        ? " JOIN clients.client_role cr ON cr.client_role_id = i.client_role_id "
+                                + "AND COALESCE(cr.is_active, true) = true "
+                                + locationClause("cr.location_id", locationIds)
+                        : "";
+        String sql =
+                "SELECT TO_CHAR(COALESCE(i.invoice_date, DATE(i.created_on)), 'YYYY-MM-DD') AS date, "
+                        + "COALESCE(SUM(COALESCE(i.total_amount, 0)), 0) AS billed, "
+                        + "COALESCE(SUM(CASE WHEN UPPER(COALESCE(invs.status_name, '')) "
+                        + "  IN ('PAID', 'COMPLETED', 'SETTLED', 'SUCCESS') "
+                        + "  THEN COALESCE(i.total_amount, 0) ELSE 0 END), 0) AS collected "
+                        + "FROM transactions.invoice i "
+                        + "LEFT JOIN transactions.lu_invoice_status invs "
+                        + "  ON invs.invoice_status_id = i.invoice_status_id "
+                        + locJoin
+                        + "WHERE i.application_id = ?::uuid "
+                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) >= ?::date "
+                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) <= ?::date "
+                        + "  AND COALESCE(i.is_active, true) = true "
+                        + "GROUP BY COALESCE(i.invoice_date, DATE(i.created_on)) "
+                        + "ORDER BY COALESCE(i.invoice_date, DATE(i.created_on))";
+        List<Object> p = new ArrayList<>();
+        if (scoped) {
+            p.addAll(params(locationIds));
+        }
+        p.add(requireAppIdStr());
+        p.add(from);
+        p.add(to);
+        return jdbc.queryForList(sql, p.toArray());
+    }
+
+    public List<Map<String, Object>> getContractOverviewInvoiceMonthly(
+            LocalDate from,
+            LocalDate to,
+            List<UUID> locationIds) {
+        boolean scoped = locationIds != null && !locationIds.isEmpty();
+        String locJoin =
+                scoped
+                        ? " JOIN clients.client_role cr ON cr.client_role_id = i.client_role_id "
+                                + "AND COALESCE(cr.is_active, true) = true "
+                                + locationClause("cr.location_id", locationIds)
+                        : "";
+        String sql =
+                "SELECT TO_CHAR(date_trunc('month', COALESCE(i.invoice_date, DATE(i.created_on))), 'YYYY-MM-01') AS date, "
+                        + "COALESCE(SUM(COALESCE(i.total_amount, 0)), 0) AS billed, "
+                        + "COALESCE(SUM(CASE WHEN UPPER(COALESCE(invs.status_name, '')) "
+                        + "  IN ('PAID', 'COMPLETED', 'SETTLED', 'SUCCESS') "
+                        + "  THEN COALESCE(i.total_amount, 0) ELSE 0 END), 0) AS collected "
+                        + "FROM transactions.invoice i "
+                        + "LEFT JOIN transactions.lu_invoice_status invs "
+                        + "  ON invs.invoice_status_id = i.invoice_status_id "
+                        + locJoin
+                        + "WHERE i.application_id = ?::uuid "
+                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) >= ?::date "
+                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) <= ?::date "
+                        + "  AND COALESCE(i.is_active, true) = true "
+                        + "GROUP BY date_trunc('month', COALESCE(i.invoice_date, DATE(i.created_on))) "
+                        + "ORDER BY date_trunc('month', COALESCE(i.invoice_date, DATE(i.created_on)))";
+        List<Object> p = new ArrayList<>();
+        if (scoped) {
+            p.addAll(params(locationIds));
+        }
+        p.add(requireAppIdStr());
+        p.add(from);
+        p.add(to);
+        return jdbc.queryForList(sql, p.toArray());
+    }
+
+    private String locationClause(String column, List<UUID> locationIds) {
+        if (locationIds == null || locationIds.isEmpty()) {
+            return "";
+        }
+        return " AND " + column + " IN (" + inClausePlaceholders(locationIds.size()) + ") ";
+    }
+
+    private static List<Object> params(List<UUID> locationIds) {
+        if (locationIds == null || locationIds.isEmpty()) {
+            return List.of();
+        }
+        List<Object> p = new ArrayList<>();
+        for (UUID u : locationIds) {
+            p.add(u.toString());
+        }
+        return p;
+    }
+
+    /**
      * Contract overview finance KPIs.
      * Prefers latest non-mock SBH attempt amounts; falls back to {@code billing_run.summary_json}
      * when history is empty (common when summary_json totals were never written).

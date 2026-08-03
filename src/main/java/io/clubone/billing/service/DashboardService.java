@@ -556,8 +556,19 @@ public class DashboardService {
             chartFrom = chartTo;
         }
 
-        // KPI tiles are labeled MTD — always use calendar month → toDate (not the chart/segment window).
-        LocalDate kpiFrom = monthStart;
+        // Period KPIs (revenue / check-ins) follow the selected segment window so they
+        // match the date picker + revenue chart (7D/30D), not a forced calendar MTD.
+        // Outstanding AR remains point-in-time as-of toDate (computed in invoice summary).
+        LocalDate kpiFrom =
+                switch (seg) {
+                    case "7D", "30D" -> chartFrom;
+                    case "MTD" -> monthStart;
+                    case "YTD" -> yearStart;
+                    default -> chartFrom;
+                };
+        if (kpiFrom.isBefore(fromDate)) {
+            kpiFrom = fromDate;
+        }
         if (kpiFrom.isAfter(toDate)) {
             kpiFrom = toDate;
         }
@@ -584,7 +595,7 @@ public class DashboardService {
                         + (locationLevelIdRaw == null ? "" : locationLevelIdRaw.trim())
                         + "|"
                         + includeChildLocations
-                        + "|v4";
+                        + "|v7";
         Map<String, Object> cached = contractOverviewCache.getIfPresent(cacheKey);
         if (cached != null) {
             return cached;
@@ -597,13 +608,26 @@ public class DashboardService {
                 supplyAsyncWithTenant(
                         tenantCtx,
                         () -> {
+                            // Prefer invoices (invoice_date); billing_run due_date/summary_json is often empty.
                             Map<String, Object> summary =
-                                    dashboardRepository.getContractOverviewSummary(
-                                            kpiFromF, toDate, locs);
+                                    preferNonZeroFinance(
+                                            dashboardRepository.getContractOverviewInvoiceSummary(
+                                                    kpiFromF, toDate, locs),
+                                            dashboardRepository.getContractOverviewSummary(
+                                                    kpiFromF, toDate, locs));
                             Map<String, Object> priorSummary =
-                                    dashboardRepository.getContractOverviewSummary(
-                                            priorKpiFromF, priorKpiToF, locs);
-                            List<Map<String, Object>> seriesRows =
+                                    preferNonZeroFinance(
+                                            dashboardRepository.getContractOverviewInvoiceSummary(
+                                                    priorKpiFromF, priorKpiToF, locs),
+                                            dashboardRepository.getContractOverviewSummary(
+                                                    priorKpiFromF, priorKpiToF, locs));
+                            List<Map<String, Object>> invoiceSeries =
+                                    ytdMonthly
+                                            ? dashboardRepository.getContractOverviewInvoiceMonthly(
+                                                    chartFromF, chartToF, locs)
+                                            : dashboardRepository.getContractOverviewInvoiceDaily(
+                                                    chartFromF, chartToF, locs);
+                            List<Map<String, Object>> runSeries =
                                     ytdMonthly
                                             ? dashboardRepository
                                                     .getContractOverviewBilledCollectedMonthly(
@@ -611,6 +635,8 @@ public class DashboardService {
                                             : dashboardRepository
                                                     .getContractOverviewBilledCollectedDaily(
                                                             chartFromF, chartToF, locs);
+                            List<Map<String, Object>> seriesRows =
+                                    preferNonZeroSeries(invoiceSeries, runSeries);
                             Map<String, Object> finance = new LinkedHashMap<>();
                             finance.put("summary", summary);
                             finance.put("priorSummary", priorSummary);
@@ -821,20 +847,25 @@ public class DashboardService {
         filters.put("segment", seg);
         filters.put("locationLevelId", locationLevelIdRaw != null ? locationLevelIdRaw : "");
         filters.put("locationLabel", locationLabel != null ? locationLabel : "");
-        filters.put("comparisonLabel", "vs prior period");
+        filters.put("comparisonLabel", KPI_COMPARISON_LABEL);
         filters.put("chartFromDate", chartFromF.toString());
         filters.put("chartToDate", chartToF.toString());
+        filters.put("kpiFromDate", kpiFromF.toString());
+        filters.put("kpiToDate", toDate.toString());
 
         double revenueMtd = totalAmount > 0 ? totalAmount : collectedAmount;
 
         List<Number> revenueSpark = sparkFrom(collected.isEmpty() ? billed : collected);
         List<Number> checkinSpark = sparkFrom(checkinValues);
-        List<Number> arSpark = sparkFrom(billed);
+        // Census + AR are point-in-time — flat sparklines (not daily billed activity).
+        List<Number> arSpark = flatSpark(Math.max(revenueSpark.size(), 7), outstandingAr);
+        List<Number> memberSpark = flatSpark(checkinSpark.size(), totalMembers);
+        List<Number> activeSpark = flatSpark(checkinSpark.size(), activeMemberships);
 
         Map<String, Object> kpis = new LinkedHashMap<>();
         // Members are point-in-time census — no prior snapshot; leave delta at 0.
-        kpis.put("totalMembers", kpiMetric(totalMembers, 0.0, checkinSpark));
-        kpis.put("activeMemberships", kpiMetric(activeMemberships, 0.0, checkinSpark));
+        kpis.put("totalMembers", kpiMetric(totalMembers, 0.0, memberSpark));
+        kpis.put("activeMemberships", kpiMetric(activeMemberships, 0.0, activeSpark));
         kpis.put(
                 "checkinsMtd",
                 kpiMetric(checkinsMtd, deltaPct(checkinsMtd, priorCheckinsMtd), checkinSpark));
@@ -874,11 +905,14 @@ public class DashboardService {
         return out;
     }
 
+    private static final String KPI_COMPARISON_LABEL = "vs prior period";
+
     private static Map<String, Object> kpiMetric(Number value, double deltaPct, List<Number> series) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("value", value);
         m.put("deltaPct", round1(deltaPct));
         m.put("series", series == null ? List.of() : series);
+        m.put("comparisonLabel", KPI_COMPARISON_LABEL);
         return m;
     }
 
@@ -900,6 +934,53 @@ public class DashboardService {
         int n = values.size();
         int from = Math.max(0, n - 14);
         return new ArrayList<>(values.subList(from, n));
+    }
+
+    private static List<Number> flatSpark(int length, Number value) {
+        int n = Math.max(length, 7);
+        Number v = value == null ? 0 : value;
+        List<Number> out = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            out.add(v);
+        }
+        return out;
+    }
+
+    /** Prefer invoice-based totals when they have any activity; else billing-run summary. */
+    private static Map<String, Object> preferNonZeroFinance(
+            Map<String, Object> preferred, Map<String, Object> fallback) {
+        if (financeHasActivity(preferred)) {
+            return preferred;
+        }
+        return fallback != null ? fallback : preferred;
+    }
+
+    private static boolean financeHasActivity(Map<String, Object> m) {
+        if (m == null || m.isEmpty()) {
+            return false;
+        }
+        return num(m.get("total_amount")).doubleValue() > 0
+                || num(m.get("collected_amount")).doubleValue() > 0
+                || num(m.get("in_flight_amount")).doubleValue() > 0
+                || num(m.get("at_risk_amount")).doubleValue() > 0;
+    }
+
+    private static List<Map<String, Object>> preferNonZeroSeries(
+            List<Map<String, Object>> preferred, List<Map<String, Object>> fallback) {
+        if (seriesHasActivity(preferred)) {
+            return preferred;
+        }
+        return fallback != null ? fallback : preferred;
+    }
+
+    private static boolean seriesHasActivity(List<Map<String, Object>> rows) {
+        for (Map<String, Object> r : safeList(rows)) {
+            if (num(r.get("billed")).doubleValue() > 0
+                    || num(r.get("collected")).doubleValue() > 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String toIsoDate(Object raw) {
@@ -944,7 +1025,7 @@ public class DashboardService {
             Map<String, Object> a = new LinkedHashMap<>();
             a.put("type", "PAYMENT_FAILURES");
             a.put("title", DashboardApiConstants.ALERT_TITLE_PAYMENT_FAILURES);
-            a.put("message", failed + " failed payment(s) in the current MTD window");
+            a.put("message", failed + " failed payment(s) in the current period");
             a.put("ageText", "now");
             alerts.add(a);
         }
@@ -959,7 +1040,7 @@ public class DashboardService {
                     "message",
                     String.format(
                             Locale.US,
-                            "Outstanding AR is %.0f — review in-flight and at-risk runs",
+                            "Outstanding AR is %.0f - review in-flight and at-risk runs",
                             outstanding));
             a.put("ageText", "now");
             alerts.add(a);
