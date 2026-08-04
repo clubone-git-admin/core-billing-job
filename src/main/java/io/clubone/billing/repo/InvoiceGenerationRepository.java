@@ -56,6 +56,26 @@ public class InvoiceGenerationRepository {
             BigDecimal taxAmount,
             BigDecimal discountAmount,
             BigDecimal totalAmount) {
+        return insertDraftInvoice(
+                clientRoleId,
+                clientAgreementId,
+                billingRunId,
+                subTotal,
+                taxAmount,
+                discountAmount,
+                totalAmount,
+                null);
+    }
+
+    public UUID insertDraftInvoice(
+            UUID clientRoleId,
+            UUID clientAgreementId,
+            UUID billingRunId,
+            BigDecimal subTotal,
+            BigDecimal taxAmount,
+            BigDecimal discountAmount,
+            BigDecimal totalAmount,
+            UUID createdBy) {
         if (clientRoleId == null) {
             return null;
         }
@@ -63,6 +83,7 @@ public class InvoiceGenerationRepository {
         BigDecimal tax = taxAmount != null ? taxAmount : BigDecimal.ZERO;
         BigDecimal disc = discountAmount != null ? discountAmount : BigDecimal.ZERO;
         BigDecimal tot = totalAmount != null ? totalAmount : st.add(tax).subtract(disc);
+        UUID createdByResolved = createdBy != null ? createdBy : AccessContext.actorUserId();
 
         String sql = """
             INSERT INTO transactions.invoice (
@@ -80,6 +101,7 @@ public class InvoiceGenerationRepository {
                 billing_run_id,
                 client_agreement_id,
                 created_on,
+                created_by,
                 application_id
             )
             SELECT
@@ -97,6 +119,7 @@ public class InvoiceGenerationRepository {
                 ?::uuid,
                 ?::uuid,
                 now(),
+                ?::uuid,
                 ?::uuid
             RETURNING invoice_id
             """;
@@ -112,6 +135,7 @@ public class InvoiceGenerationRepository {
                 tot,
                 billingRunId != null ? billingRunId.toString() : null,
                 clientAgreementId != null ? clientAgreementId.toString() : null,
+                createdByResolved != null ? createdByResolved.toString() : null,
                 requireAppIdStr());
     }
 

@@ -34,11 +34,11 @@ public class DuePreviewRepository {
     /**
      * Get due schedule rows for preview from {@code subscription_billing_schedule}.
      * <p>
-     * Pickup rule: {@code billing_date <= dueDate}, with only unbilled rows ({@code invoice_id IS NULL}).
-     * Pricing is read directly from schedule columns; adjustments are applied from
-     * {@code subscription_billing_schedule_adjustment} (active rows only).
+     * Pickup rule: {@code billing_date <= dueDate} when {@code dueDate} is set; otherwise
+     * {@code billing_date <= today} in {@code subscription_instance.timezone}. Only unbilled
+     * rows ({@code invoice_id IS NULL}).
      *
-     * @param dueDate     The due date to filter by
+     * @param dueDate     Explicit due date, or {@code null} to use today per instance timezone
      * @param locationIds If null or empty, no location filter. Otherwise only rows where
      *                    {@code client_agreement.purchased_level_id} is set and
      *                    {@code locations.levels.reference_entity_id} for that level is one of the
@@ -149,13 +149,17 @@ public class DuePreviewRepository {
     WHERE sbs.application_id = ?::uuid
     AND sis.status_name = 'ACTIVE'
     AND sbs.billing_date IS NOT NULL
-    AND sbs.billing_date <= ?::date
+    AND sbs.billing_date <= CASE
+          WHEN ?::date IS NOT NULL THEN ?::date
+          ELSE (CURRENT_TIMESTAMP AT TIME ZONE COALESCE(NULLIF(TRIM(si.timezone), ''), 'UTC'))::date
+        END
     AND sbs.invoice_id IS NULL
     AND sp.is_active = true
         """);
 
         List<Object> params = new ArrayList<>();
         params.add(requireAppIdStr());
+        params.add(dueDate);
         params.add(dueDate);
 
         if (locationIds != null && !locationIds.isEmpty()) {
@@ -253,7 +257,7 @@ public class DuePreviewRepository {
      * Check if subscription instance is eligible for billing.
      *
      * @param subscriptionInstanceId The subscription instance ID
-     * @param asOfDate              The as-of date for eligibility check
+     * @param asOfDate              Explicit as-of date, or {@code null} to use today in the instance timezone
      * @return true if eligible, false otherwise
      */
     public boolean isEligible(UUID subscriptionInstanceId, LocalDate asOfDate) {
@@ -267,12 +271,19 @@ public class DuePreviewRepository {
               AND si.subscription_instance_id = ?::uuid
               AND COALESCE(sp.is_active, true) = true
               AND ss.status_name = 'ACTIVE'
-              AND (si.billing_start_date IS NULL OR si.billing_start_date <= ?::date)
-              AND (si.billing_end_date IS NULL OR si.billing_end_date >= ?::date)
+              AND (si.billing_start_date IS NULL OR si.billing_start_date <= CASE
+                    WHEN ?::date IS NOT NULL THEN ?::date
+                    ELSE (CURRENT_TIMESTAMP AT TIME ZONE COALESCE(NULLIF(TRIM(si.timezone), ''), 'UTC'))::date
+                  END)
+              AND (si.billing_end_date IS NULL OR si.billing_end_date >= CASE
+                    WHEN ?::date IS NOT NULL THEN ?::date
+                    ELSE (CURRENT_TIMESTAMP AT TIME ZONE COALESCE(NULLIF(TRIM(si.timezone), ''), 'UTC'))::date
+                  END)
         """;
 
         String sid = subscriptionInstanceId.toString();
-        Boolean result = jdbc.queryForObject(sql, Boolean.class, requireAppIdStr(), sid, asOfDate, asOfDate);
+        Boolean result = jdbc.queryForObject(sql, Boolean.class, requireAppIdStr(), sid,
+                asOfDate, asOfDate, asOfDate, asOfDate);
         return Boolean.TRUE.equals(result);
     }
 

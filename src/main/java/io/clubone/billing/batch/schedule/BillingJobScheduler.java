@@ -1,5 +1,6 @@
 package io.clubone.billing.batch.schedule;
 
+import io.clubone.billing.batch.AsOfDateSupport;
 import io.clubone.billing.batch.RunMode;
 import org.quartz.*;
 import org.slf4j.Logger;
@@ -13,9 +14,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.quartz.QuartzJobBean;
-
-import java.time.LocalDate;
-import java.util.UUID;
 
 /**
  * Quartz-based job scheduler for automated billing runs.
@@ -63,19 +61,19 @@ public class BillingJobScheduler {
         @Override
         protected void executeInternal(JobExecutionContext context) throws JobExecutionException {
             try {
-                LocalDate asOfDate = LocalDate.now();
+                // Per-instance timezone "today" — not JVM LocalDate.now()
                 RunMode mode = RunMode.LIVE; // Default to LIVE for scheduled runs
 
                 JobParameters params = new JobParametersBuilder()
-                    .addString("asOfDate", asOfDate.toString())
+                    .addString("asOfDate", AsOfDateSupport.INSTANCE_TZ)
                     .addString("runMode", mode.name())
                     .addString("scheduled", "true")
                     .addString("scheduleId", context.getTrigger().getKey().getName())
                     .addLong("ts", System.currentTimeMillis())
                     .toJobParameters();
 
-                log.info("Scheduled billing job triggered: asOfDate={} mode={} scheduleId={}", 
-                    asOfDate, mode, context.getTrigger().getKey().getName());
+                log.info("Scheduled billing job triggered: asOfDate={} mode={} scheduleId={}",
+                    AsOfDateSupport.INSTANCE_TZ, mode, context.getTrigger().getKey().getName());
 
                 jobLauncher.run(billingJob, params);
 

@@ -21,8 +21,53 @@ public class CrmDashboardRepository {
     }
 
     /**
-     * Loads all CRM slices for the contract overview in one call (sequential on one connection).
-     * Prefer this over fanning out many parallel queries against a small Hikari pool.
+     * Loads CRM slices for the contract overview with fewer round-trips:
+     * members+status, one check-in range scan, gender, top plans, recent regs.
+     */
+    public Map<String, Object> loadContractOverviewCrm(
+            List<UUID> locationIds,
+            LocalDate chartFrom,
+            LocalDate chartTo,
+            LocalDate kpiFrom,
+            LocalDate kpiTo,
+            LocalDate priorFrom,
+            LocalDate priorTo,
+            LocalDate checkinScanFrom,
+            LocalDate checkinScanTo) {
+        Map<String, Object> out = new LinkedHashMap<>();
+
+        Map<String, Object> memberAndStatus = getMembersAndStatus(locationIds);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> members = (Map<String, Object>) memberAndStatus.get("members");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> membershipStatus =
+                (List<Map<String, Object>>) memberAndStatus.get("membershipStatus");
+        out.put("members", members);
+        out.put("membershipStatus", membershipStatus);
+
+        Map<String, Object> checkins =
+                loadCheckins(
+                        locationIds,
+                        chartFrom,
+                        chartTo,
+                        kpiFrom,
+                        kpiTo,
+                        priorFrom,
+                        priorTo,
+                        checkinScanFrom,
+                        checkinScanTo);
+        out.put("checkinsMtd", checkins.get("checkinsMtd"));
+        out.put("priorCheckinsMtd", checkins.get("priorCheckinsMtd"));
+        out.put("checkinDaily", checkins.get("checkinDaily"));
+
+        out.put("gender", getGenderBuckets(locationIds));
+        out.put("topPlans", getTopPlansByAgreement(locationIds, 10));
+        out.put("recent", getRecentRegistrations(locationIds, 10));
+        return out;
+    }
+
+    /**
+     * Backward-compatible overload used by older callers / tests.
      */
     public Map<String, Object> loadContractOverviewCrm(
             List<UUID> locationIds,
@@ -30,63 +75,100 @@ public class CrmDashboardRepository {
             LocalDate to,
             LocalDate monthStart,
             LocalDate asOf) {
+        return loadContractOverviewCrm(
+                locationIds, from, to, monthStart, asOf, monthStart, asOf, from, to);
+    }
+
+    /**
+     * Total active roles + membership status buckets in two light queries (status also
+     * supplies active_members so we avoid a second agreement DISTINCT COUNT).
+     */
+    public Map<String, Object> getMembersAndStatus(List<UUID> locationIds) {
+        Map<String, Object> members = new LinkedHashMap<>();
+        members.put("total_members", getTotalMemberCount(locationIds));
+
+        List<Map<String, Object>> statusRows = getMembershipStatusBuckets(locationIds);
+        long active = 0L;
+        for (Map<String, Object> row : statusRows) {
+            String name = String.valueOf(row.getOrDefault("name", "")).trim();
+            if ("Active".equalsIgnoreCase(name) || "ACTIVE".equalsIgnoreCase(name)) {
+                active = ((Number) row.get("value")).longValue();
+                break;
+            }
+        }
+        members.put("active_members", active);
+
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("members", getMemberCounts(locationIds));
-        out.put("checkinsMtd", getCheckinsMtd(locationIds, monthStart, asOf));
-        out.put("checkinDaily", getCheckinTrendDaily(locationIds, from, to));
-        out.put("gender", getGenderBuckets(locationIds));
-        out.put("topPlans", getTopPlansByAgreement(locationIds, 10));
-        out.put("recent", getRecentRegistrations(locationIds, 10));
-        out.put("membershipStatus", getMembershipStatusBuckets(locationIds));
+        out.put("members", members);
+        out.put("membershipStatus", statusRows);
         return out;
     }
 
-    /**
-     * Total active {@code client_role} rows, and distinct clients with an ACTIVE agreement.
-     */
     public Map<String, Object> getMemberCounts(List<UUID> locationIds) {
+        Map<String, Object> membersAndStatus = getMembersAndStatus(locationIds);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> members = (Map<String, Object>) membersAndStatus.get("members");
+        return members;
+    }
+
+    private long getTotalMemberCount(List<UUID> locationIds) {
         boolean scoped = locationIds != null && !locationIds.isEmpty();
-        String locCr = locationClause("cr.location_id", locationIds);
-        String sql;
+        String sql =
+                "SELECT COUNT(*)::bigint FROM clients.client_role cr "
+                        + "WHERE COALESCE(cr.is_active, true) = true "
+                        + (scoped ? locationClause("cr.location_id", locationIds) : "");
         List<Object> p = new ArrayList<>();
         if (scoped) {
-            sql =
-                    "SELECT "
-                            + "(SELECT COUNT(*)::bigint FROM clients.client_role cr "
-                            + " WHERE COALESCE(cr.is_active, true) = true "
-                            + locCr
-                            + ") AS total_members, "
-                            + "(SELECT COUNT(DISTINCT ca.client_role_id)::bigint "
-                            + " FROM client_agreements.client_agreement ca "
-                            + " JOIN client_agreements.lu_client_agreement_status st "
-                            + "   ON st.client_agreement_status_id = ca.client_agreement_status_id "
-                            + " JOIN clients.client_role cr ON cr.client_role_id = ca.client_role_id "
-                            + " WHERE ca.is_active = true "
-                            + "   AND COALESCE(cr.is_active, true) = true "
-                            + "   AND st.code = 'ACTIVE' "
-                            + locCr
-                            + ") AS active_members";
             p.addAll(params(locationIds));
-            p.addAll(params(locationIds));
-        } else {
-            // Unscoped: avoid joining client_role twice; use partial indexes on active rows.
-            sql =
-                    "SELECT "
-                            + "(SELECT COUNT(*)::bigint FROM clients.client_role cr "
-                            + " WHERE COALESCE(cr.is_active, true) = true) AS total_members, "
-                            + "(SELECT COUNT(DISTINCT ca.client_role_id)::bigint "
-                            + " FROM client_agreements.client_agreement ca "
-                            + " JOIN client_agreements.lu_client_agreement_status st "
-                            + "   ON st.client_agreement_status_id = ca.client_agreement_status_id "
-                            + " WHERE ca.is_active = true AND st.code = 'ACTIVE') AS active_members";
         }
-        return jdbc.queryForMap(sql, p.toArray());
+        Number n = jdbc.queryForObject(sql, Number.class, p.toArray());
+        return n == null ? 0L : n.longValue();
     }
 
     /**
-     * Check-ins with {@code checkin_time} on {@code [monthStart, asOf]} (inclusive days).
-     * Uses a half-open timestamp range so an index on {@code checkin_time} can be used.
+     * Single check-in range scan; KPI / prior totals summed in Java from daily buckets.
      */
+    public Map<String, Object> loadCheckins(
+            List<UUID> locationIds,
+            LocalDate chartFrom,
+            LocalDate chartTo,
+            LocalDate kpiFrom,
+            LocalDate kpiTo,
+            LocalDate priorFrom,
+            LocalDate priorTo,
+            LocalDate scanFrom,
+            LocalDate scanTo) {
+        List<Map<String, Object>> allDaily =
+                getCheckinTrendDaily(locationIds, scanFrom, scanTo);
+
+        long kpiCnt = 0L;
+        long priorCnt = 0L;
+        List<Map<String, Object>> chartDaily = new ArrayList<>();
+        for (Map<String, Object> row : allDaily) {
+            Object dayObj = row.get("day");
+            LocalDate d =
+                    dayObj instanceof java.sql.Date sd
+                            ? sd.toLocalDate()
+                            : LocalDate.parse(String.valueOf(dayObj));
+            long cnt = ((Number) row.getOrDefault("cnt", 0)).longValue();
+            if (!d.isBefore(kpiFrom) && !d.isAfter(kpiTo)) {
+                kpiCnt += cnt;
+            }
+            if (!d.isBefore(priorFrom) && !d.isAfter(priorTo)) {
+                priorCnt += cnt;
+            }
+            if (!d.isBefore(chartFrom) && !d.isAfter(chartTo)) {
+                chartDaily.add(row);
+            }
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("checkinsMtd", kpiCnt);
+        out.put("priorCheckinsMtd", priorCnt);
+        out.put("checkinDaily", chartDaily);
+        return out;
+    }
+
     public Number getCheckinsMtd(List<UUID> locationIds, LocalDate monthStart, LocalDate asOf) {
         String loc = locationClause("cc.location_id", locationIds);
         String sql =
@@ -102,10 +184,8 @@ public class CrmDashboardRepository {
         return jdbc.queryForObject(sql, Number.class, p.toArray());
     }
 
-    /**
-     * Per-day check-in counts for charting.
-     */
-    public List<Map<String, Object>> getCheckinTrendDaily(List<UUID> locationIds, LocalDate from, LocalDate to) {
+    public List<Map<String, Object>> getCheckinTrendDaily(
+            List<UUID> locationIds, LocalDate from, LocalDate to) {
         String loc = locationClause("cc.location_id", locationIds);
         String sql =
                 "SELECT (cc.checkin_time AT TIME ZONE 'UTC')::date AS day, COUNT(*)::bigint AS cnt "
@@ -123,9 +203,8 @@ public class CrmDashboardRepository {
     }
 
     /**
-     * Gender buckets: Male, Female, Non-binary/other.
-     * One latest Gender characteristic per active {@code client_role} (avoids double-counting
-     * members that have multiple historical / conflicting Gender rows).
+     * Gender buckets via {@code DISTINCT ON} (latest row per role). Joins values by
+     * {@code client_characteristic_values_id} only — no per-row UUID regex.
      */
     public Map<String, Long> getGenderBuckets(List<UUID> locationIds) {
         boolean scoped = locationIds != null && !locationIds.isEmpty();
@@ -138,37 +217,28 @@ public class CrmDashboardRepository {
                         + "    AND COALESCE(cct.is_active, true) = true "
                         + "  ORDER BY cct.client_characteristic_type_id "
                         + "  LIMIT 1 "
-                        + "), ranked AS ( "
-                        + "  SELECT cc.client_role_id, "
+                        + "), latest AS ( "
+                        + "  SELECT DISTINCT ON (cc.client_role_id) "
                         + "         LOWER(TRIM(COALESCE( "
                         + "           NULLIF(TRIM(v.value), ''), "
                         + "           NULLIF(TRIM(cc.characteristic), ''), "
                         + "           '' "
-                        + "         ))) AS bucket_raw, "
-                        + "         ROW_NUMBER() OVER ( "
-                        + "           PARTITION BY cc.client_role_id "
-                        + "           ORDER BY cc.valid_from DESC NULLS LAST, "
-                        + "                    cc.created_on DESC NULLS LAST, "
-                        + "                    CASE WHEN cc.client_characteristic_values_id IS NOT NULL THEN 0 ELSE 1 END, "
-                        + "                    cc.client_characteristic_id DESC "
-                        + "         ) AS rn "
+                        + "         ))) AS bucket_raw "
                         + "  FROM clients.client_characteristic cc "
                         + "  JOIN gender_type gt "
                         + "    ON gt.client_characteristic_type_id = cc.client_characteristic_type_id "
                         + "  JOIN clients.client_role cr ON cr.client_role_id = cc.client_role_id "
                         + "  LEFT JOIN clients.client_characteristic_values v "
-                        + "    ON v.client_characteristic_values_id = COALESCE( "
-                        + "         cc.client_characteristic_values_id, "
-                        + "         CASE "
-                        + "           WHEN cc.characteristic ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' "
-                        + "           THEN cc.characteristic::uuid "
-                        + "           ELSE NULL "
-                        + "         END "
-                        + "       ) "
+                        + "    ON v.client_characteristic_values_id = cc.client_characteristic_values_id "
                         + "  WHERE COALESCE(cc.is_active, true) = true "
                         + "    AND COALESCE(cr.is_active, true) = true "
                         + "    AND (cc.valid_thru IS NULL OR cc.valid_thru > CURRENT_TIMESTAMP) "
                         + loc
+                        + "  ORDER BY cc.client_role_id, "
+                        + "           cc.valid_from DESC NULLS LAST, "
+                        + "           cc.created_on DESC NULLS LAST, "
+                        + "           CASE WHEN cc.client_characteristic_values_id IS NOT NULL THEN 0 ELSE 1 END, "
+                        + "           cc.client_characteristic_id DESC "
                         + "), normalized AS ( "
                         + "  SELECT CASE "
                         + "           WHEN bucket_raw IN ('m', 'male', 'man', 'boy') THEN 'male' "
@@ -176,8 +246,7 @@ public class CrmDashboardRepository {
                         + "           WHEN bucket_raw = '' THEN NULL "
                         + "           ELSE 'other' "
                         + "         END AS bucket "
-                        + "  FROM ranked "
-                        + "  WHERE rn = 1 "
+                        + "  FROM latest "
                         + ") "
                         + "SELECT bucket, COUNT(*)::bigint AS cnt "
                         + "FROM normalized "
@@ -192,23 +261,18 @@ public class CrmDashboardRepository {
         long male = 0;
         long female = 0;
         long other = 0;
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, bind.toArray());
-        for (Map<String, Object> r : rows) {
+        for (Map<String, Object> r : jdbc.queryForList(sql, bind.toArray())) {
             String b = String.valueOf(r.get("bucket"));
             long c = ((Number) r.get("cnt")).longValue();
             switch (b) {
                 case "male" -> male += c;
                 case "female" -> female += c;
-                case "other" -> other += c;
                 default -> other += c;
             }
         }
         return Map.of("maleCount", male, "femaleCount", female, "otherGenderCount", other);
     }
 
-    /**
-     * Top agreements by distinct member (client_role) with non-terminal agreement status.
-     */
     public List<Map<String, Object>> getTopPlansByAgreement(List<UUID> locationIds, int limit) {
         String locJoin =
                 locationIds == null || locationIds.isEmpty()
@@ -240,10 +304,6 @@ public class CrmDashboardRepository {
         return jdbc.queryForList(sql, params.toArray());
     }
 
-    /**
-     * Latest registrations — order/limit on {@code client_role} first, then hydrate name/plan
-     * for only those rows (never scan/LATERAL 80k roles).
-     */
     public List<Map<String, Object>> getRecentRegistrations(List<UUID> locationIds, int limit) {
         String loc = locationClause("cr.location_id", locationIds);
         String sql =
@@ -284,9 +344,6 @@ public class CrmDashboardRepository {
         return jdbc.queryForList(sql, p.toArray());
     }
 
-    /**
-     * Members per {@code client_agreement} status.
-     */
     public List<Map<String, Object>> getMembershipStatusBuckets(List<UUID> locationIds) {
         boolean scoped = locationIds != null && !locationIds.isEmpty();
         String sql;

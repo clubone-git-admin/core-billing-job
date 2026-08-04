@@ -703,9 +703,167 @@ public class DashboardRepository {
                     + ") ";
 
     /**
+     * Current + prior invoice finance in one scan (period KPIs + open AR as-of both cutoffs).
+     * Keys: {@code current}, {@code prior}.
+     */
+    public Map<String, Map<String, Object>> getContractOverviewInvoiceSummaryPair(
+            LocalDate curFrom,
+            LocalDate curTo,
+            LocalDate priorFrom,
+            LocalDate priorTo,
+            List<UUID> locationIds) {
+        boolean scoped = locationIds != null && !locationIds.isEmpty();
+        String locJoin =
+                scoped
+                        ? " JOIN clients.client_role cr ON cr.client_role_id = i.client_role_id "
+                                + "AND COALESCE(cr.is_active, true) = true "
+                                + locationClause("cr.location_id", locationIds)
+                        : "";
+        LocalDate periodFrom = priorFrom.isBefore(curFrom) ? priorFrom : curFrom;
+        LocalDate periodTo = priorTo.isAfter(curTo) ? priorTo : curTo;
+        LocalDate arAsOf = curTo.isAfter(priorTo) ? curTo : priorTo;
+
+        String sql =
+                "WITH inv AS ( "
+                        + "  SELECT i.total_amount, i.invoice_date, i.created_on, "
+                        + "         UPPER(COALESCE(invs.status_name, '')) AS st "
+                        + "  FROM transactions.invoice i "
+                        + "  LEFT JOIN transactions.lu_invoice_status invs "
+                        + "    ON invs.invoice_status_id = i.invoice_status_id "
+                        + locJoin
+                        + "  WHERE i.application_id = ?::uuid "
+                        + "    AND COALESCE(i.is_active, true) = true "
+                        + "    AND ("
+                        + "      (i.invoice_date IS NOT NULL AND i.invoice_date >= ?::date AND i.invoice_date <= ?::date) "
+                        + "      OR (i.invoice_date IS NULL AND i.created_on >= ?::timestamp "
+                        + "          AND i.created_on < (?::date + INTERVAL '1 day')) "
+                        + "      OR ("
+                        + "        UPPER(COALESCE(invs.status_name, '')) "
+                        + "          NOT IN ('PAID','COMPLETED','SETTLED','SUCCESS','VOID','CANCELLED','CANCELED') "
+                        + "        AND ("
+                        + "          (i.invoice_date IS NOT NULL AND i.invoice_date <= ?::date) "
+                        + "          OR (i.invoice_date IS NULL AND i.created_on < (?::date + INTERVAL '1 day')) "
+                        + "        )"
+                        + "      )"
+                        + "    )"
+                        + ") "
+                        + "SELECT "
+                        + periodAgg("cur", "PAID','COMPLETED','SETTLED','SUCCESS")
+                        + ", "
+                        + periodAgg("prior", "PAID','COMPLETED','SETTLED','SUCCESS")
+                        + ", "
+                        + "COALESCE(SUM(CASE WHEN st NOT IN "
+                        + "  ('PAID','COMPLETED','SETTLED','SUCCESS','VOID','CANCELLED','CANCELED') "
+                        + "  AND ((invoice_date IS NOT NULL AND invoice_date <= ?::date) "
+                        + "       OR (invoice_date IS NULL AND created_on < (?::date + INTERVAL '1 day'))) "
+                        + " THEN COALESCE(total_amount, 0) ELSE 0 END), 0) AS cur_outstanding, "
+                        + "COALESCE(SUM(CASE WHEN st NOT IN "
+                        + "  ('PAID','COMPLETED','SETTLED','SUCCESS','VOID','CANCELLED','CANCELED') "
+                        + "  AND ((invoice_date IS NOT NULL AND invoice_date <= ?::date) "
+                        + "       OR (invoice_date IS NULL AND created_on < (?::date + INTERVAL '1 day'))) "
+                        + " THEN COALESCE(total_amount, 0) ELSE 0 END), 0) AS prior_outstanding "
+                        + "FROM inv";
+
+        List<Object> p = new ArrayList<>();
+        if (scoped) {
+            p.addAll(params(locationIds));
+        }
+        p.add(requireAppIdStr());
+        p.add(periodFrom);
+        p.add(periodTo);
+        p.add(periodFrom.atStartOfDay().toString());
+        p.add(periodTo);
+        p.add(arAsOf);
+        p.add(arAsOf);
+        // cur period × 3 (total, collected, at_risk) + failure uses same 4 binds
+        for (int i = 0; i < 4; i++) {
+            p.add(curFrom);
+            p.add(curTo);
+            p.add(curFrom.atStartOfDay().toString());
+            p.add(curTo);
+        }
+        for (int i = 0; i < 4; i++) {
+            p.add(priorFrom);
+            p.add(priorTo);
+            p.add(priorFrom.atStartOfDay().toString());
+            p.add(priorTo);
+        }
+        p.add(curTo);
+        p.add(curTo);
+        p.add(priorTo);
+        p.add(priorTo);
+
+        Map<String, Object> row = jdbc.queryForMap(sql, p.toArray());
+        Map<String, Map<String, Object>> out = new LinkedHashMap<>();
+        out.put(
+                "current",
+                invoiceSummaryFromPairRow(
+                        row, "cur_total", "cur_collected", "cur_at_risk", "cur_fail", "cur_outstanding"));
+        out.put(
+                "prior",
+                invoiceSummaryFromPairRow(
+                        row,
+                        "prior_total",
+                        "prior_collected",
+                        "prior_at_risk",
+                        "prior_fail",
+                        "prior_outstanding"));
+        return out;
+    }
+
+    private static String periodAgg(String prefix, String paidList) {
+        String inRange =
+                "("
+                        + "  (invoice_date IS NOT NULL AND invoice_date >= ?::date AND invoice_date <= ?::date) "
+                        + "  OR (invoice_date IS NULL AND created_on >= ?::timestamp "
+                        + "      AND created_on < (?::date + INTERVAL '1 day')) "
+                        + ")";
+        return "COALESCE(SUM(CASE WHEN "
+                + inRange
+                + " THEN COALESCE(total_amount, 0) ELSE 0 END), 0) AS "
+                + prefix
+                + "_total, "
+                + "COALESCE(SUM(CASE WHEN "
+                + inRange
+                + " AND st IN ('"
+                + paidList
+                + "') THEN COALESCE(total_amount, 0) ELSE 0 END), 0) AS "
+                + prefix
+                + "_collected, "
+                + "COALESCE(SUM(CASE WHEN "
+                + inRange
+                + " AND st IN ('FAILED','FAILED_PAYMENT','DECLINED') "
+                + " THEN COALESCE(total_amount, 0) ELSE 0 END), 0) AS "
+                + prefix
+                + "_at_risk, "
+                + "COUNT(*) FILTER (WHERE "
+                + inRange
+                + " AND st IN ('FAILED','FAILED_PAYMENT','DECLINED'))::bigint AS "
+                + prefix
+                + "_fail";
+    }
+
+    private static Map<String, Object> invoiceSummaryFromPairRow(
+            Map<String, Object> row,
+            String totalKey,
+            String collectedKey,
+            String atRiskKey,
+            String failKey,
+            String outstandingKey) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("total_amount", row.get(totalKey));
+        out.put("collected_amount", row.get(collectedKey));
+        out.put("in_flight_amount", row.get(outstandingKey));
+        out.put("at_risk_amount", row.get(atRiskKey));
+        out.put("failure_count", row.get(failKey));
+        out.put("unresolved_dlq_count", 0);
+        return out;
+    }
+
+    /**
      * Home-dashboard finance from {@code transactions.invoice} (invoice_date), not billing_run.due_date.
-     * Billing-run summary_json is often empty in this environment; invoices are the source of truth
-     * for Revenue / AR on {@code GET /api/dashboard/overview}.
+     * One round-trip: period KPIs + open AR as-of {@code to}.
+     * Date predicates are sargable (OR of invoice_date / created_on) so indexes can apply.
      */
     public Map<String, Object> getContractOverviewInvoiceSummary(
             LocalDate from,
@@ -719,24 +877,59 @@ public class DashboardRepository {
                                 + locationClause("cr.location_id", locationIds)
                         : "";
         String sql =
-                "SELECT "
-                        + "COALESCE(SUM(COALESCE(i.total_amount, 0)), 0) AS total_amount, "
-                        + "COALESCE(SUM(CASE WHEN UPPER(COALESCE(invs.status_name, '')) "
-                        + "  IN ('PAID', 'COMPLETED', 'SETTLED', 'SUCCESS') "
-                        + "  THEN COALESCE(i.total_amount, 0) ELSE 0 END), 0) AS collected_amount, "
-                        + "COALESCE(SUM(CASE WHEN UPPER(COALESCE(invs.status_name, '')) "
-                        + "  IN ('FAILED', 'FAILED_PAYMENT', 'DECLINED') "
-                        + "  THEN COALESCE(i.total_amount, 0) ELSE 0 END), 0) AS at_risk_amount, "
-                        + "COUNT(*) FILTER (WHERE UPPER(COALESCE(invs.status_name, '')) "
-                        + "  IN ('FAILED', 'FAILED_PAYMENT', 'DECLINED'))::bigint AS failure_count "
-                        + "FROM transactions.invoice i "
-                        + "LEFT JOIN transactions.lu_invoice_status invs "
-                        + "  ON invs.invoice_status_id = i.invoice_status_id "
+                "WITH inv AS ( "
+                        + "  SELECT i.total_amount, i.invoice_date, i.created_on, "
+                        + "         UPPER(COALESCE(invs.status_name, '')) AS st "
+                        + "  FROM transactions.invoice i "
+                        + "  LEFT JOIN transactions.lu_invoice_status invs "
+                        + "    ON invs.invoice_status_id = i.invoice_status_id "
                         + locJoin
-                        + "WHERE i.application_id = ?::uuid "
-                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) >= ?::date "
-                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) <= ?::date "
-                        + "  AND COALESCE(i.is_active, true) = true";
+                        + "  WHERE i.application_id = ?::uuid "
+                        + "    AND COALESCE(i.is_active, true) = true "
+                        + "    AND ("
+                        + "      (i.invoice_date IS NOT NULL AND i.invoice_date >= ?::date AND i.invoice_date <= ?::date) "
+                        + "      OR (i.invoice_date IS NULL AND i.created_on >= ?::timestamp "
+                        + "          AND i.created_on < (?::date + INTERVAL '1 day')) "
+                        + "      OR ("
+                        + "        UPPER(COALESCE(invs.status_name, '')) "
+                        + "          NOT IN ('PAID','COMPLETED','SETTLED','SUCCESS','VOID','CANCELLED','CANCELED') "
+                        + "        AND ("
+                        + "          (i.invoice_date IS NOT NULL AND i.invoice_date <= ?::date) "
+                        + "          OR (i.invoice_date IS NULL AND i.created_on < (?::date + INTERVAL '1 day')) "
+                        + "        )"
+                        + "      )"
+                        + "    )"
+                        + ") "
+                        + "SELECT "
+                        + "COALESCE(SUM(CASE WHEN "
+                        + "  (invoice_date IS NOT NULL AND invoice_date >= ?::date AND invoice_date <= ?::date) "
+                        + "  OR (invoice_date IS NULL AND created_on >= ?::timestamp "
+                        + "      AND created_on < (?::date + INTERVAL '1 day')) "
+                        + " THEN COALESCE(total_amount, 0) ELSE 0 END), 0) AS total_amount, "
+                        + "COALESCE(SUM(CASE WHEN ("
+                        + "  (invoice_date IS NOT NULL AND invoice_date >= ?::date AND invoice_date <= ?::date) "
+                        + "  OR (invoice_date IS NULL AND created_on >= ?::timestamp "
+                        + "      AND created_on < (?::date + INTERVAL '1 day')) "
+                        + ") AND st IN ('PAID','COMPLETED','SETTLED','SUCCESS') "
+                        + " THEN COALESCE(total_amount, 0) ELSE 0 END), 0) AS collected_amount, "
+                        + "COALESCE(SUM(CASE WHEN ("
+                        + "  (invoice_date IS NOT NULL AND invoice_date >= ?::date AND invoice_date <= ?::date) "
+                        + "  OR (invoice_date IS NULL AND created_on >= ?::timestamp "
+                        + "      AND created_on < (?::date + INTERVAL '1 day')) "
+                        + ") AND st IN ('FAILED','FAILED_PAYMENT','DECLINED') "
+                        + " THEN COALESCE(total_amount, 0) ELSE 0 END), 0) AS at_risk_amount, "
+                        + "COUNT(*) FILTER (WHERE ("
+                        + "  (invoice_date IS NOT NULL AND invoice_date >= ?::date AND invoice_date <= ?::date) "
+                        + "  OR (invoice_date IS NULL AND created_on >= ?::timestamp "
+                        + "      AND created_on < (?::date + INTERVAL '1 day')) "
+                        + ") AND st IN ('FAILED','FAILED_PAYMENT','DECLINED'))::bigint AS failure_count, "
+                        + "COALESCE(SUM(CASE WHEN st NOT IN "
+                        + "  ('PAID','COMPLETED','SETTLED','SUCCESS','VOID','CANCELLED','CANCELED') "
+                        + "  AND ((invoice_date IS NOT NULL AND invoice_date <= ?::date) "
+                        + "       OR (invoice_date IS NULL AND created_on < (?::date + INTERVAL '1 day'))) "
+                        + " THEN COALESCE(total_amount, 0) ELSE 0 END), 0) AS outstanding_amount "
+                        + "FROM inv";
+
         List<Object> p = new ArrayList<>();
         if (scoped) {
             p.addAll(params(locationIds));
@@ -744,32 +937,24 @@ public class DashboardRepository {
         p.add(requireAppIdStr());
         p.add(from);
         p.add(to);
-        Map<String, Object> row = jdbc.queryForMap(sql, p.toArray());
-
-        // Outstanding AR = open invoices as-of `to` (not limited to MTD invoice_date window).
-        String openArSql =
-                "SELECT COALESCE(SUM(COALESCE(i.total_amount, 0)), 0) AS outstanding_amount "
-                        + "FROM transactions.invoice i "
-                        + "LEFT JOIN transactions.lu_invoice_status invs "
-                        + "  ON invs.invoice_status_id = i.invoice_status_id "
-                        + locJoin
-                        + "WHERE i.application_id = ?::uuid "
-                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) <= ?::date "
-                        + "  AND COALESCE(i.is_active, true) = true "
-                        + "  AND UPPER(COALESCE(invs.status_name, '')) "
-                        + "    NOT IN ('PAID', 'COMPLETED', 'SETTLED', 'SUCCESS', 'VOID', 'CANCELLED', 'CANCELED')";
-        List<Object> pAr = new ArrayList<>();
-        if (scoped) {
-            pAr.addAll(params(locationIds));
+        p.add(from.atStartOfDay().toString());
+        p.add(to);
+        p.add(to);
+        p.add(to);
+        for (int i = 0; i < 4; i++) {
+            p.add(from);
+            p.add(to);
+            p.add(from.atStartOfDay().toString());
+            p.add(to);
         }
-        pAr.add(requireAppIdStr());
-        pAr.add(to);
-        Number openAr = jdbc.queryForObject(openArSql, Number.class, pAr.toArray());
+        p.add(to);
+        p.add(to);
 
+        Map<String, Object> row = jdbc.queryForMap(sql, p.toArray());
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("total_amount", row.get("total_amount"));
         out.put("collected_amount", row.get("collected_amount"));
-        out.put("in_flight_amount", openAr != null ? openAr : 0);
+        out.put("in_flight_amount", row.get("outstanding_amount"));
         out.put("at_risk_amount", row.get("at_risk_amount"));
         out.put("failure_count", row.get("failure_count"));
         out.put("unresolved_dlq_count", 0);
@@ -798,9 +983,12 @@ public class DashboardRepository {
                         + "  ON invs.invoice_status_id = i.invoice_status_id "
                         + locJoin
                         + "WHERE i.application_id = ?::uuid "
-                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) >= ?::date "
-                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) <= ?::date "
                         + "  AND COALESCE(i.is_active, true) = true "
+                        + "  AND ("
+                        + "    (i.invoice_date IS NOT NULL AND i.invoice_date >= ?::date AND i.invoice_date <= ?::date) "
+                        + "    OR (i.invoice_date IS NULL AND i.created_on >= ?::timestamp "
+                        + "        AND i.created_on < (?::date + INTERVAL '1 day')) "
+                        + "  ) "
                         + "GROUP BY COALESCE(i.invoice_date, DATE(i.created_on)) "
                         + "ORDER BY COALESCE(i.invoice_date, DATE(i.created_on))";
         List<Object> p = new ArrayList<>();
@@ -809,6 +997,8 @@ public class DashboardRepository {
         }
         p.add(requireAppIdStr());
         p.add(from);
+        p.add(to);
+        p.add(from.atStartOfDay().toString());
         p.add(to);
         return jdbc.queryForList(sql, p.toArray());
     }
@@ -835,9 +1025,12 @@ public class DashboardRepository {
                         + "  ON invs.invoice_status_id = i.invoice_status_id "
                         + locJoin
                         + "WHERE i.application_id = ?::uuid "
-                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) >= ?::date "
-                        + "  AND COALESCE(i.invoice_date, DATE(i.created_on)) <= ?::date "
                         + "  AND COALESCE(i.is_active, true) = true "
+                        + "  AND ("
+                        + "    (i.invoice_date IS NOT NULL AND i.invoice_date >= ?::date AND i.invoice_date <= ?::date) "
+                        + "    OR (i.invoice_date IS NULL AND i.created_on >= ?::timestamp "
+                        + "        AND i.created_on < (?::date + INTERVAL '1 day')) "
+                        + "  ) "
                         + "GROUP BY date_trunc('month', COALESCE(i.invoice_date, DATE(i.created_on))) "
                         + "ORDER BY date_trunc('month', COALESCE(i.invoice_date, DATE(i.created_on)))";
         List<Object> p = new ArrayList<>();
@@ -846,6 +1039,8 @@ public class DashboardRepository {
         }
         p.add(requireAppIdStr());
         p.add(from);
+        p.add(to);
+        p.add(from.atStartOfDay().toString());
         p.add(to);
         return jdbc.queryForList(sql, p.toArray());
     }

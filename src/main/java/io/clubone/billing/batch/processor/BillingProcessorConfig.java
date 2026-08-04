@@ -11,6 +11,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import io.clubone.billing.batch.AsOfDateSupport;
 import io.clubone.billing.batch.BillingJobProperties;
 import io.clubone.billing.batch.RunMode;
 import io.clubone.billing.batch.audit.AuditService;
@@ -37,7 +38,8 @@ public class BillingProcessorConfig {
       @Value("#{jobParameters['asOfDate']}") String asOfDateStr) {
     UUID runId = UUID.fromString(runIdStr);
     RunMode mode = RunMode.valueOf(modeStr);
-    LocalDate asOfDate = LocalDate.parse(asOfDateStr);
+    // null = evaluate eligibility using each instance's IANA timezone "today"
+    LocalDate asOfDate = AsOfDateSupport.parseOptional(asOfDateStr);
     return new BillingItemProcessor(jdbc, props, paymentFactory.get(mode), metrics, dlqService, auditService, runId, mode, asOfDate);
   }
 }

@@ -377,7 +377,8 @@ public class PlansRepository {
                 sbs.invoice_id,
                 i.invoice_number,
                 invs.status_name AS invoice_status,
-                i.total_amount AS invoice_total_amount
+                i.total_amount AS invoice_total_amount,
+                si.timezone AS timezone
             FROM client_subscription_billing.subscription_instance si
             JOIN client_subscription_billing.subscription_billing_schedule sbs
               ON sbs.subscription_instance_id = si.subscription_instance_id

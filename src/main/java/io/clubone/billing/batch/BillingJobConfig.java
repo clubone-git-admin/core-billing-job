@@ -76,18 +76,25 @@ public class BillingJobConfig {
           String runModeStr = (String) chunkContext.getStepContext().getJobParameters().get("runMode");
           if (runModeStr == null) runModeStr = "MOCK";
 
-          LocalDate asOfDate = LocalDate.parse(asOfDateStr);
+          LocalDate explicitAsOf = AsOfDateSupport.parseOptional(asOfDateStr);
+          LocalDate asOfDate = AsOfDateSupport.runMetadataDate(explicitAsOf);
           RunMode mode = RunMode.valueOf(runModeStr.toUpperCase(Locale.ROOT));
 
           UUID runId = repo.createRun(mode.name(), asOfDate);
-          log.info("Created billing run: runId={} mode={} asOfDate={}", runId, mode, asOfDate);
+          if (explicitAsOf == null) {
+            log.info("Created billing run: runId={} mode={} asOfDate={} (pickup uses instance timezone)",
+                runId, mode, asOfDate);
+          } else {
+            log.info("Created billing run: runId={} mode={} asOfDate={}", runId, mode, asOfDate);
+          }
 
           JobExecution je = chunkContext.getStepContext().getStepExecution().getJobExecution();
           je.getExecutionContext().putString("billingRunId", runId.toString());
           je.getExecutionContext().putString("runMode", mode.name());
           
           // Audit: Job execution started
-          auditService.logJobStarted(runId, mode.name(), asOfDateStr, "system");
+          auditService.logJobStarted(runId, mode.name(),
+              asOfDateStr != null ? asOfDateStr : AsOfDateSupport.INSTANCE_TZ, "system");
           
           return RepeatStatus.FINISHED;
         }, txManager)

@@ -22,6 +22,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -745,7 +746,7 @@ public class DuePreviewService {
         summaryJson.put("not_eligible_count", notEligibleCount);
         summaryJson.put("total_amount", totalAmount);
         summaryJson.put("eligible_total_amount", eligibleTotalAmount);
-        summaryJson.put("generated_at", LocalDate.now().toString());
+        summaryJson.put("generated_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
 
         // Complete the stage run with summary (no billing_run update)
         stageRunRepository.completeStageRun(stageRunId, summaryJson);
@@ -787,7 +788,7 @@ public class DuePreviewService {
         response.put("not_eligible_count", notEligibleCount);
         response.put("total_amount", totalAmount);
         response.put("eligible_total_amount", eligibleTotalAmount);
-        response.put("generated_at", LocalDate.now().toString());
+        response.put("generated_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
 
         return response;
     }

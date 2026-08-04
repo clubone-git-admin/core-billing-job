@@ -4,7 +4,10 @@ import io.clubone.billing.repo.PlansRepository;
 import io.clubone.billing.repo.LocationLevelRepository;
 import org.springframework.stereotype.Service;
 
+import java.time.DateTimeException;
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -207,11 +210,30 @@ public class PlansService {
         if (billingDate == null) {
             return "FUTURE";
         }
-        LocalDate today = LocalDate.now();
+        LocalDate today = todayForCycle(cycle);
         if (billingDate.isBefore(today) || billingDate.isEqual(today) || billingDate.isBefore(today.plusDays(31))) {
             return "UPCOMING";
         }
         return "FUTURE";
+    }
+
+    /** Instance timezone when present; else UTC for status classification only. */
+    private static LocalDate todayForCycle(Map<String, Object> cycle) {
+        Object tzObj = cycle.get("timezone");
+        if (tzObj == null) {
+            tzObj = cycle.get("si.timezone");
+        }
+        if (tzObj != null) {
+            String tz = String.valueOf(tzObj).trim();
+            if (!tz.isEmpty()) {
+                try {
+                    return LocalDate.now(ZoneId.of(tz));
+                } catch (DateTimeException ignored) {
+                    // fall through
+                }
+            }
+        }
+        return LocalDate.now(ZoneOffset.UTC);
     }
 
     private Map<String, Object> formatInstance(Map<String, Object> instance) {

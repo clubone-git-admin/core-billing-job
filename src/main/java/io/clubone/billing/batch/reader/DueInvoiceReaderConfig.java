@@ -1,5 +1,6 @@
 package io.clubone.billing.batch.reader;
 
+import io.clubone.billing.batch.AsOfDateSupport;
 import io.clubone.billing.batch.BillingJobProperties;
 import io.clubone.billing.batch.model.DueInvoiceRow;
 import org.slf4j.Logger;
@@ -35,9 +36,10 @@ public class DueInvoiceReaderConfig {
       @Value("#{jobExecutionContext['billingRunId']}") String billingRunIdStr,
       @Value("#{jobExecutionContext['runMode']}") String runModeStr) {
     try {
-      LocalDate asOfDate = LocalDate.parse(asOfDateStr);
-      log.info("Creating due invoice paging reader: asOfDate={} billingRunId={} preventDuplicates={} useLocking={}", 
-          asOfDate, billingRunIdStr, props.isPreventDuplicateAcrossRuns(), props.isUseRowLocking());
+      LocalDate asOfDate = AsOfDateSupport.parseOptional(asOfDateStr);
+      log.info("Creating due invoice paging reader: asOfDate={} billingRunId={} preventDuplicates={} useLocking={}",
+          asOfDate != null ? asOfDate : AsOfDateSupport.INSTANCE_TZ,
+          billingRunIdStr, props.isPreventDuplicateAcrossRuns(), props.isUseRowLocking());
 
       // Create paging query provider
       PostgresPagingQueryProvider queryProvider = new PostgresPagingQueryProvider();
@@ -59,7 +61,13 @@ public class DueInvoiceReaderConfig {
           .append("','")
           .append(ScheduleStatus.DUE.getCode())
           .append("') ");
-      whereClause.append("AND sis.payment_due_date <= :asOfDate ");
+      if (asOfDate != null) {
+        whereClause.append("AND sis.payment_due_date <= :asOfDate ");
+      } else {
+        // Scheduled / multi-TZ: today in each subscription_instance.timezone
+        whereClause.append("AND sis.payment_due_date <= ")
+            .append("(CURRENT_TIMESTAMP AT TIME ZONE COALESCE(NULLIF(TRIM(si.timezone), ''), 'UTC'))::date ");
+      }
       whereClause.append("AND i.is_active = true ");
       whereClause.append("AND lis.status_name IN ('")
           .append(io.clubone.billing.batch.model.InvoiceStatus.PENDING.getCode()).append("','")
@@ -95,7 +103,9 @@ public class DueInvoiceReaderConfig {
 
       // Set parameter values
       Map<String, Object> parameterValues = new HashMap<>();
-      parameterValues.put("asOfDate", asOfDate);
+      if (asOfDate != null) {
+        parameterValues.put("asOfDate", asOfDate);
+      }
       parameterValues.put("billingRunId", billingRunIdStr);
 
       // Log the query for debugging

@@ -126,6 +126,30 @@ public class SchedulingRepository {
     }
 
     /**
+     * IANA timezone code for a physical location (from {@code locations.lu_timezone}).
+     *
+     * @return trimmed timezone code, or {@code null} if location/timezone is missing
+     */
+    public String findTimezoneCodeByLocationId(UUID locationId) {
+        if (locationId == null) {
+            return null;
+        }
+        String sql = """
+            SELECT tz.timezone_code
+              FROM locations.location loc
+              JOIN locations.lu_timezone tz ON tz.timezone_id = loc.timezone_id
+             WHERE loc.location_id = ?::uuid
+               AND COALESCE(tz.is_active, true) = true
+             LIMIT 1
+            """;
+        List<String> rows = jdbc.query(sql, (rs, i) -> rs.getString(1), locationId.toString());
+        if (rows.isEmpty() || rows.get(0) == null || rows.get(0).isBlank()) {
+            return null;
+        }
+        return rows.get(0).trim();
+    }
+
+    /**
      * Create a new schedule.
      */
     public UUID createSchedule(Map<String, Object> request) {

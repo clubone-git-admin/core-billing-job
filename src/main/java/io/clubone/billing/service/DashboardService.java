@@ -45,10 +45,10 @@ public class DashboardService {
                 return t;
             });
 
-    /** Short TTL — overview is analytical; repeat loads within 30s hit memory. */
+    /** Short TTL — overview is analytical; repeat loads within 60s hit memory. */
     private final Cache<String, Map<String, Object>> contractOverviewCache =
             Caffeine.newBuilder()
-                    .expireAfterWrite(30, TimeUnit.SECONDS)
+                    .expireAfterWrite(60, TimeUnit.SECONDS)
                     .maximumSize(256)
                     .build();
 
@@ -595,7 +595,7 @@ public class DashboardService {
                         + (locationLevelIdRaw == null ? "" : locationLevelIdRaw.trim())
                         + "|"
                         + includeChildLocations
-                        + "|v7";
+                        + "|v8";
         Map<String, Object> cached = contractOverviewCache.getIfPresent(cacheKey);
         if (cached != null) {
             return cached;
@@ -608,35 +608,44 @@ public class DashboardService {
                 supplyAsyncWithTenant(
                         tenantCtx,
                         () -> {
-                            // Prefer invoices (invoice_date); billing_run due_date/summary_json is often empty.
+                            // Short-circuit: only hit heavy billing_run/SBH path when invoices are empty.
+                            Map<String, Map<String, Object>> invPair =
+                                    dashboardRepository.getContractOverviewInvoiceSummaryPair(
+                                            kpiFromF,
+                                            toDate,
+                                            priorKpiFromF,
+                                            priorKpiToF,
+                                            locs);
+                            Map<String, Object> invSummary = invPair.get("current");
                             Map<String, Object> summary =
-                                    preferNonZeroFinance(
-                                            dashboardRepository.getContractOverviewInvoiceSummary(
-                                                    kpiFromF, toDate, locs),
-                                            dashboardRepository.getContractOverviewSummary(
-                                                    kpiFromF, toDate, locs));
+                                    financeHasActivity(invSummary)
+                                            ? invSummary
+                                            : dashboardRepository.getContractOverviewSummary(
+                                                    kpiFromF, toDate, locs);
+
+                            Map<String, Object> invPrior = invPair.get("prior");
                             Map<String, Object> priorSummary =
-                                    preferNonZeroFinance(
-                                            dashboardRepository.getContractOverviewInvoiceSummary(
-                                                    priorKpiFromF, priorKpiToF, locs),
-                                            dashboardRepository.getContractOverviewSummary(
-                                                    priorKpiFromF, priorKpiToF, locs));
-                            List<Map<String, Object>> invoiceSeries =
+                                    financeHasActivity(invPrior)
+                                            ? invPrior
+                                            : dashboardRepository.getContractOverviewSummary(
+                                                    priorKpiFromF, priorKpiToF, locs);
+
+                            List<Map<String, Object>> seriesRows =
                                     ytdMonthly
                                             ? dashboardRepository.getContractOverviewInvoiceMonthly(
                                                     chartFromF, chartToF, locs)
                                             : dashboardRepository.getContractOverviewInvoiceDaily(
                                                     chartFromF, chartToF, locs);
-                            List<Map<String, Object>> runSeries =
-                                    ytdMonthly
-                                            ? dashboardRepository
-                                                    .getContractOverviewBilledCollectedMonthly(
-                                                            chartFromF, chartToF, locs)
-                                            : dashboardRepository
-                                                    .getContractOverviewBilledCollectedDaily(
-                                                            chartFromF, chartToF, locs);
-                            List<Map<String, Object>> seriesRows =
-                                    preferNonZeroSeries(invoiceSeries, runSeries);
+                            if (!seriesHasActivity(seriesRows)) {
+                                seriesRows =
+                                        ytdMonthly
+                                                ? dashboardRepository
+                                                        .getContractOverviewBilledCollectedMonthly(
+                                                                chartFromF, chartToF, locs)
+                                                : dashboardRepository
+                                                        .getContractOverviewBilledCollectedDaily(
+                                                                chartFromF, chartToF, locs);
+                            }
                             Map<String, Object> finance = new LinkedHashMap<>();
                             finance.put("summary", summary);
                             finance.put("priorSummary", priorSummary);
@@ -656,14 +665,20 @@ public class DashboardService {
                                     checkinLoadFrom = fromDate;
                                 }
                             }
-                            Map<String, Object> crm =
-                                    crmDashboardRepository.loadContractOverviewCrm(
-                                            locs, checkinLoadFrom, checkinLoadTo, kpiFromF, toDate);
-                            Number priorCheckins =
-                                    crmDashboardRepository.getCheckinsMtd(
-                                            locs, priorKpiFromF, priorKpiToF);
-                            crm.put("priorCheckinsMtd", priorCheckins);
-                            return crm;
+                            // One check-in range covering chart + KPI + prior windows (Java sums).
+                            LocalDate checkinScanFrom =
+                                    earliest(checkinLoadFrom, kpiFromF, priorKpiFromF);
+                            LocalDate checkinScanTo = latest(checkinLoadTo, toDate, priorKpiToF);
+                            return crmDashboardRepository.loadContractOverviewCrm(
+                                    locs,
+                                    checkinLoadFrom,
+                                    checkinLoadTo,
+                                    kpiFromF,
+                                    toDate,
+                                    priorKpiFromF,
+                                    priorKpiToF,
+                                    checkinScanFrom,
+                                    checkinScanTo);
                         });
 
         try {
@@ -981,6 +996,28 @@ public class DashboardService {
             }
         }
         return false;
+    }
+
+    private static LocalDate earliest(LocalDate a, LocalDate b, LocalDate c) {
+        LocalDate m = a;
+        if (b.isBefore(m)) {
+            m = b;
+        }
+        if (c.isBefore(m)) {
+            m = c;
+        }
+        return m;
+    }
+
+    private static LocalDate latest(LocalDate a, LocalDate b, LocalDate c) {
+        LocalDate m = a;
+        if (b.isAfter(m)) {
+            m = b;
+        }
+        if (c.isAfter(m)) {
+            m = c;
+        }
+        return m;
     }
 
     private static String toIsoDate(Object raw) {

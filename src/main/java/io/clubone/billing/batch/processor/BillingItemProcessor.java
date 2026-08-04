@@ -315,10 +315,14 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
                     + "WHERE si.subscription_instance_id = ?::uuid "
                     + "  AND sp.is_active = true "
                     + "  AND ss.status_name = '" + io.clubone.billing.batch.model.SubscriptionInstanceStatus.ACTIVE.getCode() + "' "
-                    + "  AND ?::date BETWEEN sp.contract_start_date AND sp.contract_end_date "
+                    + "  AND CASE "
+                    + "        WHEN ?::date IS NOT NULL THEN ?::date "
+                    + "        ELSE (CURRENT_TIMESTAMP AT TIME ZONE COALESCE(NULLIF(TRIM(si.timezone), ''), 'UTC'))::date "
+                    + "      END BETWEEN sp.contract_start_date AND sp.contract_end_date "
                     + "  AND (term.remaining_cycles IS NULL OR term.remaining_cycles > 0)";
 
-            Boolean ok = jdbc.queryForObject(sql, Boolean.class, subscriptionInstanceId.toString(), asOfDate);
+            Boolean ok = jdbc.queryForObject(sql, Boolean.class,
+                    subscriptionInstanceId.toString(), asOfDate, asOfDate);
             return Boolean.TRUE.equals(ok);
         } catch (DataAccessException e) {
             log.error("Database error checking eligibility: subscriptionInstanceId={} asOfDate={}", 

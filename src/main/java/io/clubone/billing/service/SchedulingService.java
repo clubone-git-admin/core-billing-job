@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -78,15 +79,22 @@ public class SchedulingService {
             return null;
         }
 
-        // Override due date if provided
-        LocalDate dueDate = request.get("override_due_date") != null ?
-                LocalDate.parse(request.get("override_due_date").toString()) :
-                LocalDate.now();
+        // Override due date if provided; otherwise today in the schedule location's IANA TZ
+        LocalDate dueDate;
+        if (request.get("override_due_date") != null) {
+            dueDate = LocalDate.parse(request.get("override_due_date").toString());
+        } else {
+            dueDate = todayForScheduleLocation(schedule);
+        }
+
+        UUID locationId = schedule.get("location_id") != null
+                ? UUID.fromString(schedule.get("location_id").toString())
+                : null;
 
         // Create billing run
         CreateBillingRunRequest createRequest = new CreateBillingRunRequest(
                 dueDate,
-                schedule.get("location_id") != null ? UUID.fromString(schedule.get("location_id").toString()) : null,
+                locationId,
                 null,
                 null,
                 null,
@@ -122,6 +130,27 @@ public class SchedulingService {
                 "limit", limit,
                 "offset", offset
         );
+    }
+
+    private LocalDate todayForScheduleLocation(Map<String, Object> schedule) {
+        Object locationObj = schedule.get("location_id");
+        if (locationObj == null || locationObj.toString().isBlank()) {
+            throw new IllegalArgumentException(
+                    "override_due_date is required when the schedule has no location_id "
+                            + "(cannot resolve club timezone for 'today')");
+        }
+        UUID locationId = UUID.fromString(locationObj.toString());
+        String tzCode = schedulingRepository.findTimezoneCodeByLocationId(locationId);
+        if (tzCode == null || tzCode.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Location timezone is not configured for location_id=" + locationId
+                            + ". Set locations.lu_timezone on the location, or pass override_due_date.");
+        }
+        try {
+            return LocalDate.now(ZoneId.of(tzCode));
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Invalid location timezone: " + tzCode, e);
+        }
     }
 
     private Map<String, Object> formatSchedule(Map<String, Object> schedule) {

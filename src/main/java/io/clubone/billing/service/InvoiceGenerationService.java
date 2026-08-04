@@ -22,7 +22,6 @@ import org.springframework.web.server.ResponseStatusException;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
-import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -673,7 +672,9 @@ public class InvoiceGenerationService {
             // fall through
         }
         try {
-            return LocalDate.parse(str).atStartOfDay(ZoneId.systemDefault()).toOffsetDateTime();
+            // Date-only strings are business calendar days; interpret as UTC midnight
+            // (not JVM systemDefault) so parse is stable across hosts.
+            return LocalDate.parse(str).atStartOfDay(ZoneOffset.UTC).toOffsetDateTime();
         } catch (Exception ignored) {
             return null;
         }
