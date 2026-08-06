@@ -8,6 +8,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.sql.SQLException;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.*;
 
@@ -356,7 +357,11 @@ public class StageRunRepository {
         UUID statusId = cancelledIds.get(0);
         jdbc.update("""
             UPDATE client_subscription_billing.billing_stage_run
-            SET stage_run_status_id = ?::uuid, ended_on = now(), error_message = ?, modified_on = now()
+            SET stage_run_status_id = ?::uuid,
+                ended_on = now(),
+                scheduled_for = NULL,
+                error_message = ?,
+                modified_on = now()
             WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
             """, statusId.toString(), reason, stageRunId.toString(), requireAppIdStr());
     }
@@ -433,25 +438,346 @@ public class StageRunRepository {
             jdbc.update("""
                 INSERT INTO client_subscription_billing.billing_stage_run
                 (stage_run_id, stage_run_code, billing_run_id, stage_code_id, stage_run_status_id,
-                  started_on, attempt_number, max_attempts, idempotency_key, created_by, application_id)
-                VALUES (?::uuid, ?, ?::uuid, ?::uuid, ?::uuid, now(), 1, 1, ?, ?::uuid, ?::uuid)
+                  scheduled_for, started_on, attempt_number, max_attempts, idempotency_key, created_by, application_id)
+                VALUES (?::uuid, ?, ?::uuid, ?::uuid, ?::uuid, ?::timestamptz, now(), 1, 1, ?, ?::uuid, ?::uuid)
                 """,
                     stageRunId.toString(), stageRunCode, billingRunId.toString(),
                     stageId.toString(), statusId.toString(),
+                    scheduledFor,
                     idempotencyKey, createdBy != null ? createdBy.toString() : null, requireAppIdStr());
         } else {
             jdbc.update("""
                 INSERT INTO client_subscription_billing.billing_stage_run
                 (stage_run_id, stage_run_code, billing_run_id, stage_code_id, stage_run_status_id,
-                  started_on, attempt_number, max_attempts, idempotency_key, created_by, application_id)
-                VALUES (?::uuid, ?, ?::uuid, ?::uuid, ?::uuid, NULL, 1, 1, ?, ?::uuid, ?::uuid)
+                  scheduled_for, started_on, attempt_number, max_attempts, idempotency_key, created_by, application_id)
+                VALUES (?::uuid, ?, ?::uuid, ?::uuid, ?::uuid, ?::timestamptz, NULL, 1, 1, ?, ?::uuid, ?::uuid)
                 """,
                     stageRunId.toString(), stageRunCode, billingRunId.toString(),
                     stageId.toString(), statusId.toString(),
+                    scheduledFor,
                     idempotencyKey, createdBy != null ? createdBy.toString() : null, requireAppIdStr());
         }
 
         return stageRunId;
+    }
+
+    /**
+     * Persist / update {@code scheduled_for} (UTC timestamptz) on an existing stage run.
+     */
+    public void updateScheduledFor(UUID stageRunId, OffsetDateTime scheduledFor) {
+        jdbc.update("""
+            UPDATE client_subscription_billing.billing_stage_run
+            SET scheduled_for = ?::timestamptz, modified_on = now()
+            WHERE stage_run_id = ?::uuid
+              AND application_id = ?::uuid
+            """,
+                scheduledFor, stageRunId.toString(), requireAppIdStr());
+    }
+
+    /**
+     * Reuse a CANCELLED/FAILED stage for a new schedule (avoid duplicate stage rows).
+     * Clears terminal fields and sets {@code scheduled_for}; caller must set status to SCHEDULED.
+     */
+    public void prepareStageRunForReschedule(UUID stageRunId, OffsetDateTime scheduledFor) {
+        jdbc.update("""
+            UPDATE client_subscription_billing.billing_stage_run
+            SET scheduled_for = ?::timestamptz,
+                ended_on = NULL,
+                started_on = NULL,
+                error_message = NULL,
+                error_details = NULL,
+                modified_on = now()
+            WHERE stage_run_id = ?::uuid
+              AND application_id = ?::uuid
+            """,
+                scheduledFor, stageRunId.toString(), requireAppIdStr());
+    }
+
+    /**
+     * Reuse a CANCELLED/FAILED stage for an immediate re-run (avoid duplicate stage rows).
+     * Clears terminal / schedule fields; caller must set status to PENDING/IDLE then enqueue.
+     */
+    public void prepareStageRunForRerun(UUID stageRunId) {
+        jdbc.update("""
+            UPDATE client_subscription_billing.billing_stage_run
+            SET scheduled_for = NULL,
+                ended_on = NULL,
+                started_on = NULL,
+                error_message = NULL,
+                error_details = NULL,
+                modified_on = now()
+            WHERE stage_run_id = ?::uuid
+              AND application_id = ?::uuid
+            """,
+                stageRunId.toString(), requireAppIdStr());
+    }
+
+    /**
+     * Cross-tenant atomic claim: due {@code SCHEDULED} rows → {@code QUEUED} (or {@code PENDING}
+     * if QUEUED is not seeded) using {@code FOR UPDATE SKIP LOCKED}.
+     * Only the winning instance receives each row. Must run inside a transaction.
+     */
+    public List<StageRunDto> claimDueScheduledStageRuns(OffsetDateTime asOfUtc, int limit) {
+        int lim = Math.max(1, Math.min(limit, 200));
+        UUID claimStatusId = lookupStageRunStatusId("QUEUED");
+        if (claimStatusId == null) {
+            claimStatusId = lookupStageRunStatusId("PENDING");
+        }
+        if (claimStatusId == null) {
+            return List.of();
+        }
+        String sql = """
+            WITH due AS (
+                SELECT bsr.stage_run_id
+                FROM client_subscription_billing.billing_stage_run bsr
+                JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+                JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+                WHERE srs.status_code = 'SCHEDULED'
+                  AND bsc.stage_code IN ('DUE_PREVIEW', 'INVOICE_GENERATION', 'MOCK_CHARGE', 'ACTUAL_CHARGE')
+                  AND bsr.scheduled_for IS NOT NULL
+                  AND bsr.scheduled_for <= ?::timestamptz
+                ORDER BY bsr.scheduled_for ASC, bsr.created_on ASC
+                LIMIT ?
+                FOR UPDATE OF bsr SKIP LOCKED
+            ),
+            claimed AS (
+                UPDATE client_subscription_billing.billing_stage_run bsr
+                SET stage_run_status_id = ?::uuid,
+                    modified_on = now()
+                FROM due
+                WHERE bsr.stage_run_id = due.stage_run_id
+                RETURNING bsr.stage_run_id
+            )
+            SELECT bsr.stage_run_id, bsr.stage_run_code, bsr.billing_run_id,
+                   bsc.stage_code AS stage_code, bsc.display_name AS stage_display_name,
+                   bsc.stage_sequence, bsc.description AS stage_description,
+                   srs.status_code AS status_code, srs.display_name AS status_display_name,
+                   bsr.scheduled_for, bsr.started_on, bsr.ended_on,
+                   bsr.summary_json, bsr.error_message, bsr.error_details,
+                   bsr.attempt_number, bsr.max_attempts, bsr.is_locked
+            FROM claimed c
+            JOIN client_subscription_billing.billing_stage_run bsr ON bsr.stage_run_id = c.stage_run_id
+            JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+            JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+            """;
+        return jdbc.query(sql, new Object[]{asOfUtc, lim, claimStatusId.toString()}, (rs, rowNum) -> mapStageRunRow(rs));
+    }
+
+    /**
+     * Cross-tenant: stale {@code RUNNING} IG/mock-charge rows → {@code QUEUED}/{@code PENDING}
+     * when {@code COALESCE(modified_on, started_on)} is older than {@code staleBeforeUtc}.
+     * Uses {@code FOR UPDATE SKIP LOCKED}. Live workers must {@link #touchStageRun(UUID)} heartbeat.
+     */
+    public List<StageRunDto> claimStaleRunningStageRuns(OffsetDateTime staleBeforeUtc, int limit) {
+        int lim = Math.max(1, Math.min(limit, 200));
+        UUID claimStatusId = lookupStageRunStatusId("QUEUED");
+        if (claimStatusId == null) {
+            claimStatusId = lookupStageRunStatusId("PENDING");
+        }
+        if (claimStatusId == null) {
+            return List.of();
+        }
+        String sql = """
+            WITH due AS (
+                SELECT bsr.stage_run_id
+                FROM client_subscription_billing.billing_stage_run bsr
+                JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+                JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+                WHERE srs.status_code = 'RUNNING'
+                  AND bsc.stage_code IN ('DUE_PREVIEW', 'INVOICE_GENERATION', 'MOCK_CHARGE', 'ACTUAL_CHARGE')
+                  AND COALESCE(bsr.modified_on, bsr.started_on, bsr.created_on) < ?::timestamptz
+                ORDER BY COALESCE(bsr.modified_on, bsr.started_on, bsr.created_on) ASC
+                LIMIT ?
+                FOR UPDATE OF bsr SKIP LOCKED
+            ),
+            claimed AS (
+                UPDATE client_subscription_billing.billing_stage_run bsr
+                SET stage_run_status_id = ?::uuid,
+                    modified_on = now(),
+                    attempt_number = COALESCE(bsr.attempt_number, 1) + 1
+                FROM due
+                WHERE bsr.stage_run_id = due.stage_run_id
+                RETURNING bsr.stage_run_id
+            )
+            SELECT bsr.stage_run_id, bsr.stage_run_code, bsr.billing_run_id,
+                   bsc.stage_code AS stage_code, bsc.display_name AS stage_display_name,
+                   bsc.stage_sequence, bsc.description AS stage_description,
+                   srs.status_code AS status_code, srs.display_name AS status_display_name,
+                   bsr.scheduled_for, bsr.started_on, bsr.ended_on,
+                   bsr.summary_json, bsr.error_message, bsr.error_details,
+                   bsr.attempt_number, bsr.max_attempts, bsr.is_locked
+            FROM claimed c
+            JOIN client_subscription_billing.billing_stage_run bsr ON bsr.stage_run_id = c.stage_run_id
+            JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+            JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+            """;
+        return jdbc.query(sql, new Object[]{staleBeforeUtc, lim, claimStatusId.toString()}, (rs, rowNum) -> mapStageRunRow(rs));
+    }
+
+    /**
+     * Cross-tenant: stale {@code QUEUED}/{@code PENDING} rows that never reached a worker
+     * (event lost after claim). Locks + bumps {@code modified_on} so only one poller redispatches.
+     */
+    public List<StageRunDto> claimStaleQueuedStageRuns(OffsetDateTime staleBeforeUtc, int limit) {
+        int lim = Math.max(1, Math.min(limit, 200));
+        String sql = """
+            WITH due AS (
+                SELECT bsr.stage_run_id
+                FROM client_subscription_billing.billing_stage_run bsr
+                JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+                JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+                WHERE srs.status_code IN ('QUEUED', 'PENDING')
+                  AND bsc.stage_code IN ('DUE_PREVIEW', 'INVOICE_GENERATION', 'MOCK_CHARGE', 'ACTUAL_CHARGE')
+                  AND bsr.ended_on IS NULL
+                  AND (
+                      srs.status_code = 'QUEUED'
+                      OR jsonb_exists(bsr.summary_json, 'queued_at')
+                      OR jsonb_exists(bsr.summary_json, 'scheduled_claimed_at')
+                  )
+                  AND COALESCE(bsr.modified_on, bsr.created_on) < ?::timestamptz
+                ORDER BY COALESCE(bsr.modified_on, bsr.created_on) ASC
+                LIMIT ?
+                FOR UPDATE OF bsr SKIP LOCKED
+            ),
+            claimed AS (
+                UPDATE client_subscription_billing.billing_stage_run bsr
+                SET modified_on = now()
+                FROM due
+                WHERE bsr.stage_run_id = due.stage_run_id
+                RETURNING bsr.stage_run_id
+            )
+            SELECT bsr.stage_run_id, bsr.stage_run_code, bsr.billing_run_id,
+                   bsc.stage_code AS stage_code, bsc.display_name AS stage_display_name,
+                   bsc.stage_sequence, bsc.description AS stage_description,
+                   srs.status_code AS status_code, srs.display_name AS status_display_name,
+                   bsr.scheduled_for, bsr.started_on, bsr.ended_on,
+                   bsr.summary_json, bsr.error_message, bsr.error_details,
+                   bsr.attempt_number, bsr.max_attempts, bsr.is_locked
+            FROM claimed c
+            JOIN client_subscription_billing.billing_stage_run bsr ON bsr.stage_run_id = c.stage_run_id
+            JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+            JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+            """;
+        return jdbc.query(sql, new Object[]{staleBeforeUtc, lim}, (rs, rowNum) -> mapStageRunRow(rs));
+    }
+
+    /**
+     * Worker lease heartbeat — keeps {@code modified_on} fresh so stale-reclaim does not steal a live job.
+     * Auth-free (uses row id only); safe for background workers.
+     */
+    public void touchStageRun(UUID stageRunId) {
+        if (stageRunId == null) {
+            return;
+        }
+        jdbc.update("""
+            UPDATE client_subscription_billing.billing_stage_run
+            SET modified_on = now()
+            WHERE stage_run_id = ?::uuid
+            """, stageRunId.toString());
+    }
+
+    private UUID lookupStageRunStatusId(String statusCode) {
+        return jdbc.query(
+                "SELECT stage_run_status_id FROM billing_config.stage_run_status WHERE status_code = ? LIMIT 1",
+                rs -> rs.next() ? (UUID) rs.getObject(1) : null,
+                statusCode);
+    }
+
+    /**
+     * Atomically transition status when current status is one of {@code fromStatusCodes}.
+     * Returns {@code true} only when this caller won the row.
+     */
+    public boolean tryTransitionStageRunStatus(UUID stageRunId, String toStatusCode, String... fromStatusCodes) {
+        if (stageRunId == null || toStatusCode == null || fromStatusCodes == null || fromStatusCodes.length == 0) {
+            return false;
+        }
+        UUID toId = lookupStageRunStatusId(toStatusCode);
+        if (toId == null) {
+            return false;
+        }
+        StringBuilder inList = new StringBuilder();
+        List<Object> params = new ArrayList<>();
+        params.add(toId.toString());
+        params.add(stageRunId.toString());
+        String appId = tryAppIdStr();
+        String appPredicate = "";
+        if (appId != null) {
+            appPredicate = " AND bsr.application_id = ?::uuid ";
+            params.add(appId);
+        }
+        for (int i = 0; i < fromStatusCodes.length; i++) {
+            if (i > 0) {
+                inList.append(',');
+            }
+            inList.append('?');
+            params.add(fromStatusCodes[i]);
+        }
+        String sql = """
+            UPDATE client_subscription_billing.billing_stage_run bsr
+            SET stage_run_status_id = ?::uuid,
+                modified_on = now()
+            WHERE bsr.stage_run_id = ?::uuid
+              %s
+              AND bsr.stage_run_status_id IN (
+                  SELECT stage_run_status_id FROM billing_config.stage_run_status
+                  WHERE status_code IN (%s)
+              )
+            """.formatted(appPredicate, inList);
+        return jdbc.update(sql, params.toArray()) == 1;
+    }
+
+    /**
+     * Atomically claim a stage run for execution: allowed prior statuses → {@code RUNNING}.
+     * Returns {@code true} only when this caller won the row (exactly one row updated).
+     */
+    public boolean tryClaimStageRunToRunning(UUID stageRunId, String... fromStatusCodes) {
+        if (stageRunId == null || fromStatusCodes == null || fromStatusCodes.length == 0) {
+            return false;
+        }
+        UUID runningId = lookupStageRunStatusId("RUNNING");
+        if (runningId == null) {
+            return false;
+        }
+        StringBuilder inList = new StringBuilder();
+        List<Object> params = new ArrayList<>();
+        params.add(runningId.toString());
+        params.add(stageRunId.toString());
+        String appId = tryAppIdStr();
+        String appPredicate = "";
+        if (appId != null) {
+            appPredicate = " AND bsr.application_id = ?::uuid ";
+            params.add(appId);
+        }
+        for (int i = 0; i < fromStatusCodes.length; i++) {
+            if (i > 0) {
+                inList.append(',');
+            }
+            inList.append('?');
+            params.add(fromStatusCodes[i]);
+        }
+        String sql = """
+            UPDATE client_subscription_billing.billing_stage_run bsr
+            SET stage_run_status_id = ?::uuid,
+                started_on = COALESCE(bsr.started_on, now()),
+                modified_on = now()
+            WHERE bsr.stage_run_id = ?::uuid
+              %s
+              AND bsr.stage_run_status_id IN (
+                  SELECT stage_run_status_id FROM billing_config.stage_run_status
+                  WHERE status_code IN (%s)
+              )
+            """.formatted(appPredicate, inList);
+        return jdbc.update(sql, params.toArray()) == 1;
+    }
+
+    /** Tenant app id when present; null for cross-tenant background claim helpers. */
+    private String tryAppIdStr() {
+        try {
+            UUID id = AccessContext.applicationId();
+            return id != null ? id.toString() : null;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     /**
@@ -471,6 +797,20 @@ public class StageRunRepository {
             WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
             """, ids.get(0).toString(), stageRunId.toString(), requireAppIdStr());
         return true;
+    }
+
+    /**
+     * Stamp {@code started_on} on first enqueue / claim if still null so UI can show Started while QUEUED.
+     */
+    public void ensureStartedOn(UUID stageRunId) {
+        if (stageRunId == null) {
+            return;
+        }
+        jdbc.update("""
+            UPDATE client_subscription_billing.billing_stage_run
+            SET started_on = COALESCE(started_on, now()), modified_on = now()
+            WHERE stage_run_id = ?::uuid AND application_id = ?::uuid
+            """, stageRunId.toString(), requireAppIdStr());
     }
 
     /**
@@ -594,4 +934,174 @@ public class StageRunRepository {
                         statusId.toString(), errorMessage, stageRunId.toString(), requireAppIdStr());
         }
     }
+
+    /**
+     * Tenant-scoped monitor list for IG / mock-charge jobs (scheduled + in-flight + recent terminal).
+     */
+    public List<BillingJobMonitorRow> searchJobMonitor(
+            String stageCodeOrNull,
+            String statusCodeOrNull,
+            int limit,
+            int offset) {
+        int lim = Math.max(1, Math.min(limit, 200));
+        int off = Math.max(0, offset);
+        StringBuilder sql = new StringBuilder("""
+            SELECT bsr.stage_run_id, bsr.stage_run_code, bsr.billing_run_id, br.billing_run_code,
+                   br.due_date,
+                   bsc.stage_code, bsc.display_name AS stage_display_name,
+                   srs.status_code, srs.display_name AS status_display_name,
+                   bsr.scheduled_for, bsr.started_on, bsr.ended_on, bsr.modified_on,
+                   bsr.attempt_number, bsr.summary_json
+            FROM client_subscription_billing.billing_stage_run bsr
+            JOIN client_subscription_billing.billing_run br ON br.billing_run_id = bsr.billing_run_id
+            JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+            JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+            WHERE bsr.application_id = ?::uuid
+              AND bsc.stage_code IN ('DUE_PREVIEW', 'INVOICE_GENERATION', 'MOCK_CHARGE', 'ACTUAL_CHARGE')
+            """);
+        List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
+        if (stageCodeOrNull != null && !stageCodeOrNull.isBlank()) {
+            sql.append(" AND bsc.stage_code = ? ");
+            params.add(stageCodeOrNull.trim());
+        }
+        if (statusCodeOrNull != null && !statusCodeOrNull.isBlank()) {
+            String st = statusCodeOrNull.trim();
+            if ("ACTIVE".equalsIgnoreCase(st)) {
+                // Actionable pipeline statuses (includes WAITING — IG drafts awaiting lock).
+                sql.append("""
+                     AND srs.status_code IN (
+                       'SCHEDULED', 'QUEUED', 'PENDING', 'RUNNING', 'WAITING', 'IDLE'
+                     )
+                    """);
+            } else {
+                sql.append(" AND srs.status_code = ? ");
+                params.add(st);
+            }
+        }
+        // null/blank status = all statuses for monitor stages (paginated).
+        // Leading newline required: Java text-block indent stripping can glue "?ORDER".
+        sql.append("""
+            
+            ORDER BY
+              CASE srs.status_code
+                WHEN 'RUNNING' THEN 1
+                WHEN 'QUEUED' THEN 2
+                WHEN 'PENDING' THEN 3
+                WHEN 'WAITING' THEN 4
+                WHEN 'SCHEDULED' THEN 5
+                WHEN 'IDLE' THEN 6
+                WHEN 'FAILED' THEN 7
+                ELSE 8
+              END,
+              COALESCE(bsr.modified_on, bsr.scheduled_for, bsr.created_on) DESC
+            LIMIT ? OFFSET ?
+            """);
+        params.add(lim);
+        params.add(off);
+        return jdbc.query(sql.toString(), params.toArray(), (rs, i) -> mapJobMonitorRow(rs));
+    }
+
+    public int countJobMonitor(String stageCodeOrNull, String statusCodeOrNull) {
+        StringBuilder sql = new StringBuilder("""
+            SELECT COUNT(1)
+            FROM client_subscription_billing.billing_stage_run bsr
+            JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+            JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+            WHERE bsr.application_id = ?::uuid
+              AND bsc.stage_code IN ('DUE_PREVIEW', 'INVOICE_GENERATION', 'MOCK_CHARGE', 'ACTUAL_CHARGE')
+            """);
+        List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
+        if (stageCodeOrNull != null && !stageCodeOrNull.isBlank()) {
+            sql.append(" AND bsc.stage_code = ? ");
+            params.add(stageCodeOrNull.trim());
+        }
+        if (statusCodeOrNull != null && !statusCodeOrNull.isBlank()) {
+            String st = statusCodeOrNull.trim();
+            if ("ACTIVE".equalsIgnoreCase(st)) {
+                sql.append("""
+                     AND srs.status_code IN (
+                       'SCHEDULED', 'QUEUED', 'PENDING', 'RUNNING', 'WAITING', 'IDLE'
+                     )
+                    """);
+            } else {
+                sql.append(" AND srs.status_code = ? ");
+                params.add(st);
+            }
+        }
+        Integer n = jdbc.queryForObject(sql.toString(), params.toArray(), Integer.class);
+        return n != null ? n : 0;
+    }
+
+    public Map<String, Long> countJobMonitorByStatus() {
+        String sql = """
+            SELECT srs.status_code, COUNT(1) AS cnt
+            FROM client_subscription_billing.billing_stage_run bsr
+            JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
+            JOIN billing_config.stage_run_status srs ON srs.stage_run_status_id = bsr.stage_run_status_id
+            WHERE bsr.application_id = ?::uuid
+              AND bsc.stage_code IN ('DUE_PREVIEW', 'INVOICE_GENERATION', 'MOCK_CHARGE', 'ACTUAL_CHARGE')
+            GROUP BY srs.status_code
+            """;
+        Map<String, Long> out = new HashMap<>();
+        jdbc.query(sql, (rs, rowNum) -> {
+            out.put(rs.getString("status_code"), rs.getLong("cnt"));
+            return null;
+        }, requireAppIdStr());
+        return out;
+    }
+
+    private BillingJobMonitorRow mapJobMonitorRow(java.sql.ResultSet rs) throws SQLException {
+        Map<String, Object> summary = null;
+        String summaryJsonStr = rs.getString("summary_json");
+        if (summaryJsonStr != null) {
+            try {
+                summary = objectMapper.readValue(summaryJsonStr, new TypeReference<Map<String, Object>>() {});
+            } catch (Exception ignored) {
+                // ignore
+            }
+        }
+        Integer reclaimCount = null;
+        if (summary != null && summary.get("stale_reclaim_count") instanceof Number n) {
+            reclaimCount = n.intValue();
+        }
+        return new BillingJobMonitorRow(
+                (UUID) rs.getObject("stage_run_id"),
+                rs.getString("stage_run_code"),
+                (UUID) rs.getObject("billing_run_id"),
+                rs.getString("billing_run_code"),
+                rs.getObject("due_date", LocalDate.class),
+                rs.getString("stage_code"),
+                rs.getString("stage_display_name"),
+                rs.getString("status_code"),
+                rs.getString("status_display_name"),
+                rs.getObject("scheduled_for", OffsetDateTime.class),
+                rs.getObject("started_on", OffsetDateTime.class),
+                rs.getObject("ended_on", OffsetDateTime.class),
+                rs.getObject("modified_on", OffsetDateTime.class),
+                rs.getObject("attempt_number") != null ? rs.getInt("attempt_number") : null,
+                reclaimCount,
+                summary);
+    }
+
+    /** Row for billing job monitor list (tenant-scoped). */
+    public record BillingJobMonitorRow(
+            UUID stageRunId,
+            String stageRunCode,
+            UUID billingRunId,
+            String billingRunCode,
+            LocalDate dueDate,
+            String stageCode,
+            String stageDisplayName,
+            String statusCode,
+            String statusDisplayName,
+            OffsetDateTime scheduledFor,
+            OffsetDateTime startedOn,
+            OffsetDateTime endedOn,
+            OffsetDateTime modifiedOn,
+            Integer attemptNumber,
+            Integer staleReclaimCount,
+            Map<String, Object> summaryJson
+    ) {}
 }

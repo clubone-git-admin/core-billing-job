@@ -92,10 +92,38 @@ clubone:
       max-pool-size: 2
       queue-capacity: 16
 
+    # Invoice generation: paged candidates + dedicated async pool (do not share tiny billingAsyncExecutor alone).
+    invoice-generation:
+      candidate-page-size: 1000
+      async:
+        core-pool-size: 2
+        max-pool-size: 4
+        queue-capacity: 32
+
+    # Due preview: paged candidates (50k+ scale) + dedicated async pool. Read-only job — reclaim/restart
+    # rebuilds the CSV from the first page instead of resuming a checkpoint.
+    due-preview:
+      candidate-page-size: 1000
+      async:
+        core-pool-size: 1
+        max-pool-size: 2
+        queue-capacity: 16
+
+    # Bounded fan-out for independent REST reads (list+count, dashboard, get-run).
+    # Keep max under Hikari maximum-pool-size so Tomcat + reads don't exhaust DB connections.
+    read:
+      core-pool-size: 4
+      max-pool-size: 8
+      queue-capacity: 64
+
     charge:
-      invoice-page-size: 50
+      invoice-page-size: 200
 
     actual-charge:
+      async:
+        core-pool-size: 2
+        max-pool-size: 4
+        queue-capacity: 32
       pending:
         poll:
           enabled: true
@@ -103,6 +131,20 @@ clubone:
           fixed-delay-ms: 300000
           batch-size: 20
           stale-minutes: 2
+
+    scheduled-stage:
+      poll:
+        enabled: true
+        fixed-delay-ms: 30000
+        batch-size: 50
+      # Reclaim crashed RUNNING workers / lost QUEUED events. Live workers heartbeat modified_on.
+      stale-reclaim:
+        enabled: true
+        fixed-delay-ms: 60000
+        batch-size: 20
+        # Must be > heartbeat interval used by workers (default 30s).
+        stale-minutes: 15
+      lease-heartbeat-seconds: 30
 
     rate-limit:
       # 8/s saturates 0.5–1 vCPU with HTTP capture + retries; pace captures instead.
@@ -117,7 +159,11 @@ clubone:
     mock-charge:
       skip-currency-check: true
       skip-mandate-max-amount-check: false
-      invoice-page-size: 50
+      invoice-page-size: 200
+      async:
+        core-pool-size: 2
+        max-pool-size: 4
+        queue-capacity: 32
 
     payment:
       strategy: HTTP

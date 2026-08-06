@@ -10,6 +10,8 @@ import io.clubone.billing.repo.StageRunRepository;
 import io.clubone.billing.repo.SbhInvoiceLink;
 import io.clubone.billing.repo.SubscriptionBillingHistoryRepository;
 import io.clubone.billing.service.invoicegen.InvoiceGenerationQueuedEvent;
+import io.clubone.billing.util.BillingReadExecutors;
+import io.clubone.billing.util.UtcClock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
@@ -23,7 +25,9 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 @Service
@@ -43,6 +47,7 @@ public class InvoiceGenerationService {
     private final ObjectMapper objectMapper;
     private final ApplicationEventPublisher applicationEventPublisher;
     private final AuditLogRepository auditLogRepository;
+    private final BillingReadExecutors readExecutors;
 
     public InvoiceGenerationService(
             StageRunRepository stageRunRepository,
@@ -52,7 +57,8 @@ public class InvoiceGenerationService {
             InvoiceRepository invoiceRepository,
             ObjectMapper objectMapper,
             ApplicationEventPublisher applicationEventPublisher,
-            AuditLogRepository auditLogRepository) {
+            AuditLogRepository auditLogRepository,
+            BillingReadExecutors readExecutors) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
         this.billingRunService = billingRunService;
@@ -61,6 +67,7 @@ public class InvoiceGenerationService {
         this.objectMapper = objectMapper;
         this.applicationEventPublisher = applicationEventPublisher;
         this.auditLogRepository = auditLogRepository;
+        this.readExecutors = readExecutors;
     }
 
     private void auditInvoiceGenerationStage(String action, UUID stageRunId, String userId, Map<String, Object> details) {
@@ -222,7 +229,18 @@ public class InvoiceGenerationService {
             }
         }
         patch.put("voided_invoice_ids", new ArrayList<>(voidedIds));
+        patch.put("voidedCount", voidedIds.size());
         appendPendingDueTotalsToSummaryPatch(billingRunId, patch);
+        Integer pendingDue = patch.get("pending_due_invoice_count") instanceof Number n
+                ? n.intValue()
+                : null;
+        if (pendingDue != null) {
+            patch.put("readyInvoiceCount", pendingDue);
+        } else {
+            Integer created = intVal(stage.summaryJson(), "invoicesCreated", "successCount");
+            int createdN = created != null ? created : 0;
+            patch.put("readyInvoiceCount", Math.max(0, createdN - voidedIds.size()));
+        }
         stageRunRepository.mergeStageRunSummaryJson(stageRunId, patch, false);
     }
 
@@ -254,7 +272,18 @@ public class InvoiceGenerationService {
             }
         }
         patch.put("voided_invoice_ids", new ArrayList<>(voidedIds));
+        patch.put("voidedCount", voidedIds.size());
         appendPendingDueTotalsToSummaryPatch(billingRunId, patch);
+        Integer pendingDue = patch.get("pending_due_invoice_count") instanceof Number n
+                ? n.intValue()
+                : null;
+        if (pendingDue != null) {
+            patch.put("readyInvoiceCount", pendingDue);
+        } else {
+            Integer created = intVal(stage.summaryJson(), "invoicesCreated", "successCount");
+            int createdN = created != null ? created : 0;
+            patch.put("readyInvoiceCount", Math.max(0, createdN - voidedIds.size()));
+        }
         stageRunRepository.mergeStageRunSummaryJson(stageRunId, patch, false);
     }
 
@@ -320,7 +349,7 @@ public class InvoiceGenerationService {
 
         if ("RUNNING".equals(status) && !regenerateAll) {
             // Mid-flight: republish so the worker can finish (e.g. duplicate POST while job runs).
-            mergeInvoiceGenSummary(target.stageRunId(), target, request, idempotencyKey);
+            mergeInvoiceGenSummary(target.stageRunId(), target, request, idempotencyKey, false);
             if (idempotencyKey != null && !idempotencyKey.isBlank()) {
                 stageRunRepository.updateIdempotencyKey(target.stageRunId(), idempotencyKey.trim());
             }
@@ -337,19 +366,58 @@ public class InvoiceGenerationService {
                     InvoiceGenerationStartHttpStatus.OK_200);
         }
 
-        if ("QUEUED".equals(status) || "SCHEDULED".equals(status)) {
-            mergeInvoiceGenSummary(target.stageRunId(), target, request, idempotencyKey);
+        if ("SCHEDULED".equals(status)) {
+            OffsetDateTime when = resolveInvoiceScheduledFor(target);
+            if (when != null && when.isAfter(UtcClock.now())) {
+                log.info("invoice-generation: stage still SCHEDULED for future {} — not enqueueing: stageRunId={}",
+                        when, target.stageRunId());
+                return new InvoiceGenerationCommandResult(
+                        toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
+                        InvoiceGenerationStartHttpStatus.OK_200);
+            }
+            // Due: atomically claim SCHEDULED → QUEUED (or PENDING) so only one instance enqueues.
+            boolean claimed = stageRunRepository.tryTransitionStageRunStatus(
+                    target.stageRunId(), "QUEUED", "SCHEDULED");
+            if (!claimed) {
+                claimed = stageRunRepository.tryTransitionStageRunStatus(
+                        target.stageRunId(), "PENDING", "SCHEDULED");
+            }
+            if (!claimed) {
+                log.info("invoice-generation: lost SCHEDULED claim (another instance won): stageRunId={}",
+                        target.stageRunId());
+                return new InvoiceGenerationCommandResult(
+                        toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
+                        InvoiceGenerationStartHttpStatus.OK_200);
+            }
+            mergeInvoiceGenSummary(target.stageRunId(), target, request, idempotencyKey, false);
             if (idempotencyKey != null && !idempotencyKey.isBlank()) {
                 stageRunRepository.updateIdempotencyKey(target.stageRunId(), idempotencyKey.trim());
             }
-            log.info("invoice-generation: stage {} — republishing job in case prior worker did not run: stageRunId={}",
-                    status, target.stageRunId());
+            log.info("invoice-generation: SCHEDULED due — claimed and publishing job: stageRunId={}", target.stageRunId());
             applicationEventPublisher.publishEvent(InvoiceGenerationQueuedEvent.of(target.stageRunId()));
             auditInvoiceGenerationStage(
                     "JOB_REPUBLISHED",
                     target.stageRunId(),
                     actorFromTriggeredBy(request.triggeredBy()),
-                    Map.of("billing_run_id", billingRunId.toString(), "prior_status", status));
+                    Map.of("billing_run_id", billingRunId.toString(), "prior_status", "SCHEDULED", "reason", "scheduled_due"));
+            return new InvoiceGenerationCommandResult(
+                    toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
+                    InvoiceGenerationStartHttpStatus.OK_200);
+        }
+
+        if ("QUEUED".equals(status)) {
+            mergeInvoiceGenSummary(target.stageRunId(), target, request, idempotencyKey, false);
+            if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+                stageRunRepository.updateIdempotencyKey(target.stageRunId(), idempotencyKey.trim());
+            }
+            log.info("invoice-generation: stage QUEUED — republishing job in case prior worker did not run: stageRunId={}",
+                    target.stageRunId());
+            applicationEventPublisher.publishEvent(InvoiceGenerationQueuedEvent.of(target.stageRunId()));
+            auditInvoiceGenerationStage(
+                    "JOB_REPUBLISHED",
+                    target.stageRunId(),
+                    actorFromTriggeredBy(request.triggeredBy()),
+                    Map.of("billing_run_id", billingRunId.toString(), "prior_status", "QUEUED"));
             return new InvoiceGenerationCommandResult(
                     toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
                     InvoiceGenerationStartHttpStatus.OK_200);
@@ -360,7 +428,29 @@ public class InvoiceGenerationService {
         }
 
         if ("FAILED".equals(status) || "CANCELLED".equals(status)) {
-            return startNewExecution(billingRunId, request, idempotencyKey, billingRun);
+            // Reuse the same stage row so run detail does not keep a stale CANCELLED sibling.
+            UUID reuseId = target.stageRunId();
+            stageRunRepository.prepareStageRunForRerun(reuseId);
+            if (!stageRunRepository.trySetStageRunStatusByCode(reuseId, "PENDING")
+                    && !stageRunRepository.trySetStageRunStatusByCode(reuseId, "IDLE")) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Could not reset CANCELLED/FAILED stage for re-run");
+            }
+            mergeInvoiceGenSummary(reuseId, stageRunRepository.findById(reuseId), request, idempotencyKey, true);
+            if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+                try {
+                    stageRunRepository.updateIdempotencyKey(reuseId, idempotencyKey.trim());
+                } catch (DataIntegrityViolationException ex) {
+                    StageRunDto again = stageRunRepository.findByIdempotencyKey(idempotencyKey.trim());
+                    if (again != null) {
+                        return new InvoiceGenerationCommandResult(
+                                toRunResponse(again, billingRun), InvoiceGenerationStartHttpStatus.OK_200);
+                    }
+                    throw ex;
+                }
+            }
+            log.info("invoice-generation: reusing CANCELLED/FAILED stage for re-run: stageRunId={}", reuseId);
+            return enqueueInvoiceGeneration(reuseId, billingRun);
         }
 
         if ("IDLE".equals(status) && regenerateAll) {
@@ -368,7 +458,7 @@ public class InvoiceGenerationService {
         }
 
         if ("PENDING".equals(status) || "IDLE".equals(status)) {
-            mergeInvoiceGenSummary(target.stageRunId(), target, request, idempotencyKey);
+            mergeInvoiceGenSummary(target.stageRunId(), target, request, idempotencyKey, true);
             if (idempotencyKey != null && !idempotencyKey.isBlank()) {
                 try {
                     stageRunRepository.updateIdempotencyKey(target.stageRunId(), idempotencyKey.trim());
@@ -397,7 +487,7 @@ public class InvoiceGenerationService {
         try {
             UUID newId = stageRunRepository.createStageRun(
                     billingRunId, STAGE_CODE, OffsetDateTime.now(), key, request.triggeredBy(), false);
-            mergeInvoiceGenSummary(newId, null, request, idempotencyKey);
+            mergeInvoiceGenSummary(newId, null, request, idempotencyKey, true);
             return enqueueInvoiceGeneration(newId, billingRun);
         } catch (DataIntegrityViolationException ex) {
             if (key != null) {
@@ -422,6 +512,7 @@ public class InvoiceGenerationService {
         m.put("queued_at", OffsetDateTime.now().toString());
         stageRunRepository.updateStageRunSummary(stageRunId, m);
         boolean queuedStatusApplied = stageRunRepository.trySetStageRunStatusByCode(stageRunId, "QUEUED");
+        stageRunRepository.ensureStartedOn(stageRunId);
         log.info("invoice-generation enqueued: stageRunId={} billingRunId={} queuedStatusInDb={} (false means use PENDING until worker)",
                 stageRunId, billingRun.billingRunId(), queuedStatusApplied);
         applicationEventPublisher.publishEvent(InvoiceGenerationQueuedEvent.of(stageRunId));
@@ -471,10 +562,17 @@ public class InvoiceGenerationService {
     }
 
     private void mergeInvoiceGenSummary(
-            UUID stageRunId, StageRunDto existing, InvoiceGenerationStartRequest request, String idempotencyKey) {
+            UUID stageRunId,
+            StageRunDto existing,
+            InvoiceGenerationStartRequest request,
+            String idempotencyKey,
+            boolean resetProgress) {
         Map<String, Object> merged = new HashMap<>();
         if (existing != null && existing.summaryJson() != null) {
             merged.putAll(existing.summaryJson());
+        }
+        if (resetProgress) {
+            clearInvoiceGenerationProgressFields(merged);
         }
         if (request.mode() != null) {
             merged.put("invoice_generation_mode", request.mode());
@@ -495,6 +593,49 @@ public class InvoiceGenerationService {
         stageRunRepository.updateStageRunSummary(stageRunId, merged);
     }
 
+    /** Drop prior job counters/cursor so a fresh start does not resume a finished or cancelled run. */
+    private static void clearInvoiceGenerationProgressFields(Map<String, Object> merged) {
+        merged.remove("ig_checkpoint_after_billing_schedule_id");
+        merged.remove("ig_checkpoint_at");
+        merged.remove("ig_paged_processing");
+        merged.remove("ig_candidate_page_size");
+        merged.remove("candidateRows");
+        merged.remove("invoicesCreated");
+        merged.remove("successCount");
+        merged.remove("failureCount");
+        merged.remove("skippedIneligible");
+        merged.remove("skippedNoClientRole");
+        merged.remove("skippedAlreadyInvoiced");
+        merged.remove("skippedNoSubscriptionId");
+        merged.remove("skippedTotal");
+        merged.remove("skippedRows");
+        merged.remove("skippedRowsTruncated");
+        merged.remove("skippedRowsReturned");
+        merged.remove("totalAmount");
+        merged.remove("generated_invoice_ids");
+        merged.remove("purchase_snapshot_ids_used");
+        merged.remove("purchase_snapshot_ids_truncated");
+        merged.remove("schedulesLinked");
+        merged.remove("subscription_schedule_link_miss");
+        merged.remove("invoice_entity_lines");
+        merged.remove("invoice_entity_line_miss");
+        merged.remove("invoice_generation_completed_at");
+        merged.remove("invoice_generation_job_completed_ok");
+        merged.remove("awaiting_invoice_lock");
+        merged.remove("has_failures");
+        merged.remove("auto_dlq_retry");
+        merged.remove("auto_dlq_retry_at");
+        merged.remove("auto_dlq_retry_error");
+        merged.remove("due_preview_query_failed");
+        merged.remove("due_preview_error");
+        merged.remove("job_level_error");
+        merged.remove("billing_run_missing");
+        merged.remove("due_date_missing");
+        merged.remove("unexpected_job_error");
+        merged.remove("unexpected_job_exception");
+        merged.put("invoices_scoped_by_billing_run", true);
+    }
+
     public InvoiceGenerationRunResponse getRun(UUID invoiceGenerationRunId) {
         StageRunDto stage = stageRunRepository.findById(invoiceGenerationRunId);
         if (stage == null || !STAGE_CODE.equals(stage.stageCode())) {
@@ -504,16 +645,143 @@ public class InvoiceGenerationService {
         return toRunResponse(stage, br);
     }
 
+    /**
+     * JSON report for the Invoice Generation Reports tab (KPIs + summary + skip breakdown).
+     */
+    public Map<String, Object> getReport(UUID invoiceGenerationRunId) {
+        StageRunDto stage = requireInvoiceGenerationStage(invoiceGenerationRunId);
+        Map<String, Object> sj = stage.summaryJson() != null
+                ? new LinkedHashMap<>(stage.summaryJson())
+                : new LinkedHashMap<>();
+
+        Map<String, Object> kpis = new LinkedHashMap<>();
+        Integer candidateRowsObj = intVal(sj, "candidateRows", "totalCount");
+        Integer invoicesCreatedObj = intVal(sj, "invoicesCreated", "successCount");
+        int candidateRows = candidateRowsObj != null ? candidateRowsObj : 0;
+        int invoicesCreated = invoicesCreatedObj != null ? invoicesCreatedObj : 0;
+        int voidedCount = countVoided(sj);
+        Integer pendingDue = intVal(sj, "pending_due_invoice_count", "pendingDueInvoiceCount");
+        int readyInvoiceCount = pendingDue != null
+                ? Math.max(0, pendingDue)
+                : Math.max(0, invoicesCreated - voidedCount);
+        kpis.put("candidateRows", candidateRows);
+        kpis.put("invoicesCreated", invoicesCreated);
+        kpis.put("readyInvoiceCount", readyInvoiceCount);
+        kpis.put("failureCount", intVal(sj, "failureCount", "invoicesFailed"));
+        kpis.put("skippedTotal", intVal(sj, "skippedTotal"));
+        kpis.put("skippedIneligible", intVal(sj, "skippedIneligible"));
+        kpis.put("skippedNoClientRole", intVal(sj, "skippedNoClientRole"));
+        kpis.put("skippedAlreadyInvoiced", intVal(sj, "skippedAlreadyInvoiced"));
+        kpis.put("totalAmount", decimalVal(sj, "totalAmount", "grandTotal"));
+        kpis.put("voidedCount", voidedCount);
+        kpis.put("voidedAmount", decimalVal(sj, "voided_invoices_amount", "voidedAmount"));
+        kpis.put("pending_due_invoice_count", pendingDue);
+
+        Map<String, Object> skippedByReason = new LinkedHashMap<>();
+        skippedByReason.put("INELIGIBLE", intVal(sj, "skippedIneligible"));
+        skippedByReason.put("NO_CLIENT_ROLE", intVal(sj, "skippedNoClientRole"));
+        skippedByReason.put("ALREADY_INVOICED", intVal(sj, "skippedAlreadyInvoiced"));
+        skippedByReason.put("NO_SUBSCRIPTION_ID", intVal(sj, "skippedNoSubscriptionId"));
+
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("invoiceGenerationRunId", stage.stageRunId().toString());
+        report.put("billingRunId", stage.billingRunId().toString());
+        report.put("stageRunCode", stage.stageRunCode());
+        report.put("statusCode", stage.statusCode());
+        report.put("leadStatus", resolveLeadStatus(stage));
+        report.put("startedAt", stage.startedOn() != null ? stage.startedOn().toString() : null);
+        report.put("endedAt", stage.endedOn() != null ? stage.endedOn().toString() : null);
+        report.put("invoicesLocked", resolveInvoicesLocked(stage));
+        report.put("kpis", kpis);
+        report.put("skippedByReason", skippedByReason);
+        report.put("skippedRows", sj.get("skippedRows") != null ? sj.get("skippedRows") : List.of());
+        report.put("summary", sj);
+        report.put("generatedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        return report;
+    }
+
+    /**
+     * CSV export for IG Reports tab (summary KPIs + skipped row details).
+     */
+    public byte[] exportRunCsv(UUID invoiceGenerationRunId) {
+        Map<String, Object> report = getReport(invoiceGenerationRunId);
+        StringBuilder csv = new StringBuilder();
+        csv.append("section,key,value\n");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> kpis = report.get("kpis") instanceof Map
+                ? (Map<String, Object>) report.get("kpis")
+                : Map.of();
+        for (Map.Entry<String, Object> e : kpis.entrySet()) {
+            csv.append("kpi,").append(csvEscape(e.getKey())).append(',').append(csvEscape(e.getValue())).append('\n');
+        }
+        csv.append("meta,statusCode,").append(csvEscape(report.get("statusCode"))).append('\n');
+        csv.append("meta,leadStatus,").append(csvEscape(report.get("leadStatus"))).append('\n');
+        csv.append("meta,startedAt,").append(csvEscape(report.get("startedAt"))).append('\n');
+        csv.append("meta,endedAt,").append(csvEscape(report.get("endedAt"))).append('\n');
+        csv.append('\n');
+        csv.append("clientName,roleId,reason,reasonMessage,subscriptionLabel,subscriptionPlanCode,cycleNumber,totalAmount,locationName,subscriptionInstanceId\n");
+        Object skippedRaw = report.get("skippedRows");
+        if (skippedRaw instanceof List<?> list) {
+            for (Object rowObj : list) {
+                if (!(rowObj instanceof Map<?, ?> row)) {
+                    continue;
+                }
+                csv.append(csvEscape(row.get("clientName"))).append(',');
+                csv.append(csvEscape(row.get("roleId"))).append(',');
+                csv.append(csvEscape(row.get("reason"))).append(',');
+                csv.append(csvEscape(row.get("reasonMessage"))).append(',');
+                csv.append(csvEscape(row.get("subscriptionLabel"))).append(',');
+                csv.append(csvEscape(row.get("subscriptionPlanCode"))).append(',');
+                csv.append(csvEscape(row.get("cycleNumber"))).append(',');
+                csv.append(csvEscape(row.get("totalAmount"))).append(',');
+                csv.append(csvEscape(row.get("locationName"))).append(',');
+                csv.append(csvEscape(row.get("subscriptionInstanceId"))).append('\n');
+            }
+        }
+        return csv.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private StageRunDto requireInvoiceGenerationStage(UUID invoiceGenerationRunId) {
+        StageRunDto stage = stageRunRepository.findById(invoiceGenerationRunId);
+        if (stage == null || !STAGE_CODE.equals(stage.stageCode())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Invoice generation run not found");
+        }
+        return stage;
+    }
+
+    private static int countVoided(Map<String, Object> sj) {
+        Object ids = sj.get("voided_invoice_ids");
+        if (ids instanceof List<?> list) {
+            return list.size();
+        }
+        Integer n = intVal(sj, "voidedCount");
+        return n != null ? n : 0;
+    }
+
+    private static String csvEscape(Object value) {
+        if (value == null) {
+            return "";
+        }
+        String s = String.valueOf(value);
+        if (s.contains(",") || s.contains("\"") || s.contains("\n")) {
+            return "\"" + s.replace("\"", "\"\"") + "\"";
+        }
+        return s;
+    }
+
     public PageResponse<InvoiceGenerationListItemDto> listRuns(
             UUID billingRunId, String status, int limit, int offset, String sortBy, String sortOrder) {
         if (billingRunId == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "billingRunId is required");
         }
-        List<StageRunDto> rows = stageRunRepository.listByBillingRunIdAndStageCode(
-                billingRunId, STAGE_CODE, status, limit, offset, sortBy, sortOrder);
-        int total = stageRunRepository.countByBillingRunIdAndStageCode(billingRunId, STAGE_CODE, status);
-        List<InvoiceGenerationListItemDto> data = rows.stream().map(this::toListItem).toList();
-        return PageResponse.of(data, total, limit, offset);
+        CompletableFuture<List<StageRunDto>> rowsF = readExecutors.supplyAsync(() ->
+                stageRunRepository.listByBillingRunIdAndStageCode(
+                        billingRunId, STAGE_CODE, status, limit, offset, sortBy, sortOrder));
+        CompletableFuture<Integer> totalF = readExecutors.supplyAsync(() ->
+                stageRunRepository.countByBillingRunIdAndStageCode(billingRunId, STAGE_CODE, status));
+        CompletableFuture.allOf(rowsF, totalF).join();
+        List<InvoiceGenerationListItemDto> data = rowsF.join().stream().map(this::toListItem).toList();
+        return PageResponse.of(data, totalF.join(), limit, offset);
     }
 
     private InvoiceGenerationListItemDto toListItem(StageRunDto s) {
@@ -579,6 +847,9 @@ public class InvoiceGenerationService {
         String mode = sj != null && sj.get("invoice_generation_mode") != null
                 ? String.valueOf(sj.get("invoice_generation_mode")) : "FULL";
         OffsetDateTime queuedAt = resolveQueuedAt(s);
+        // Prefer DB started_on; while QUEUED before the worker claims RUNNING,
+        // surface queued_at so clients can show "Started" immediately.
+        OffsetDateTime startedAt = s.startedOn() != null ? s.startedOn() : queuedAt;
         return new InvoiceGenerationRunResponse(
                 s.stageRunId(),
                 s.billingRunId(),
@@ -592,7 +863,7 @@ public class InvoiceGenerationService {
                 resolveInvoicesLocked(s),
                 mode,
                 queuedAt,
-                s.startedOn(),
+                startedAt,
                 s.endedOn(),
                 null,
                 progress,
@@ -637,7 +908,7 @@ public class InvoiceGenerationService {
             Map<String, Object> sj = s.summaryJson();
             boolean queued = sj != null && sj.get("queued_at") != null;
             OffsetDateTime scheduled = resolveInvoiceScheduledFor(s);
-            if (!queued && scheduled != null && scheduled.isAfter(OffsetDateTime.now())) {
+            if (!queued && scheduled != null && scheduled.isAfter(UtcClock.now())) {
                 return InvoiceGenerationLifecycle.SCHEDULED;
             }
             return InvoiceGenerationLifecycle.PENDING;
@@ -680,7 +951,81 @@ public class InvoiceGenerationService {
         }
     }
 
-    static Boolean resolveInvoicesLocked(StageRunDto s) {
+    /**
+     * Re-queues an existing IG stage so a job-level DLQ can be recovered (due-preview / unexpected failures).
+     * Blocked when invoices are locked or the stage is COMPLETED / CANCELLED.
+     */
+    @Transactional
+    public void reenqueueForDlqRecovery(UUID stageRunId, UUID triggeredBy) {
+        StageRunDto stage = stageRunRepository.findById(stageRunId);
+        if (stage == null || !STAGE_CODE.equals(stage.stageCode())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Invoice generation run not found");
+        }
+        if (Boolean.TRUE.equals(resolveInvoicesLocked(stage))) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Invoices are locked; cannot re-enqueue invoice generation for DLQ recovery");
+        }
+        String st = stage.statusCode();
+        if ("COMPLETED".equals(st) || "CANCELLED".equals(st)) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Invoice generation stage is " + st + "; cannot re-enqueue for DLQ recovery");
+        }
+
+        BillingRunDto billingRun = billingRunService.getBillingRun(stage.billingRunId());
+        assertInvoiceGenerationStageReady(billingRun);
+
+        Map<String, Object> patch = new LinkedHashMap<>();
+        patch.put("dlq_recovery_reenqueued_at", OffsetDateTime.now().toString());
+        if (triggeredBy != null) {
+            patch.put("triggered_by", triggeredBy.toString());
+        }
+        // Clear prior job-level blockers so the next run starts clean.
+        patch.put("billing_run_missing", false);
+        patch.put("due_date_missing", false);
+        patch.put("due_preview_query_failed", false);
+        patch.put("due_preview_error", null);
+        patch.put("unexpected_job_error", null);
+        patch.put("unexpected_job_exception", null);
+        patch.put("job_level_error", null);
+        stageRunRepository.mergeStageRunSummaryJson(stageRunId, patch, false);
+
+        if ("RUNNING".equals(st) || "QUEUED".equals(st) || "PENDING".equals(st)) {
+            log.info("invoice-generation DLQ recovery: stage already {} — republishing job stageRunId={}", st, stageRunId);
+            applicationEventPublisher.publishEvent(InvoiceGenerationQueuedEvent.of(stageRunId));
+            auditInvoiceGenerationStage(
+                    "JOB_REPUBLISHED",
+                    stageRunId,
+                    triggeredBy != null ? triggeredBy.toString() : "system",
+                    Map.of("billing_run_id", stage.billingRunId().toString(), "reason", "dlq_job_recovery", "prior_status", st));
+            return;
+        }
+
+        // WAITING / FAILED / IDLE / etc. → claim QUEUED and publish
+        boolean claimed = stageRunRepository.tryTransitionStageRunStatus(stageRunId, "QUEUED", st);
+        if (!claimed) {
+            claimed = stageRunRepository.trySetStageRunStatusByCode(stageRunId, "QUEUED");
+        }
+        stageRunRepository.ensureStartedOn(stageRunId);
+        Map<String, Object> queuedPatch = new LinkedHashMap<>();
+        queuedPatch.put("queued_at", OffsetDateTime.now().toString());
+        stageRunRepository.mergeStageRunSummaryJson(stageRunId, queuedPatch, false);
+        applicationEventPublisher.publishEvent(InvoiceGenerationQueuedEvent.of(stageRunId));
+        auditInvoiceGenerationStage(
+                "ENQUEUED",
+                stageRunId,
+                triggeredBy != null ? triggeredBy.toString() : "system",
+                Map.of(
+                        "billing_run_id", stage.billingRunId().toString(),
+                        "reason", "dlq_job_recovery",
+                        "prior_status", st != null ? st : "",
+                        "queued_claimed", claimed));
+        log.info("invoice-generation DLQ recovery enqueued: stageRunId={} priorStatus={} claimed={}",
+                stageRunId, st, claimed);
+    }
+
+    public static Boolean resolveInvoicesLocked(StageRunDto s) {
         Map<String, Object> sj = s.summaryJson();
         return sj != null && sj.get("invoices_locked_at") != null;
     }
@@ -813,75 +1158,102 @@ public class InvoiceGenerationService {
             requireStageRunForList(billingRunId, actualChargeRunId, ACTUAL_CHARGE_STAGE_CODE, "actual_charge_run_id");
         }
         String searchTrimmed = search != null && !search.isBlank() ? search.trim() : null;
-        Boolean isMockFilter = isMock;
-        if (actualChargeRunId != null && isMockFilter == null) {
-            isMockFilter = false;
-        }
-        // INVOICE_GENERATION runs do not insert subscription_billing_history rows tagged with this stage_run_id;
-        // draft invoices live on transactions.invoice and IDs are stored on the stage run as generated_invoice_ids.
+        final Boolean isMockFilter =
+                (actualChargeRunId != null && isMock == null) ? Boolean.FALSE : isMock;
+        // INVOICE_GENERATION drafts live on transactions.invoice by billing_run_id.
+        // New jobs set invoices_scoped_by_billing_run=true and omit generated_invoice_ids (50k-safe).
+        // Legacy jobs still carry generated_invoice_ids in summary_json.
         List<String> statusFilter = parseInvoiceStatusCsv(invoiceStatus);
         if (invoiceGenerationRunId != null) {
             StageRunDto sr = requireStageRunForList(billingRunId, invoiceGenerationRunId, STAGE_CODE, "invoice_generation_run_id");
+            if (isInvoicesScopedByBillingRun(sr.summaryJson())) {
+                CompletableFuture<List<SubscriptionBillingHistoryItemDto>> scopedRowsF =
+                        readExecutors.supplyAsync(() ->
+                                subscriptionBillingHistoryRepository.findInvoicesByBillingRunId(
+                                        billingRunId,
+                                        searchTrimmed,
+                                        limit,
+                                        offset,
+                                        statusFilter,
+                                        excludeVoid,
+                                        locationId));
+                CompletableFuture<Integer> scopedTotalF = readExecutors.supplyAsync(() ->
+                        subscriptionBillingHistoryRepository.countInvoicesByBillingRunId(
+                                billingRunId, searchTrimmed, statusFilter, excludeVoid, locationId));
+                CompletableFuture.allOf(scopedRowsF, scopedTotalF).join();
+                return PageResponse.of(scopedRowsF.join(), scopedTotalF.join(), limit, offset);
+            }
             ParsedGeneratedInvoiceIds parsed = parseGeneratedInvoiceIds(sr.summaryJson());
             if (parsed.keyPresent()) {
                 if (parsed.ids().isEmpty()) {
                     return PageResponse.of(List.of(), 0, limit, offset);
                 }
-                List<SubscriptionBillingHistoryItemDto> igRows =
-                        subscriptionBillingHistoryRepository.findByBillingRunIdAndInvoiceIds(
-                                billingRunId,
-                                parsed.ids(),
-                                searchTrimmed,
-                                limit,
-                                offset,
-                                statusFilter,
-                                excludeVoid,
-                                locationId);
-                int igTotal = subscriptionBillingHistoryRepository.countByBillingRunIdAndInvoiceIds(
-                        billingRunId, parsed.ids(), searchTrimmed, statusFilter, excludeVoid, locationId);
-                return PageResponse.of(igRows, igTotal, limit, offset);
+                CompletableFuture<List<SubscriptionBillingHistoryItemDto>> igRowsF =
+                        readExecutors.supplyAsync(() ->
+                                subscriptionBillingHistoryRepository.findByBillingRunIdAndInvoiceIds(
+                                        billingRunId,
+                                        parsed.ids(),
+                                        searchTrimmed,
+                                        limit,
+                                        offset,
+                                        statusFilter,
+                                        excludeVoid,
+                                        locationId));
+                CompletableFuture<Integer> igTotalF = readExecutors.supplyAsync(() ->
+                        subscriptionBillingHistoryRepository.countByBillingRunIdAndInvoiceIds(
+                                billingRunId, parsed.ids(), searchTrimmed, statusFilter, excludeVoid, locationId));
+                CompletableFuture.allOf(igRowsF, igTotalF).join();
+                return PageResponse.of(igRowsF.join(), igTotalF.join(), limit, offset);
             }
-            var legacyRows = subscriptionBillingHistoryRepository.findByBillingRunId(
-                    billingRunId,
-                    null,
-                    billingStatusCode,
-                    isMockFilter,
-                    mockChargeStatus,
-                    mockChargeFailureCode,
-                    searchTrimmed,
-                    limit,
-                    offset);
-            int legacyTotal = subscriptionBillingHistoryRepository.countByBillingRunId(
-                    billingRunId,
-                    null,
-                    billingStatusCode,
-                    isMockFilter,
-                    mockChargeStatus,
-                    mockChargeFailureCode,
-                    searchTrimmed);
-            return PageResponse.of(legacyRows, legacyTotal, limit, offset);
+            CompletableFuture<List<SubscriptionBillingHistoryItemDto>> legacyRowsF =
+                    readExecutors.supplyAsync(() ->
+                            subscriptionBillingHistoryRepository.findByBillingRunId(
+                                    billingRunId,
+                                    null,
+                                    billingStatusCode,
+                                    isMockFilter,
+                                    mockChargeStatus,
+                                    mockChargeFailureCode,
+                                    searchTrimmed,
+                                    limit,
+                                    offset));
+            CompletableFuture<Integer> legacyTotalF = readExecutors.supplyAsync(() ->
+                    subscriptionBillingHistoryRepository.countByBillingRunId(
+                            billingRunId,
+                            null,
+                            billingStatusCode,
+                            isMockFilter,
+                            mockChargeStatus,
+                            mockChargeFailureCode,
+                            searchTrimmed));
+            CompletableFuture.allOf(legacyRowsF, legacyTotalF).join();
+            return PageResponse.of(legacyRowsF.join(), legacyTotalF.join(), limit, offset);
         }
         UUID stageRunForHistory =
                 mockChargeRunId != null ? mockChargeRunId : actualChargeRunId;
-        var rows = subscriptionBillingHistoryRepository.findByBillingRunId(
-                billingRunId,
-                stageRunForHistory,
-                billingStatusCode,
-                isMockFilter,
-                mockChargeStatus,
-                mockChargeFailureCode,
-                searchTrimmed,
-                limit,
-                offset);
-        int total = subscriptionBillingHistoryRepository.countByBillingRunId(
-                billingRunId,
-                stageRunForHistory,
-                billingStatusCode,
-                isMockFilter,
-                mockChargeStatus,
-                mockChargeFailureCode,
-                searchTrimmed);
-        return PageResponse.of(rows, total, limit, offset);
+        CompletableFuture<List<SubscriptionBillingHistoryItemDto>> rowsF =
+                readExecutors.supplyAsync(() ->
+                        subscriptionBillingHistoryRepository.findByBillingRunId(
+                                billingRunId,
+                                stageRunForHistory,
+                                billingStatusCode,
+                                isMockFilter,
+                                mockChargeStatus,
+                                mockChargeFailureCode,
+                                searchTrimmed,
+                                limit,
+                                offset));
+        CompletableFuture<Integer> totalF = readExecutors.supplyAsync(() ->
+                subscriptionBillingHistoryRepository.countByBillingRunId(
+                        billingRunId,
+                        stageRunForHistory,
+                        billingStatusCode,
+                        isMockFilter,
+                        mockChargeStatus,
+                        mockChargeFailureCode,
+                        searchTrimmed));
+        CompletableFuture.allOf(rowsF, totalF).join();
+        return PageResponse.of(rowsF.join(), totalF.join(), limit, offset);
     }
 
     private StageRunDto requireStageRunForList(
@@ -902,8 +1274,23 @@ public class InvoiceGenerationService {
 
     private record ParsedGeneratedInvoiceIds(boolean keyPresent, List<UUID> ids) {}
 
+    private static boolean isInvoicesScopedByBillingRun(Map<String, Object> summaryJson) {
+        if (summaryJson == null) {
+            return false;
+        }
+        Object flag = summaryJson.get("invoices_scoped_by_billing_run");
+        if (flag instanceof Boolean b) {
+            return b;
+        }
+        if (flag != null) {
+            return "true".equalsIgnoreCase(String.valueOf(flag).trim());
+        }
+        return false;
+    }
+
     /**
-     * {@code InvoiceGenerationJobRunner} stores {@code generated_invoice_ids} on the stage summary when the job finishes.
+     * Legacy: {@code InvoiceGenerationJobRunner} stored {@code generated_invoice_ids} on the stage summary.
+     * New jobs use {@code invoices_scoped_by_billing_run} instead.
      */
     private static ParsedGeneratedInvoiceIds parseGeneratedInvoiceIds(Map<String, Object> summaryJson) {
         if (summaryJson == null || !summaryJson.containsKey("generated_invoice_ids")) {
@@ -1007,12 +1394,22 @@ public class InvoiceGenerationService {
         if (afterMerge == null) {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Stage run disappeared after lock merge");
         }
-        if (!"COMPLETED".equals(afterMerge.statusCode())) {
+        // Always stamp COMPLETED + ended_on on lock. If already COMPLETED but
+        // ended_on was never set (or status flipped without finish), ensure both.
+        if (!"COMPLETED".equals(afterMerge.statusCode()) || afterMerge.endedOn() == null) {
             Map<String, Object> summaryForComplete = new LinkedHashMap<>();
             if (afterMerge.summaryJson() != null) {
                 summaryForComplete.putAll(afterMerge.summaryJson());
             }
+            summaryForComplete.put("invoices_locked_at", lockedAt.toString());
+            summaryForComplete.put("awaiting_invoice_lock", false);
             stageRunRepository.completeStageRun(afterMerge.stageRunId(), summaryForComplete);
+        } else {
+            // Already COMPLETED with ended_on — still ensure lock stamp is present.
+            Map<String, Object> ensureLock = new LinkedHashMap<>();
+            ensureLock.put("invoices_locked_at", lockedAt.toString());
+            ensureLock.put("awaiting_invoice_lock", false);
+            stageRunRepository.mergeStageRunSummaryJson(afterMerge.stageRunId(), ensureLock, true);
         }
 
         advancePipelineAfterInvoiceGenerationLock(billingRunId, request.lockedBy());
@@ -1408,5 +1805,106 @@ public class InvoiceGenerationService {
         String revertActor = request.requestedBy() != null && !request.requestedBy().isBlank() ? request.requestedBy() : "system";
         auditInvoiceGenerationStage("INVOICE_REVERT_PENDING", invoiceGenerationRunId, revertActor, revertAudit);
         return InvoiceGenerationInvoiceBatchResponse.revertResult(reverted, errors.size(), results, errors);
+    }
+
+    /**
+     * Schedule invoice generation for a future UTC instant. Does not enqueue the worker until due.
+     */
+    @Transactional
+    public Map<String, Object> scheduleRun(InvoiceGenerationScheduledRequest request) {
+        UUID billingRunId = request.billingRunId();
+        OffsetDateTime when = request.scheduledFor().withOffsetSameInstant(ZoneOffset.UTC);
+        if (!when.isAfter(UtcClock.now())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "scheduledFor must be in the future (UTC)");
+        }
+
+        BillingRunDto billingRun = billingRunService.getBillingRun(billingRunId);
+        if (billingRun == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Billing run not found: " + billingRunId);
+        }
+        assertInvoiceGenerationStageReady(billingRun);
+
+        StageRunDto target = resolveStageRun(billingRunId, request.stageRunId());
+        if (target == null) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    "No INVOICE_GENERATION stage run; approve due preview first.");
+        }
+
+        String status = target.statusCode();
+        if ("RUNNING".equals(status) || "QUEUED".equals(status)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Cannot schedule while invoice generation is " + status);
+        }
+        if ("WAITING".equals(status) || "COMPLETED".equals(status)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Cannot schedule while invoice generation is " + status
+                            + "; unlock/regenerate or start a new execution first");
+        }
+        if (!("IDLE".equals(status) || "PENDING".equals(status) || "SCHEDULED".equals(status)
+                || "FAILED".equals(status) || "CANCELLED".equals(status))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Cannot schedule invoice generation from status " + status);
+        }
+
+        UUID stageRunId = target.stageRunId();
+        if ("FAILED".equals(status) || "CANCELLED".equals(status)) {
+            // Reuse the same stage row so run detail / monitor don't keep a stale CANCELLED sibling.
+            stageRunRepository.prepareStageRunForReschedule(stageRunId, when);
+        } else {
+            stageRunRepository.updateScheduledFor(stageRunId, when);
+        }
+
+        if (!stageRunRepository.trySetStageRunStatusByCode(stageRunId, "SCHEDULED")) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Could not set stage status to SCHEDULED");
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        StageRunDto refreshed = stageRunRepository.findById(stageRunId);
+        if (refreshed != null && refreshed.summaryJson() != null) {
+            summary.putAll(refreshed.summaryJson());
+        }
+        String whenIso = DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(when);
+        summary.put("scheduled_for", whenIso);
+        summary.put("invoice_scheduled_for", whenIso);
+        summary.put("timezone", request.timezone() != null && !request.timezone().isBlank()
+                ? request.timezone() : "UTC");
+        summary.putIfAbsent("invoice_generation_mode", "FULL");
+        stageRunRepository.updateStageRunSummary(stageRunId, summary);
+
+        auditInvoiceGenerationStage(
+                "SCHEDULED",
+                stageRunId,
+                actorFromTriggeredBy(request.triggeredBy()),
+                Map.of(
+                        "billing_run_id", billingRunId.toString(),
+                        "scheduled_for", whenIso,
+                        "timezone", String.valueOf(summary.get("timezone"))));
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("scheduledRunId", stageRunId);
+        body.put("billingRunId", billingRunId);
+        body.put("scheduledFor", whenIso);
+        body.put("statusCode", "SCHEDULED");
+        body.put("createdAt", DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(UtcClock.now()));
+        return body;
+    }
+
+    @Transactional
+    public void cancelScheduledRun(UUID scheduledRunId) {
+        StageRunDto s = stageRunRepository.findById(scheduledRunId);
+        if (s == null || !STAGE_CODE.equals(s.stageCode())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Scheduled invoice generation not found");
+        }
+        if (!"SCHEDULED".equals(s.statusCode())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Run is not SCHEDULED");
+        }
+        stageRunRepository.cancelStageRun(scheduledRunId, "Schedule cancelled");
+        auditInvoiceGenerationStage(
+                "SCHEDULE_CANCELLED",
+                scheduledRunId,
+                "system",
+                Map.of("billing_run_id", s.billingRunId().toString(), "reason", "Schedule cancelled"));
     }
 }

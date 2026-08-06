@@ -8,7 +8,7 @@ import io.clubone.billing.repo.CrmDashboardRepository;
 import io.clubone.billing.repo.DashboardRepository;
 import io.clubone.billing.repo.LocationLevelRepository;
 import io.clubone.billing.security.AccessContext;
-import io.clubone.billing.security.TenantContext;
+import io.clubone.billing.util.BillingReadExecutors;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import org.springframework.stereotype.Service;
@@ -19,10 +19,7 @@ import java.time.YearMonth;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 
 /**
  * Service for dashboard operations.
@@ -34,16 +31,8 @@ public class DashboardService {
     private final LocationLevelRepository locationLevelRepository;
     private final BillingRunRepository billingRunRepository;
     private final CrmDashboardRepository crmDashboardRepository;
+    private final BillingReadExecutors readExecutors;
     private static final Set<String> ALLOWED_SEGMENTS = Set.of("7D", "30D", "MTD", "YTD");
-
-    /** Bounded pool for contract overview fan-out (2 tasks: finance + CRM). */
-    private static final ExecutorService CONTRACT_EXEC = Executors.newFixedThreadPool(
-            2,
-            r -> {
-                Thread t = new Thread(r, "dashboard-contract");
-                t.setDaemon(true);
-                return t;
-            });
 
     /** Short TTL — overview is analytical; repeat loads within 60s hit memory. */
     private final Cache<String, Map<String, Object>> contractOverviewCache =
@@ -56,21 +45,36 @@ public class DashboardService {
             DashboardRepository dashboardRepository,
             LocationLevelRepository locationLevelRepository,
             BillingRunRepository billingRunRepository,
-            CrmDashboardRepository crmDashboardRepository) {
+            CrmDashboardRepository crmDashboardRepository,
+            BillingReadExecutors readExecutors) {
         this.dashboardRepository = dashboardRepository;
         this.locationLevelRepository = locationLevelRepository;
         this.billingRunRepository = billingRunRepository;
         this.crmDashboardRepository = crmDashboardRepository;
+        this.readExecutors = readExecutors;
     }
 
     public DashboardKPIDto getKPIs(UUID locationId, String dateRange) {
         LocalDate dateFrom = parseDateRange(dateRange);
-        
-        Map<String, Object> summaryStats = dashboardRepository.getSummaryStats(locationId, dateFrom);
-        List<Map<String, Object>> lastRunsByStage = dashboardRepository.getLastRunsByStage(locationId, dateFrom);
-        Map<String, Object> forecastData = dashboardRepository.getForecastData(locationId);
-        Map<String, Object> dlqSummary = dashboardRepository.getDLQSummary(locationId);
-        List<Map<String, Object>> recentActivity = dashboardRepository.getRecentActivity(locationId, 10);
+
+        CompletableFuture<Map<String, Object>> summaryF =
+                readExecutors.supplyAsync(() -> dashboardRepository.getSummaryStats(locationId, dateFrom));
+        CompletableFuture<List<Map<String, Object>>> lastRunsF =
+                readExecutors.supplyAsync(() -> dashboardRepository.getLastRunsByStage(locationId, dateFrom));
+        CompletableFuture<Map<String, Object>> forecastF =
+                readExecutors.supplyAsync(() -> dashboardRepository.getForecastData(locationId));
+        CompletableFuture<Map<String, Object>> dlqF =
+                readExecutors.supplyAsync(() -> dashboardRepository.getDLQSummary(locationId));
+        CompletableFuture<List<Map<String, Object>>> recentF =
+                readExecutors.supplyAsync(() -> dashboardRepository.getRecentActivity(locationId, 10));
+
+        CompletableFuture.allOf(summaryF, lastRunsF, forecastF, dlqF, recentF).join();
+
+        Map<String, Object> summaryStats = summaryF.join();
+        List<Map<String, Object>> lastRunsByStage = lastRunsF.join();
+        Map<String, Object> forecastData = forecastF.join();
+        Map<String, Object> dlqSummary = dlqF.join();
+        List<Map<String, Object>> recentActivity = recentF.join();
 
         // Calculate success rate
         Long totalAttempts = ((Number) summaryStats.getOrDefault("total_attempts", 0L)).longValue();
@@ -210,8 +214,47 @@ public class DashboardService {
         LocalDate from = dueDateFrom != null ? dueDateFrom : prevYm.atDay(1);
         LocalDate to = dueDateTo != null ? dueDateTo : nextYm.atEndOfMonth();
         List<UUID> locs = resolveLocations(locationId, locationLevelId, includeChildLocations);
-        Map<String, Object> summaryRaw = dashboardRepository.getOverviewSummary(from, to, asOfFrom, asOfTo, locs, status, currentStage);
-        Map<String, Object> forecast = dashboardRepository.getOverviewForecast(locs);
+
+        LocalDate trendFrom = LocalDate.now().minusDays(6);
+        LocalDate trendTo = LocalDate.now();
+
+        // Independent analytical reads — bounded fan-out (tenant-aware)
+        CompletableFuture<Map<String, Object>> summaryRawF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewSummary(from, to, asOfFrom, asOfTo, locs, status, currentStage));
+        CompletableFuture<Map<String, Object>> forecastF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewForecast(locs));
+        CompletableFuture<List<Map<String, Object>>> runHealthF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewRunHealth(from, to, locs));
+        CompletableFuture<List<Map<String, Object>>> billedCollectedF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewBilledCollectedDaily(
+                        from, to, asOfFrom, asOfTo, locs, status, currentStage));
+        CompletableFuture<List<Map<String, Object>>> runStartsF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewRunStarts7d(trendFrom, trendTo, locs));
+        CompletableFuture<List<Map<String, Object>>> realizationF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewRealization7d(trendFrom, trendTo, locs));
+        CompletableFuture<List<Map<String, Object>>> stageDistF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewStageDistribution(from, to, locs, status, currentStage));
+        CompletableFuture<List<Map<String, Object>>> topRevenueF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewTopRevenueLocations(from, to, locs, Math.max(1, limitPlans)));
+        CompletableFuture<Map<String, Object>> contractsF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewContracts(locs));
+        CompletableFuture<List<Map<String, Object>>> frequencyF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewFrequencyMix(locs));
+        CompletableFuture<Long> recentCountF = readExecutors.supplyAsync(
+                () -> dashboardRepository.countOverviewRecentRuns(
+                        from, to, asOfFrom, asOfTo, locs, status, currentStage));
+        CompletableFuture<List<BillingRunDto>> recentListF = readExecutors.supplyAsync(
+                () -> billingRunRepository.findBillingRunsForDashboardOverview(
+                        from, to, asOfFrom, asOfTo, locs, status, currentStage, limitRuns, offsetRuns));
+
+        CompletableFuture.allOf(
+                summaryRawF, forecastF, runHealthF,
+                billedCollectedF, runStartsF, realizationF, stageDistF,
+                topRevenueF, contractsF, frequencyF,
+                recentCountF, recentListF).join();
+
+        Map<String, Object> summaryRaw = summaryRawF.join();
+        Map<String, Object> forecast = forecastF.join();
 
         long invoiceCount = num(summaryRaw.get("invoice_count")).longValue();
         double totalAmount = num(summaryRaw.get("total_amount")).doubleValue();
@@ -253,10 +296,17 @@ public class DashboardService {
         summary.put("collection_rate_pct", totalAmount > 0 ? (collectedAmount / totalAmount) * 100.0 : 0.0);
         summary.put("failed_payments", failureCount);
 
-        List<Map<String, Object>> runHealthRows = dashboardRepository.getOverviewRunHealth(from, to, locs);
+        List<Map<String, Object>> runHealthRows = runHealthF.join();
         StageTotals invoicedTotals = resolveInvoicedTotals(runHealthRows);
         if (invoicedTotals.amount() > 0) {
             summary.put("total_invoiced", invoicedTotals.amount());
+            // When billing history has no amounts yet (common after invoice-gen, before charge),
+            // align billed KPI with stage-derived invoice totals so tiles match the funnel.
+            if (totalAmount <= 0) {
+                totalAmount = invoicedTotals.amount();
+                summary.put("total_amount", totalAmount);
+                summary.put("total_billed_amount", totalAmount);
+            }
         }
         if (invoiceCount <= 0 && invoicedTotals.count() > 0) {
             invoiceCount = invoicedTotals.count();
@@ -265,29 +315,32 @@ public class DashboardService {
             summary.put("failure_rate_pct", pct(failureCount, invoiceCount));
             summary.put("risk_index", pct(failureCount + unresolvedDlq, invoiceCount));
         }
+        // Open AR: if history AR is empty but invoices exist and nothing collected, treat as outstanding.
+        if (outstandingAr <= 0 && totalAmount > collectedAmount) {
+            outstandingAr = Math.max(0.0, totalAmount - collectedAmount);
+            summary.put("outstanding_amount", outstandingAr);
+            if (inFlightAmount <= 0) {
+                summary.put("in_flight_amount", outstandingAr);
+            }
+        }
+        summary.put("collection_rate_pct", totalAmount > 0 ? (collectedAmount / totalAmount) * 100.0 : 0.0);
         Map<String, Object> runHealth = mapRunHealth(runHealthRows);
         runHealth.put("aggregate", mapAggregateRunHealth(summaryRaw));
 
         Map<String, Object> trends = new LinkedHashMap<>();
-        trends.put(
-                DashboardApiConstants.JSON_BILLED_COLLECTED,
-                safeList(
-                        dashboardRepository.getOverviewBilledCollectedDaily(
-                                from, to, asOfFrom, asOfTo, locs, status, currentStage)));
-        trends.put("run_starts_7d", safeList(dashboardRepository.getOverviewRunStarts7d(LocalDate.now().minusDays(6), LocalDate.now(), locs)));
-        trends.put("realization_7d", safeList(dashboardRepository.getOverviewRealization7d(LocalDate.now().minusDays(6), LocalDate.now(), locs)));
-        trends.put("stage_distribution", safeList(dashboardRepository.getOverviewStageDistribution(from, to, locs, status, currentStage)));
+        trends.put(DashboardApiConstants.JSON_BILLED_COLLECTED, safeList(billedCollectedF.join()));
+        trends.put("run_starts_7d", safeList(runStartsF.join()));
+        trends.put("realization_7d", safeList(realizationF.join()));
+        trends.put("stage_distribution", safeList(stageDistF.join()));
 
         Map<String, Object> locations = new LinkedHashMap<>();
-        locations.put("top_revenue_locations", safeList(dashboardRepository.getOverviewTopRevenueLocations(from, to, locs, Math.max(1, limitPlans))));
+        locations.put("top_revenue_locations", safeList(topRevenueF.join()));
 
-        Map<String, Object> contracts = new LinkedHashMap<>(dashboardRepository.getOverviewContracts(locs));
-        contracts.put("frequency_mix", safeList(dashboardRepository.getOverviewFrequencyMix(locs)));
+        Map<String, Object> contracts = new LinkedHashMap<>(contractsF.join());
+        contracts.put("frequency_mix", safeList(frequencyF.join()));
 
-        long totalRecent = dashboardRepository.countOverviewRecentRuns(from, to, asOfFrom, asOfTo, locs, status, currentStage);
-        List<BillingRunDto> recentDtos =
-                billingRunRepository.findBillingRunsForDashboardOverview(
-                        from, to, asOfFrom, asOfTo, locs, status, currentStage, limitRuns, offsetRuns);
+        long totalRecent = recentCountF.join();
+        List<BillingRunDto> recentDtos = recentListF.join();
         Map<String, Object> recentRuns = new LinkedHashMap<>();
         recentRuns.put("rows", recentDtos == null ? List.of() : recentDtos);
         recentRuns.put("total", totalRecent);
@@ -319,41 +372,35 @@ public class DashboardService {
             String currentStage,
             Map<String, Object> summary,
             List<Map<String, Object>> runHealthRows) {
+        CompletableFuture<List<Map<String, Object>>> paymentF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewPaymentMethodSegments(
+                        from, to, asOfFrom, asOfTo, locs, status, currentStage));
+        CompletableFuture<List<Map<String, Object>>> gatewayF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewGatewaySegments(
+                        from, to, asOfFrom, asOfTo, locs, status, currentStage));
+        CompletableFuture<List<Map<String, Object>>> arF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewArAgingSegments(
+                        from, to, asOfFrom, asOfTo, locs, status, currentStage));
+        CompletableFuture<List<Map<String, Object>>> invoiceStatusF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewInvoiceStatusSegments(
+                        from, to, asOfFrom, asOfTo, locs, status, currentStage));
+        CompletableFuture<List<Map<String, Object>>> funnelF = readExecutors.supplyAsync(
+                () -> buildFixedFunnelStages(from, to, asOfFrom, asOfTo, locs, status, currentStage));
+        CompletableFuture<List<Map<String, Object>>> failuresF = readExecutors.supplyAsync(
+                () -> dashboardRepository.getOverviewFailureReasons(
+                        from, to, asOfFrom, asOfTo, locs, status, currentStage));
+
+        CompletableFuture.allOf(paymentF, gatewayF, arF, invoiceStatusF, funnelF, failuresF).join();
+
         Map<String, Object> charts = new LinkedHashMap<>();
-        charts.put(
-                DashboardApiConstants.JSON_PAYMENT_METHOD_SPLIT,
-                wrapSegments(
-                        safeList(
-                                dashboardRepository.getOverviewPaymentMethodSegments(
-                                        from, to, asOfFrom, asOfTo, locs, status, currentStage))));
-        charts.put(
-                DashboardApiConstants.JSON_COLLECTION_BY_GATEWAY,
-                wrapSegments(
-                        safeList(
-                                dashboardRepository.getOverviewGatewaySegments(
-                                        from, to, asOfFrom, asOfTo, locs, status, currentStage))));
-        charts.put(
-                DashboardApiConstants.JSON_AR_AGING,
-                wrapSegments(
-                        safeList(
-                                dashboardRepository.getOverviewArAgingSegments(
-                                        from, to, asOfFrom, asOfTo, locs, status, currentStage))));
-        charts.put(
-                DashboardApiConstants.JSON_INVOICE_STATUS,
-                wrapSegments(
-                        safeList(
-                                dashboardRepository.getOverviewInvoiceStatusSegments(
-                                        from, to, asOfFrom, asOfTo, locs, status, currentStage))));
+        charts.put(DashboardApiConstants.JSON_PAYMENT_METHOD_SPLIT, wrapSegments(safeList(paymentF.join())));
+        charts.put(DashboardApiConstants.JSON_COLLECTION_BY_GATEWAY, wrapSegments(safeList(gatewayF.join())));
+        charts.put(DashboardApiConstants.JSON_AR_AGING, wrapSegments(safeList(arF.join())));
+        charts.put(DashboardApiConstants.JSON_INVOICE_STATUS, wrapSegments(safeList(invoiceStatusF.join())));
         Map<String, Object> funnel = new LinkedHashMap<>();
-        funnel.put(
-                DashboardApiConstants.JSON_STAGES,
-                buildFixedFunnelStages(from, to, asOfFrom, asOfTo, locs, status, currentStage));
+        funnel.put(DashboardApiConstants.JSON_STAGES, funnelF.join());
         charts.put(DashboardApiConstants.JSON_FUNNEL, funnel);
-        charts.put(
-                "failed_payments",
-                safeList(
-                        dashboardRepository.getOverviewFailureReasons(
-                                from, to, asOfFrom, asOfTo, locs, status, currentStage)));
+        charts.put("failed_payments", safeList(failuresF.join()));
         charts.put(DashboardApiConstants.JSON_ALERTS, buildAlerts(summary));
         return charts;
     }
@@ -602,11 +649,10 @@ public class DashboardService {
         }
 
         // Capture request ThreadLocal — worker threads do not inherit TenantContext.
-        final TenantContext tenantCtx = TenantContext.get();
+        // BillingReadExecutors.supplyAsync already restores TenantContext.
 
         CompletableFuture<Map<String, Object>> financeF =
-                supplyAsyncWithTenant(
-                        tenantCtx,
+                readExecutors.supplyAsync(
                         () -> {
                             // Short-circuit: only hit heavy billing_run/SBH path when invoices are empty.
                             Map<String, Map<String, Object>> invPair =
@@ -653,8 +699,7 @@ public class DashboardService {
                             return finance;
                         });
         CompletableFuture<Map<String, Object>> crmF =
-                supplyAsyncWithTenant(
-                        tenantCtx,
+                readExecutors.supplyAsync(
                         () -> {
                             LocalDate checkinLoadFrom = chartFromF;
                             LocalDate checkinLoadTo = chartToF;
@@ -1085,28 +1130,6 @@ public class DashboardService {
         return alerts;
     }
 
-    /**
-     * Run async work with the request {@link TenantContext} restored onto the worker thread
-     * (ThreadLocal is not inherited by {@link ExecutorService} threads).
-     */
-    private static <T> CompletableFuture<T> supplyAsyncWithTenant(TenantContext ctx, Supplier<T> supplier) {
-        return CompletableFuture.supplyAsync(() -> {
-            TenantContext previous = TenantContext.get();
-            try {
-                if (ctx != null) {
-                    TenantContext.set(ctx);
-                }
-                return supplier.get();
-            } finally {
-                if (previous != null) {
-                    TenantContext.set(previous);
-                } else {
-                    TenantContext.clear();
-                }
-            }
-        }, CONTRACT_EXEC);
-    }
-
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> asMapList(Object o) {
         if (!(o instanceof List<?> l)) return List.of();
@@ -1123,22 +1146,49 @@ public class DashboardService {
             List<UUID> locs,
             String status,
             String currentStage) {
-        long schedulesDue = dashboardRepository.getOverviewSchedulesDueCount(from, to, locs);
+        Map<String, Object> schedulesDue =
+                dashboardRepository.getOverviewSchedulesDueTotals(from, to, locs);
         Map<String, Object> agg =
                 dashboardRepository.getOverviewFunnelAggregate(
                         from, to, asOfFrom, asOfTo, locs, status, currentStage);
-        long billingPreview = num(agg.get("billing_preview_count")).longValue();
-        long invoicesGenerated = num(agg.get("invoice_generated_count")).longValue();
-        long paymentAttempted = num(agg.get("payment_attempted_count")).longValue();
-        long paymentSuccessful = num(agg.get("payment_success_count")).longValue();
 
         List<Map<String, Object>> stages = new ArrayList<>();
-        stages.add(Map.of("name", "Schedules Due", "value", schedulesDue));
-        stages.add(Map.of("name", "Billing Preview", "value", billingPreview));
-        stages.add(Map.of("name", "Invoice Generated", "value", invoicesGenerated));
-        stages.add(Map.of("name", "Payment Attempted", "value", paymentAttempted));
-        stages.add(Map.of("name", "Payment Successful", "value", paymentSuccessful));
+        stages.add(
+                funnelStage(
+                        "Schedules Due",
+                        num(schedulesDue.get("schedule_amount")).doubleValue(),
+                        num(schedulesDue.get("schedule_count")).longValue()));
+        stages.add(
+                funnelStage(
+                        "Billing Preview",
+                        num(agg.get("billing_preview_amount")).doubleValue(),
+                        num(agg.get("billing_preview_count")).longValue()));
+        stages.add(
+                funnelStage(
+                        "Invoice Generated",
+                        num(agg.get("invoice_generated_amount")).doubleValue(),
+                        num(agg.get("invoice_generated_count")).longValue()));
+        stages.add(
+                funnelStage(
+                        "Payment Attempted",
+                        num(agg.get("payment_attempted_amount")).doubleValue(),
+                        num(agg.get("payment_attempted_count")).longValue()));
+        stages.add(
+                funnelStage(
+                        "Payment Successful",
+                        num(agg.get("payment_success_amount")).doubleValue(),
+                        num(agg.get("payment_success_count")).longValue()));
         return stages;
+    }
+
+    /** Funnel row: money in {@code value}/{@code amount}; optional {@code count} for UI secondary display. */
+    private static Map<String, Object> funnelStage(String name, double amount, long count) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("name", name);
+        m.put("value", amount);
+        m.put("amount", amount);
+        m.put("count", count);
+        return m;
     }
 
     private static Map<String, Object> mapAggregateRunHealth(Map<String, Object> summaryRaw) {

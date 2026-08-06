@@ -11,8 +11,11 @@ import io.clubone.billing.repo.DuePreviewRepository;
 import io.clubone.billing.repo.SnapshotRepository;
 import io.clubone.billing.repo.StageRunRepository;
 import io.clubone.billing.api.dto.StageRunDto;
+import io.clubone.billing.service.duepreview.DuePreviewQueuedEvent;
+import io.clubone.billing.util.BillingReadExecutors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,6 +28,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
@@ -44,6 +48,8 @@ public class DuePreviewService {
     private final AuditLogRepository auditLogRepository;
     private final SnapshotRepository snapshotRepository;
     private final ApprovalRepository approvalRepository;
+    private final BillingReadExecutors readExecutors;
+    private final ApplicationEventPublisher applicationEventPublisher;
 
     public DuePreviewService(
             DuePreviewRepository duePreviewRepository,
@@ -52,7 +58,9 @@ public class DuePreviewService {
             S3Service s3Service,
             AuditLogRepository auditLogRepository,
             SnapshotRepository snapshotRepository,
-            ApprovalRepository approvalRepository) {
+            ApprovalRepository approvalRepository,
+            BillingReadExecutors readExecutors,
+            ApplicationEventPublisher applicationEventPublisher) {
         this.duePreviewRepository = duePreviewRepository;
         this.billingRunRepository = billingRunRepository;
         this.stageRunRepository = stageRunRepository;
@@ -60,6 +68,8 @@ public class DuePreviewService {
         this.auditLogRepository = auditLogRepository;
         this.snapshotRepository = snapshotRepository;
         this.approvalRepository = approvalRepository;
+        this.readExecutors = readExecutors;
+        this.applicationEventPublisher = applicationEventPublisher;
     }
 
     /**
@@ -83,10 +93,13 @@ public class DuePreviewService {
      */
     public PageResponse<DuePreviewRunHistoryDto> listDuePreviewRunHistory(
             UUID billingRunId, int limit, int offset, String sortBy, String sortOrder) {
-        int total = duePreviewRepository.countDuePreviewRunHistory(billingRunId);
-        List<DuePreviewRunHistoryDto> data = duePreviewRepository.findDuePreviewRunHistory(
-                billingRunId, limit, offset, sortBy, sortOrder);
-        return PageResponse.of(data, total, limit, offset);
+        CompletableFuture<Integer> totalF =
+                readExecutors.supplyAsync(() -> duePreviewRepository.countDuePreviewRunHistory(billingRunId));
+        CompletableFuture<List<DuePreviewRunHistoryDto>> dataF = readExecutors.supplyAsync(
+                () -> duePreviewRepository.findDuePreviewRunHistory(
+                        billingRunId, limit, offset, sortBy, sortOrder));
+        CompletableFuture.allOf(totalF, dataF).join();
+        return PageResponse.of(dataF.join(), totalF.join(), limit, offset);
     }
 
     /**
@@ -194,6 +207,15 @@ public class DuePreviewService {
      *         totalDiscount, summary_json) and "invoices" (list of row maps from CSV, each with {@code line_items})
      */
     public Map<String, Object> getDuePreviewRunDetails(UUID stageRunId) {
+        return getDuePreviewRunDetails(stageRunId, true, null);
+    }
+
+    /**
+     * @param includeInvoices when false, skip S3 CSV download (fast poll for QUEUED/RUNNING/COMPLETED)
+     * @param invoiceLimit    when includeInvoices, optional max CSV rows returned (null = all; use for UI caps)
+     */
+    public Map<String, Object> getDuePreviewRunDetails(
+            UUID stageRunId, boolean includeInvoices, Integer invoiceLimit) {
         StageRunDto stageRun = stageRunRepository.findById(stageRunId);
         if (stageRun == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Stage run not found: " + stageRunId);
@@ -204,8 +226,22 @@ public class DuePreviewService {
 
         Map<String, Object> summaryJson = stageRun.summaryJson() != null ? new HashMap<>(stageRun.summaryJson()) : new HashMap<>();
         String s3Path = resolveDuePreviewS3Path(stageRun.billingRunId(), stageRun.stageRunId(), summaryJson);
+        String status = stageRun.statusCode();
+        // Poll while async job runs — return progress without requiring S3 yet
         if (s3Path == null || s3Path.isBlank()) {
+            if (isDuePreviewInFlight(status) || "FAILED".equals(status) || "CANCELLED".equals(status)) {
+                Map<String, Object> inFlight = buildInFlightDuePreviewDetails(stageRun, summaryJson);
+                enrichRunCreator(inFlight, stageRun.stageRunId(), summaryJson);
+                return inFlight;
+            }
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Due preview file not found in S3 for run: " + stageRunId);
+        }
+        // Status-only / progress poll after COMPLETED — avoid loading 30k+ CSV rows into HTTP
+        if (!includeInvoices) {
+            Map<String, Object> summaryOnly =
+                    buildSummaryOnlyDuePreviewDetails(stageRun, summaryJson, s3Path);
+            enrichRunCreator(summaryOnly, stageRun.stageRunId(), summaryJson);
+            return summaryOnly;
         }
         if (summaryJson.get("s3_path") == null) {
             summaryJson.put("s3_path", s3Path);
@@ -219,6 +255,11 @@ public class DuePreviewService {
 
         String csvContent = s3Service.downloadFromS3(s3Path);
         List<Map<String, Object>> invoices = parseDuePreviewCsv(csvContent);
+        if (invoiceLimit != null && invoiceLimit >= 0 && invoices.size() > invoiceLimit) {
+            invoices = new ArrayList<>(invoices.subList(0, invoiceLimit));
+            summaryJson.put("invoices_truncated", true);
+            summaryJson.put("invoice_limit", invoiceLimit);
+        }
         ensureInvoiceAttributes(invoices);
 
         Set<UUID> scheduleIds = invoices.stream()
@@ -249,12 +290,14 @@ public class DuePreviewService {
         run.put("run_code", stageRun.stageRunCode());
         run.put("generated_at", stageRun.endedOn() != null ? stageRun.endedOn() : stageRun.startedOn());
         run.put("status", stageRun.statusCode());
+        run.put("status_display_name", stageRun.statusDisplayName());
         run.put("filename", summaryJson.get("file_name"));
         run.put("invoices", invoicesCount);
         run.put("totalAmount", totalAmount != null ? totalAmount : BigDecimal.ZERO);
         run.put("totalTax", totalTaxFromRows);
         run.put("totalDiscount", totalDiscountFromRows);
         run.put("summary_json", summaryJson);
+        putStageRunCreator(run, stageRun.stageRunId(), summaryJson);
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("run", run);
@@ -641,23 +684,21 @@ public class DuePreviewService {
     }
 
     /**
-     * Generate due preview file and upload to S3. Uses the existing billing_run (request.billRunId); creates only
-     * billing_stage_run and optionally billing_audit_log and billing_run_snapshot.
-     *
-     * @param request The due preview request (must reference an existing billing_run_id)
-     * @return Response with billing_run_id, stage_run_id, S3 path and summary
+     * Enqueue async due-preview generation (enterprise path for 30k+ rows).
+     * HTTP returns immediately with {@code status=QUEUED} and {@code pollUrl}; worker builds CSV + S3.
      */
-    /**
-     * Not {@code @Transactional}: S3 upload must not hold a DB connection.
-     */
+    @Transactional
     public Map<String, Object> generateDuePreview(DuePreviewRequest request) {
-        log.info("Generating due preview: billRunId={}, dueDate={}, requestLocationId={}, createdBy={}",
+        log.info("Enqueue due preview: billRunId={}, dueDate={}, requestLocationId={}, createdBy={}",
                 request.billRunId(), request.dueDate(), request.locationId(), request.createdBy());
 
         UUID billingRunId = request.billRunId();
         var existingRun = billingRunRepository.findById(billingRunId);
         if (existingRun == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Billing run not found: " + billingRunId);
+        }
+        if (request.dueDate() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "dueDate is required");
         }
 
         UUID createdByUuid = null;
@@ -667,135 +708,204 @@ public class DuePreviewService {
             // leave null if not a valid UUID
         }
 
-        // Create and start a stage run for DUE_PREVIEW under the existing billing run
+        // Create PENDING stage without marking RUNNING yet (worker calls startStageRun)
         UUID stageRunId = stageRunRepository.createStageRun(
                 billingRunId,
                 "DUE_PREVIEW",
                 OffsetDateTime.now(),
-                null, // idempotencyKey
-                createdByUuid);
-        stageRunRepository.startStageRun(stageRunId);
-        log.info("Created and started DUE_PREVIEW stage run: stageRunId={}", stageRunId);
+                null,
+                createdByUuid,
+                false);
 
-        // Match subscriptions on any location in the run's persisted scope (junction + primary), not only request.locationId
-        List<UUID> locationFilter = resolveLocationFilterForDuePreview(billingRunId, request.locationId());
-        if (locationFilter == null) {
-            log.info("Due preview: no location filter (global / no anchor)");
-        } else {
-            log.info("Due preview: location filter size={} (from billing run scope or request)", locationFilter.size());
-        }
-        List<Map<String, Object>> dueInvoices = duePreviewRepository.getDueInvoicesForPreview(
-                request.dueDate(), locationFilter);
-
-        log.info("Found {} due subscription instances for preview", dueInvoices.size());
-
-        // Process subscription instances (check eligibility, similar to BillingItemProcessor)
-        List<Map<String, Object>> processedInstances = new ArrayList<>();
-        int eligibleCount = 0;
-        int notEligibleCount = 0;
-        BigDecimal totalAmount = BigDecimal.ZERO;
-        BigDecimal eligibleTotalAmount = BigDecimal.ZERO;
-
-        for (Map<String, Object> instance : dueInvoices) {
-            UUID subscriptionInstanceId = (UUID) instance.get("subscription_instance_id");
-            BigDecimal total = (BigDecimal) instance.getOrDefault("total_amount", BigDecimal.ZERO);
-
-            totalAmount = totalAmount.add(total != null ? total : BigDecimal.ZERO);
-
-            // Check eligibility
-            boolean eligible = duePreviewRepository.isEligible(subscriptionInstanceId, request.dueDate());
-
-            Map<String, Object> processedInstance = new HashMap<>(instance);
-            processedInstance.put("eligible", eligible);
-            processedInstance.put("eligibility_reason", eligible ? "ELIGIBLE" : "NOT_ELIGIBLE");
-
-            if (eligible) {
-                eligibleCount++;
-                eligibleTotalAmount = eligibleTotalAmount.add(total != null ? total : BigDecimal.ZERO);
-            } else {
-                notEligibleCount++;
-            }
-
-            processedInstances.add(processedInstance);
+        // Deny → re-run: reopen approval so the new preview can be approved/denied again.
+        try {
+            approvalRepository.resetRejectedApprovalsToPending(billingRunId);
+        } catch (Exception e) {
+            log.warn("Could not reset rejected approvals after due-preview re-run (non-blocking): {}", e.getMessage());
         }
 
-        // Generate CSV content
-        String csvContent = generateCSV(processedInstances);
+        Map<String, Object> seedSummary = new LinkedHashMap<>();
+        seedSummary.put("due_date", request.dueDate().toString());
+        if (request.locationId() != null) {
+            seedSummary.put("location_id", request.locationId().toString());
+        }
+        seedSummary.put("created_by", request.createdBy());
+        seedSummary.put("billing_run_id", billingRunId.toString());
+        seedSummary.put("queued_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        seedSummary.put("phase", "QUEUED");
+        seedSummary.put("progress_percent", 0);
+        stageRunRepository.updateStageRunSummary(stageRunId, seedSummary);
 
-        // Generate file name (use billing run id for traceability) with current date/time
-        LocalDateTime now = LocalDateTime.now();
-        String dateTimeStr = now.format(DateTimeFormatter.ofPattern("dd-MM_HHmm"));
-        String fileName = String.format("due-preview-%s-%s-%s.csv",
-                billingRunId.toString().substring(0, 8),
-                request.dueDate().toString().replace("-", ""),
-                dateTimeStr);
+        boolean queuedStatusApplied = stageRunRepository.trySetStageRunStatusByCode(stageRunId, "QUEUED");
+        log.info(
+                "Due preview enqueued: stageRunId={} billingRunId={} queuedStatusInDb={}",
+                stageRunId,
+                billingRunId,
+                queuedStatusApplied);
 
-        // Upload to S3
-        String s3Path = s3Service.uploadToS3(csvContent, fileName, "text/csv");
-
-        log.info("Due preview generated and uploaded: s3Path={}, totalInstances={}, eligibleCount={}, notEligibleCount={}",
-                s3Path, processedInstances.size(), eligibleCount, notEligibleCount);
-
-        // Build summary for stage run
-        Map<String, Object> summaryJson = new HashMap<>();
-        summaryJson.put("stage_run_id", stageRunId.toString());
-        summaryJson.put("s3_path", s3Path);
-        summaryJson.put("file_name", fileName);
-        summaryJson.put("total_instances", processedInstances.size());
-        summaryJson.put("eligible_count", eligibleCount);
-        summaryJson.put("not_eligible_count", notEligibleCount);
-        summaryJson.put("total_amount", totalAmount);
-        summaryJson.put("eligible_total_amount", eligibleTotalAmount);
-        summaryJson.put("generated_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
-
-        // Complete the stage run with summary (no billing_run update)
-        stageRunRepository.completeStageRun(stageRunId, summaryJson);
-        log.info("Completed DUE_PREVIEW stage run: stageRunId={}", stageRunId);
-
-        // Audit log: due preview generated for this stage run
+        applicationEventPublisher.publishEvent(DuePreviewQueuedEvent.of(stageRunId));
         auditLogRepository.insertAuditLog(
                 "DUE_PREVIEW",
                 "STAGE_RUN",
                 stageRunId,
-                "GENERATED",
-                request.createdBy(),
-                summaryJson);
+                "ENQUEUED",
+                request.createdBy() != null ? request.createdBy() : "system",
+                seedSummary);
 
-        // Snapshot: store due-preview file reference (optional; may fail if DUE_PREVIEW snapshot type not in lu_snapshot_type)
-        try {
-            snapshotRepository.createSnapshot(
-                    billingRunId,
-                    "DUE_PREVIEW",
-                    "DUE_PREVIEW",
-                    summaryJson,
-                    s3Path,
-                    createdByUuid);
-        } catch (Exception e) {
-            log.warn("Could not create due-preview snapshot (non-blocking): {}. Ensure lu_snapshot_type has DUE_PREVIEW.", e.getMessage());
-        }
+        StageRunDto stage = stageRunRepository.findById(stageRunId);
+        String statusCode = stage != null && stage.statusCode() != null
+                ? stage.statusCode()
+                : (queuedStatusApplied ? "QUEUED" : "PENDING");
+        String pollUrl = "/api/billing/due-preview/runs/" + stageRunId;
 
-        Map<String, Object> response = new HashMap<>();
+        Map<String, Object> response = new LinkedHashMap<>();
         response.put("billing_run_id", billingRunId);
         response.put("billing_run_code", existingRun.billingRunCode());
         response.put("stage_run_id", stageRunId);
         response.put("due_date", request.dueDate().toString());
         response.put("location_id", request.locationId());
         response.put("created_by", request.createdBy());
-        response.put("s3_path", s3Path);
-        response.put("file_name", fileName);
-        response.put("total_instances", processedInstances.size());
-        response.put("eligible_count", eligibleCount);
-        response.put("not_eligible_count", notEligibleCount);
-        response.put("total_amount", totalAmount);
-        response.put("eligible_total_amount", eligibleTotalAmount);
-        response.put("generated_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
-
+        response.put("status", statusCode);
+        response.put("statusCode", statusCode);
+        response.put("pollUrl", pollUrl);
+        response.put("async", true);
+        response.put("phase", "QUEUED");
+        response.put("progress_percent", 0);
+        // Counts/S3 filled when job completes — poll GET for progress
+        response.put("s3_path", null);
+        response.put("file_name", null);
+        response.put("total_instances", null);
+        response.put("eligible_count", null);
+        response.put("not_eligible_count", null);
+        response.put("total_amount", null);
+        response.put("eligible_total_amount", null);
+        response.put("generated_at", null);
         return response;
     }
 
+    private static boolean isDuePreviewInFlight(String status) {
+        return "QUEUED".equals(status)
+                || "RUNNING".equals(status)
+                || "PENDING".equals(status)
+                || "SCHEDULED".equals(status);
+    }
+
+    private static Map<String, Object> buildInFlightDuePreviewDetails(
+            StageRunDto stageRun, Map<String, Object> summaryJson) {
+        Map<String, Object> run = new LinkedHashMap<>();
+        run.put("run_id", stageRun.stageRunId());
+        run.put("run_code", stageRun.stageRunCode());
+        run.put("generated_at", stageRun.startedOn());
+        run.put("status", stageRun.statusCode());
+        run.put("status_display_name", stageRun.statusDisplayName());
+        run.put("filename", summaryJson.get("file_name"));
+        run.put("invoices", summaryJson.getOrDefault("total_instances", 0));
+        run.put("totalAmount", summaryJson.getOrDefault("total_amount", BigDecimal.ZERO));
+        run.put("totalTax", BigDecimal.ZERO);
+        run.put("totalDiscount", BigDecimal.ZERO);
+        run.put("summary_json", summaryJson);
+        run.put("phase", summaryJson.get("phase"));
+        run.put("progress_percent", summaryJson.get("progress_percent"));
+        run.put("processed", summaryJson.get("processed"));
+        if (summaryJson.get("error") != null) {
+            run.put("error", summaryJson.get("error"));
+        }
+        // Creator filled by instance helper below — static builder keeps summary fields only;
+        // caller should invoke putStageRunCreator after if needed.
+        Object createdBy = summaryJson.get("created_by");
+        if (createdBy != null) {
+            run.put("created_by", createdBy);
+            run.put("createdBy", createdBy);
+        }
+        Object createdByName = summaryJson.get("created_by_name");
+        if (createdByName != null) {
+            run.put("created_by_name", createdByName);
+            run.put("createdByName", createdByName);
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("run", run);
+        response.put("invoices", List.of());
+        response.put("status", stageRun.statusCode());
+        response.put("async", true);
+        response.put("in_progress", isDuePreviewInFlight(stageRun.statusCode()));
+        return response;
+    }
+
+    /** Lightweight COMPLETED/FAILED payload for pollers — no CSV parse. */
+    private static Map<String, Object> buildSummaryOnlyDuePreviewDetails(
+            StageRunDto stageRun, Map<String, Object> summaryJson, String s3Path) {
+        Map<String, Object> run = new LinkedHashMap<>();
+        run.put("run_id", stageRun.stageRunId());
+        run.put("run_code", stageRun.stageRunCode());
+        run.put("generated_at", summaryJson.getOrDefault("generated_at", stageRun.endedOn()));
+        run.put("status", stageRun.statusCode());
+        run.put("status_display_name", stageRun.statusDisplayName());
+        run.put("filename", summaryJson.get("file_name"));
+        run.put("s3_path", s3Path);
+        run.put("invoices", summaryJson.getOrDefault("total_instances", 0));
+        run.put("eligible_count", summaryJson.get("eligible_count"));
+        run.put("not_eligible_count", summaryJson.get("not_eligible_count"));
+        run.put("totalAmount", summaryJson.getOrDefault("total_amount", BigDecimal.ZERO));
+        run.put("eligible_total_amount", summaryJson.get("eligible_total_amount"));
+        run.put("summary_json", summaryJson);
+        run.put("phase", summaryJson.getOrDefault("phase", "COMPLETED"));
+        run.put("progress_percent", summaryJson.getOrDefault("progress_percent", 100));
+        Object createdBy = summaryJson.get("created_by");
+        if (createdBy != null) {
+            run.put("created_by", createdBy);
+            run.put("createdBy", createdBy);
+        }
+        Object createdByName = summaryJson.get("created_by_name");
+        if (createdByName != null) {
+            run.put("created_by_name", createdByName);
+            run.put("createdByName", createdByName);
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("run", run);
+        response.put("invoices", List.of());
+        response.put("status", stageRun.statusCode());
+        response.put("async", true);
+        response.put("in_progress", false);
+        response.put("include_invoices", false);
+        return response;
+    }
+
+    private void putStageRunCreator(
+            Map<String, Object> run, UUID stageRunId, Map<String, Object> summaryJson) {
+        Map<String, Object> creator = duePreviewRepository.findStageRunCreator(stageRunId);
+        Object createdBy = creator.get("created_by");
+        Object createdByName = creator.get("created_by_name");
+        if (createdBy == null && summaryJson != null) {
+            createdBy = summaryJson.get("created_by");
+        }
+        if (createdByName == null && summaryJson != null) {
+            createdByName = summaryJson.get("created_by_name");
+        }
+        if (createdBy != null) {
+            run.put("created_by", createdBy);
+            run.put("createdBy", createdBy);
+        }
+        if (createdByName != null) {
+            run.put("created_by_name", createdByName);
+            run.put("createdByName", createdByName);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void enrichRunCreator(
+            Map<String, Object> response, UUID stageRunId, Map<String, Object> summaryJson) {
+        Object runObj = response.get("run");
+        if (runObj instanceof Map<?, ?> runMap) {
+            putStageRunCreator((Map<String, Object>) runMap, stageRunId, summaryJson);
+        }
+    }
+
     /**
-     * Generate CSV content from processed subscription instances.
+     * @deprecated Sync path removed — kept private helpers unused; CSV build lives in {@link io.clubone.billing.service.duepreview.DuePreviewJobRunner}.
      */
+    @SuppressWarnings("unused")
     private String generateCSV(List<Map<String, Object>> instances) {
         StringBuilder csv = new StringBuilder();
 

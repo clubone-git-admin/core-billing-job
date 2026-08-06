@@ -12,10 +12,13 @@ import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -188,6 +191,102 @@ public class MockChargeRepository {
                 rs.getBigDecimal("total_amount"),
                 (UUID) rs.getObject("subscription_instance_id"),
                 null), billingRunId.toString(), requireAppIdStr(), safeLimit, safeOffset);
+    }
+
+    /**
+     * Keyset page of invoices for a billing run, ordered by {@code invoice_id ASC} (no OFFSET — safe at 50k+ scale).
+     * Pass {@code afterInvoiceId = null} for the first page; pass the last row's {@code invoiceId()} from the
+     * previous page to continue. Same base filters as {@link #findInvoicesForBillingRun(UUID, int, int)}.
+     */
+    public List<MockInvoiceRow> findInvoicesForBillingRunAfter(UUID billingRunId, UUID afterInvoiceId, int limit) {
+        int safeLimit = Math.max(1, Math.min(limit, 5_000));
+        StringBuilder sql = new StringBuilder("""
+                SELECT i.invoice_id,
+                       i.client_role_id,
+                       i.client_agreement_id,
+                       i.sub_total,
+                       i.tax_amount,
+                       i.discount_amount,
+                       i.total_amount,
+                       ie.subscription_instance_id
+                FROM transactions.invoice i
+                LEFT JOIN LATERAL (
+                    SELECT ie2.subscription_instance_id
+                    FROM transactions.invoice_entity ie2
+                    WHERE ie2.invoice_id = i.invoice_id
+                      AND ie2.subscription_instance_id IS NOT NULL
+                      AND COALESCE(ie2.is_active, true) = true
+                    ORDER BY ie2.created_on ASC NULLS LAST
+                    LIMIT 1
+                ) ie ON true
+                LEFT JOIN transactions.lu_invoice_status invs_mc ON invs_mc.invoice_status_id = i.invoice_status_id
+                WHERE i.billing_run_id = ?::uuid
+                  AND i.application_id = ?::uuid
+                  AND COALESCE(i.is_active, true) = true
+                  AND UPPER(TRIM(COALESCE(invs_mc.status_name, ''))) <> 'VOID'
+                """);
+        List<Object> args = new ArrayList<>();
+        args.add(billingRunId.toString());
+        args.add(requireAppIdStr());
+        if (afterInvoiceId != null) {
+            sql.append(" AND i.invoice_id > ?::uuid ");
+            args.add(afterInvoiceId.toString());
+        }
+        sql.append(" ORDER BY i.invoice_id ASC LIMIT ? ");
+        args.add(safeLimit);
+        return jdbc.query(sql.toString(), (rs, rn) -> new MockInvoiceRow(
+                (UUID) rs.getObject("invoice_id"),
+                (UUID) rs.getObject("client_role_id"),
+                (UUID) rs.getObject("client_agreement_id"),
+                rs.getBigDecimal("sub_total"),
+                rs.getBigDecimal("tax_amount"),
+                rs.getBigDecimal("discount_amount"),
+                rs.getBigDecimal("total_amount"),
+                (UUID) rs.getObject("subscription_instance_id"),
+                null), args.toArray());
+    }
+
+    /**
+     * Invoice ids among {@code invoiceIds} that already have a mock evaluation row
+     * ({@code is_mock = true}) for this {@code stageRunId} — used to skip re-inserting/re-counting on
+     * reclaim (worker crash / stale-reclaim redispatch) so resuming from a checkpoint stays idempotent.
+     * Chunks the IN list by 500 to stay well under typical DB parameter limits.
+     */
+    public Set<UUID> findInvoiceIdsAlreadyMockEvaluatedForStageRun(UUID stageRunId, Collection<UUID> invoiceIds) {
+        Set<UUID> out = new HashSet<>();
+        if (stageRunId == null || invoiceIds == null || invoiceIds.isEmpty()) {
+            return out;
+        }
+        List<UUID> ids = invoiceIds.stream().filter(id -> id != null).distinct().toList();
+        if (ids.isEmpty()) {
+            return out;
+        }
+        final int chunkSize = 500;
+        for (int start = 0; start < ids.size(); start += chunkSize) {
+            List<UUID> chunk = ids.subList(start, Math.min(start + chunkSize, ids.size()));
+            try {
+                String in = placeholders(chunk.size());
+                List<Object> args = new ArrayList<>();
+                args.add(stageRunId.toString());
+                for (UUID id : chunk) {
+                    args.add(id.toString());
+                }
+                List<UUID> rows = jdbc.query(
+                        """
+                        SELECT DISTINCT invoice_id
+                        FROM client_subscription_billing.subscription_billing_history
+                        WHERE stage_run_id = ?::uuid
+                          AND is_mock = true
+                          AND invoice_id IN (%s)
+                        """.formatted(in),
+                        (rs, rn) -> (UUID) rs.getObject("invoice_id"),
+                        args.toArray());
+                out.addAll(rows);
+            } catch (DataAccessException ex) {
+                // best-effort; caller treats a missing id as "not yet evaluated"
+            }
+        }
+        return out;
     }
 
     public int countInvoicesForBillingRun(UUID billingRunId) {

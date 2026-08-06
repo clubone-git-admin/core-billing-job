@@ -15,6 +15,7 @@ import java.time.OffsetDateTime;
 import java.util.*;
 
 import io.clubone.billing.security.AccessContext;
+import io.clubone.billing.util.UtcClock;
 /**
  * Repository for billing run operations.
  */
@@ -50,7 +51,14 @@ public class BillingRunRepository {
             SELECT br.billing_run_id, br.billing_run_code, br.due_date, br.location_id,
                    br.location_level_id, br.include_child_locations,
                    br.started_on, br.ended_on, br.summary_json,
-                   br.created_by, br.created_on, br.modified_on, br.modified_by,
+                   br.created_by,
+                   COALESCE(
+                       NULLIF(TRIM(CONCAT_WS(' ', creator_u.first_name, creator_u.last_name)), ''),
+                       NULLIF(TRIM(CONCAT_WS(' ', creator_app_u.first_name, creator_app_u.last_name)), ''),
+                       NULLIF(TRIM(creator_u.email), ''),
+                       NULLIF(TRIM(creator_app_u.email), '')
+                   ) AS created_by_name,
+                   br.created_on, br.modified_on, br.modified_by,
                    br.source_run_id, br.approved_by, br.approved_on, br.approval_notes,
                    brs.status_code AS run_status_code, brs.display_name AS run_status_display,
                    brs.description AS run_status_description,
@@ -67,6 +75,10 @@ public class BillingRunRepository {
             LEFT JOIN locations.levels lv_scope ON lv_scope.level_id = br.location_level_id
             LEFT JOIN locations.location l ON l.location_id = br.location_id
             LEFT JOIN client_subscription_billing.billing_run src ON src.billing_run_id = br.source_run_id
+            LEFT JOIN access.access_user creator_u ON creator_u.user_id = br.created_by
+            LEFT JOIN access.access_application_user creator_aau
+                   ON creator_aau.application_user_id = br.created_by
+            LEFT JOIN access.access_user creator_app_u ON creator_app_u.user_id = creator_aau.user_id
             WHERE br.application_id = ?::uuid
             """);
 
@@ -135,7 +147,14 @@ public class BillingRunRepository {
             SELECT br.billing_run_id, br.billing_run_code, br.due_date, br.location_id,
                    br.location_level_id, br.include_child_locations,
                    br.started_on, br.ended_on, br.summary_json,
-                   br.created_by, br.created_on, br.modified_on, br.modified_by,
+                   br.created_by,
+                   COALESCE(
+                       NULLIF(TRIM(CONCAT_WS(' ', creator_u.first_name, creator_u.last_name)), ''),
+                       NULLIF(TRIM(CONCAT_WS(' ', creator_app_u.first_name, creator_app_u.last_name)), ''),
+                       NULLIF(TRIM(creator_u.email), ''),
+                       NULLIF(TRIM(creator_app_u.email), '')
+                   ) AS created_by_name,
+                   br.created_on, br.modified_on, br.modified_by,
                    br.source_run_id, br.approved_by, br.approved_on, br.approval_notes,
                    brs.status_code AS run_status_code, brs.display_name AS run_status_display,
                    brs.description AS run_status_description,
@@ -152,6 +171,10 @@ public class BillingRunRepository {
             LEFT JOIN locations.levels lv_scope ON lv_scope.level_id = br.location_level_id
             LEFT JOIN locations.location l ON l.location_id = br.location_id
             LEFT JOIN client_subscription_billing.billing_run src ON src.billing_run_id = br.source_run_id
+            LEFT JOIN access.access_user creator_u ON creator_u.user_id = br.created_by
+            LEFT JOIN access.access_application_user creator_aau
+                   ON creator_aau.application_user_id = br.created_by
+            LEFT JOIN access.access_user creator_app_u ON creator_app_u.user_id = creator_aau.user_id
             WHERE br.application_id = ?::uuid
             """);
         List<Object> params = new ArrayList<>();
@@ -306,7 +329,8 @@ public class BillingRunRepository {
         return new BillingRunDto(
                 d.billingRunId(), d.billingRunCode(), d.dueDate(), d.locationId(), d.locationName(),
                 d.billingRunStatus(), d.currentStage(), d.approvalStatus(),
-                d.startedOn(), d.endedOn(), d.summaryJson(), d.createdBy(), d.createdOn(), d.modifiedOn(),
+                d.startedOn(), d.endedOn(), d.summaryJson(), d.createdBy(), d.createdByName(),
+                d.createdOn(), d.modifiedOn(),
                 d.sourceRunId(), d.sourceRunCode(), d.approvedBy(), d.approvedOn(), d.approvalNotes(),
                 d.locationLevelId(), d.includeChildLocations(), d.scopeSummary(),
                 d.stageHistory(), d.approvals(), inc, d.exclusionLocationNames());
@@ -404,6 +428,19 @@ public class BillingRunRepository {
             }
 
             UUID createdBy = (UUID) rs.getObject("created_by");
+            String createdByName = null;
+            try {
+                createdByName = rs.getString("created_by_name");
+            } catch (Exception ignored) {
+                // column may be absent in older ad-hoc queries
+            }
+            if (createdByName != null) {
+                createdByName = createdByName.trim();
+                if (createdByName.isEmpty()
+                        || (createdBy != null && createdByName.equalsIgnoreCase(createdBy.toString()))) {
+                    createdByName = null;
+                }
+            }
             OffsetDateTime createdOn = rs.getObject("created_on", OffsetDateTime.class);
             if (startedOn == null) {
                 startedOn = createdOn;
@@ -420,7 +457,7 @@ public class BillingRunRepository {
             return new BillingRunDto(
                     billingRunId, billingRunCode, dueDate, locationIdResult, locationName,
                     billingRunStatus, currentStage, approvalStatus,
-                    startedOn, endedOn, summaryJson, createdBy, createdOn, modifiedOn,
+                    startedOn, endedOn, summaryJson, createdBy, createdByName, createdOn, modifiedOn,
                     sourceRunId, sourceRunCode, approvedBy, approvedOn, approvalNotes,
                     locationLevelIdCol, includeChildCol, scopeFromJson,
                     null, null, // stages and approvals loaded separately
@@ -493,7 +530,14 @@ public class BillingRunRepository {
             SELECT br.billing_run_id, br.billing_run_code, br.due_date, br.location_id,
                    br.location_level_id, br.include_child_locations,
                    br.started_on, br.ended_on, br.summary_json,
-                   br.created_by, br.created_on, br.modified_on, br.modified_by,
+                   br.created_by,
+                   COALESCE(
+                       NULLIF(TRIM(CONCAT_WS(' ', creator_u.first_name, creator_u.last_name)), ''),
+                       NULLIF(TRIM(CONCAT_WS(' ', creator_app_u.first_name, creator_app_u.last_name)), ''),
+                       NULLIF(TRIM(creator_u.email), ''),
+                       NULLIF(TRIM(creator_app_u.email), '')
+                   ) AS created_by_name,
+                   br.created_on, br.modified_on, br.modified_by,
                    br.source_run_id, br.approved_by, br.approved_on, br.approval_notes,
                    brs.status_code AS run_status_code, brs.display_name AS run_status_display,
                    brs.description AS run_status_description,
@@ -510,6 +554,10 @@ public class BillingRunRepository {
             LEFT JOIN locations.levels lv_scope ON lv_scope.level_id = br.location_level_id
             LEFT JOIN locations.location l ON l.location_id = br.location_id
             LEFT JOIN client_subscription_billing.billing_run src ON src.billing_run_id = br.source_run_id
+            LEFT JOIN access.access_user creator_u ON creator_u.user_id = br.created_by
+            LEFT JOIN access.access_application_user creator_aau
+                   ON creator_aau.application_user_id = br.created_by
+            LEFT JOIN access.access_user creator_app_u ON creator_app_u.user_id = creator_aau.user_id
             WHERE br.billing_run_id = ?::uuid
               AND br.application_id = ?::uuid
             """;
@@ -610,7 +658,7 @@ public class BillingRunRepository {
                 incChild,
                 statusId.toString(),
                 stageId.toString(),
-                OffsetDateTime.now(),
+                UtcClock.now(),
                 createdBy != null ? createdBy.toString() : null,
                 idempotencyKey,
                 summaryJsonStr,
@@ -643,19 +691,25 @@ public class BillingRunRepository {
         if (locationIds == null || locationIds.isEmpty()) {
             return;
         }
-        for (UUID loc : locationIds) {
-            if (loc == null) {
-                continue;
-            }
-            jdbc.update(
-                    """
-                    INSERT INTO client_subscription_billing.billing_run_location (billing_run_id, location_id)
-                    VALUES (?::uuid, ?::uuid)
-                    ON CONFLICT (billing_run_id, location_id) DO NOTHING
-                    """,
-                    billingRunId.toString(),
-                    loc.toString());
+        List<UUID> distinct = locationIds.stream()
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (distinct.isEmpty()) {
+            return;
         }
+        jdbc.batchUpdate(
+                """
+                INSERT INTO client_subscription_billing.billing_run_location (billing_run_id, location_id)
+                VALUES (?::uuid, ?::uuid)
+                ON CONFLICT (billing_run_id, location_id) DO NOTHING
+                """,
+                distinct,
+                distinct.size(),
+                (ps, loc) -> {
+                    ps.setString(1, billingRunId.toString());
+                    ps.setString(2, loc.toString());
+                });
     }
 
     /**
@@ -824,7 +878,7 @@ public class BillingRunRepository {
                 locationId != null ? locationId.toString() : null,
                 statusId.toString(),
                 stageId.toString(),
-                OffsetDateTime.now(),
+                UtcClock.now(),
                 createdBy != null ? createdBy.toString() : null,
                 sourceRunId != null ? sourceRunId.toString() : null
         );

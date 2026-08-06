@@ -24,7 +24,9 @@ import org.springframework.lang.NonNull;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, BillingWorkItem> {
 
@@ -38,6 +40,8 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
     private final UUID runId;
     private final RunMode mode;
     private final LocalDate asOfDate;
+    /** Per-run eligibility cache — avoids N× identical SQL for repeated subscription instances. */
+    private final Map<UUID, Boolean> eligibilityCache = new ConcurrentHashMap<>();
 
     public BillingItemProcessor(JdbcTemplate jdbc,
                                 io.clubone.billing.batch.BillingJobProperties props,
@@ -301,6 +305,13 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
     }
 
     private boolean isEligible(UUID subscriptionInstanceId) {
+        if (subscriptionInstanceId == null) {
+            return false;
+        }
+        return eligibilityCache.computeIfAbsent(subscriptionInstanceId, this::queryEligible);
+    }
+
+    private boolean queryEligible(UUID subscriptionInstanceId) {
         try {
             String sql = "SELECT CASE WHEN COUNT(1) > 0 THEN true ELSE false END "
                     + "FROM client_subscription_billing.subscription_instance si "

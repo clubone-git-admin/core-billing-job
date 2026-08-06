@@ -169,6 +169,39 @@ public class S3Service {
     }
 
     /**
+     * Upload a local file to S3 without loading the whole content as a String (preferred for large CSVs).
+     */
+    public String uploadFileToS3(java.nio.file.Path file, String fileName, String contentType) {
+        try {
+            LocalDateTime now = LocalDateTime.now();
+            String datePath = now.format(DateTimeFormatter.ofPattern("yyyy/MM/dd"));
+            String timestamp = now.format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
+            String s3Key = String.format("billing-preview/%s/%s-%s", datePath, timestamp, fileName);
+
+            long size = java.nio.file.Files.size(file);
+            PutObjectRequest putObjectRequest = PutObjectRequest.builder()
+                    .bucket(bucketName)
+                    .key(s3Key)
+                    .contentType(contentType)
+                    .contentLength(size)
+                    .build();
+
+            s3Client.putObject(putObjectRequest, RequestBody.fromFile(file));
+
+            String s3Path = String.format("s3://%s/%s", bucketName, s3Key);
+            log.info("Successfully uploaded file to S3: {} ({} bytes)", s3Path, size);
+            return s3Path;
+
+        } catch (S3Exception e) {
+            log.error("Failed to upload file to S3: fileName={}, error={}", fileName, e.getMessage(), e);
+            throw new RuntimeException("Failed to upload file to S3: " + e.getMessage(), e);
+        } catch (Exception e) {
+            log.error("Unexpected error uploading file to S3: fileName={}", fileName, e);
+            throw new RuntimeException("Unexpected error uploading file to S3", e);
+        }
+    }
+
+    /**
      * Download file content from S3 by path.
      *
      * @param s3Path Full S3 path (e.g. s3://bucket-name/key/path/file.csv)

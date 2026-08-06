@@ -95,7 +95,33 @@ public class SubscriptionBillingHistoryRepository {
                     billingRunId, stageRunId, billingStatusCode, isMock, mockChargeStatus, mockChargeFailureCode,
                     search, limit, offset);
         }
-        return findByBillingRunIdFromInvoiceTable(billingRunId, search, limit, offset);
+        return findByBillingRunIdFromInvoiceTable(billingRunId, search, limit, offset, null, null, null);
+    }
+
+    /**
+     * Invoice-generation Results Grid: all {@code transactions.invoice} rows for the billing run
+     * (no {@code generated_invoice_ids} list — scales to large runs).
+     */
+    public List<SubscriptionBillingHistoryItemDto> findInvoicesByBillingRunId(
+            UUID billingRunId,
+            String search,
+            int limit,
+            int offset,
+            List<String> invoiceStatusNames,
+            Boolean excludeVoid,
+            UUID locationId) {
+        return findByBillingRunIdFromInvoiceTable(
+                billingRunId, search, limit, offset, invoiceStatusNames, excludeVoid, locationId);
+    }
+
+    public int countInvoicesByBillingRunId(
+            UUID billingRunId,
+            String search,
+            List<String> invoiceStatusNames,
+            Boolean excludeVoid,
+            UUID locationId) {
+        return countInvoicesByBillingRunIdFiltered(
+                billingRunId, search, invoiceStatusNames, excludeVoid, locationId);
     }
 
     public int countByBillingRunId(
@@ -342,6 +368,17 @@ public class SubscriptionBillingHistoryRepository {
      */
     private List<SubscriptionBillingHistoryItemDto> findByBillingRunIdFromInvoiceTable(
             UUID billingRunId, String search, int limit, int offset) {
+        return findByBillingRunIdFromInvoiceTable(billingRunId, search, limit, offset, null, null, null);
+    }
+
+    private List<SubscriptionBillingHistoryItemDto> findByBillingRunIdFromInvoiceTable(
+            UUID billingRunId,
+            String search,
+            int limit,
+            int offset,
+            List<String> invoiceStatusNames,
+            Boolean excludeVoid,
+            UUID locationId) {
         StringBuilder sql = new StringBuilder("""
             SELECT
                 h.subscription_billing_history_id,
@@ -493,6 +530,7 @@ public class SubscriptionBillingHistoryRepository {
         params.add(requireAppIdStr());
         params.add(billingRunId.toString());
         appendInvoiceTableSearchFilter(sql, params, search);
+        appendInvoiceGenerationGridFilters(sql, params, invoiceStatusNames, excludeVoid, locationId, true);
         sql.append(" ORDER BY i.created_on DESC NULLS LAST LIMIT ? OFFSET ?");
         params.add(limit);
         params.add(offset);
@@ -940,7 +978,20 @@ public class SubscriptionBillingHistoryRepository {
     }
 
     private int countInvoicesByBillingRunId(UUID billingRunId, String search) {
-        if (search == null || search.isBlank()) {
+        return countInvoicesByBillingRunIdFiltered(billingRunId, search, null, null, null);
+    }
+
+    private int countInvoicesByBillingRunIdFiltered(
+            UUID billingRunId,
+            String search,
+            List<String> invoiceStatusNames,
+            Boolean excludeVoid,
+            UUID locationId) {
+        boolean needsJoins = (search != null && !search.isBlank())
+                || locationId != null
+                || (invoiceStatusNames != null && !invoiceStatusNames.isEmpty())
+                || Boolean.TRUE.equals(excludeVoid);
+        if (!needsJoins) {
             Integer n = jdbc.queryForObject(
                     """
                     SELECT COUNT(1)
@@ -954,11 +1005,12 @@ public class SubscriptionBillingHistoryRepository {
                     billingRunId.toString());
             return n != null ? n : 0;
         }
-        String p = "%" + search.trim() + "%";
-        Integer n = jdbc.queryForObject(
+        // Reuse ID-filter count path with a no-op by listing via invoice table + filters without IN clause.
+        StringBuilder sql = new StringBuilder(
                 """
                 SELECT COUNT(1)
                 FROM transactions.invoice i
+                LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id
                 LEFT JOIN LATERAL (
                     SELECT h2.*
                     FROM client_subscription_billing.subscription_billing_history h2
@@ -967,20 +1019,24 @@ public class SubscriptionBillingHistoryRepository {
                     ORDER BY h2.billing_attempt_on DESC NULLS LAST, h2.created_on DESC NULLS LAST
                     LIMIT 1
                 ) h ON true
+                LEFT JOIN LATERAL (
+                    SELECT ie.subscription_instance_id
+                    FROM transactions.invoice_entity ie
+                    WHERE ie.invoice_id = i.invoice_id
+                      AND ie.subscription_instance_id IS NOT NULL
+                      AND COALESCE(ie.is_active, true) = true
+                    ORDER BY ie.created_on ASC NULLS LAST
+                    LIMIT 1
+                ) ie ON true
                 LEFT JOIN client_subscription_billing.subscription_instance si
-                    ON si.subscription_instance_id = COALESCE(h.subscription_instance_id, (
-                        SELECT ie.subscription_instance_id
-                        FROM transactions.invoice_entity ie
-                        WHERE ie.invoice_id = i.invoice_id AND ie.subscription_instance_id IS NOT NULL
-                          AND COALESCE(ie.is_active, true) = true
-                        ORDER BY ie.created_on ASC NULLS LAST LIMIT 1
-                    ))
+                    ON si.subscription_instance_id = COALESCE(h.subscription_instance_id, ie.subscription_instance_id)
                 LEFT JOIN client_subscription_billing.subscription_plan sp
                     ON sp.subscription_plan_id = si.subscription_plan_id AND COALESCE(sp.is_active, true) = true
                 LEFT JOIN client_agreements.client_agreement ca
                     ON ca.client_agreement_id = COALESCE(sp.client_agreement_id, i.client_agreement_id)
                        AND COALESCE(ca.is_active, true) = true
                 LEFT JOIN clients.client_role cr ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id)
+                LEFT JOIN locations.location loc ON loc.location_id = cr.location_id
                 LEFT JOIN LATERAL (
                     SELECT
                         MAX(CASE WHEN cct.name = 'First Name' AND COALESCE(cc.is_active, true) = true
@@ -999,26 +1055,13 @@ public class SubscriptionBillingHistoryRepository {
                 WHERE i.application_id = ?::uuid
                   AND i.billing_run_id = ?::uuid
                   AND COALESCE(i.is_active, true) = true
-                  AND (
-                    COALESCE(i.invoice_number, '') ILIKE ?
-                    OR CAST(i.invoice_id AS text) ILIKE ?
-                    OR CAST(COALESCE(h.subscription_instance_id, (
-                        SELECT ie2.subscription_instance_id
-                        FROM transactions.invoice_entity ie2
-                        WHERE ie2.invoice_id = i.invoice_id AND ie2.subscription_instance_id IS NOT NULL
-                          AND COALESCE(ie2.is_active, true) = true
-                        ORDER BY ie2.created_on ASC NULLS LAST LIMIT 1
-                    ))::text, '') ILIKE ?
-                    OR TRIM(CONCAT(COALESCE(ch.client_first_name, ''), ' ', COALESCE(ch.client_last_name, ''))) ILIKE ?
-                  )
-                """,
-                Integer.class,
-                requireAppIdStr(),
-                billingRunId.toString(),
-                p,
-                p,
-                p,
-                p);
+                """);
+        List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
+        params.add(billingRunId.toString());
+        appendInvoiceTableSearchFilter(sql, params, search);
+        appendInvoiceGenerationGridFilters(sql, params, invoiceStatusNames, excludeVoid, locationId, true);
+        Integer n = jdbc.queryForObject(sql.toString(), params.toArray(), Integer.class);
         return n != null ? n : 0;
     }
 

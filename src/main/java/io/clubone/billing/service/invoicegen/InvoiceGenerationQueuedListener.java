@@ -31,7 +31,7 @@ public class InvoiceGenerationQueuedListener {
         this.stageRunRepository = stageRunRepository;
     }
 
-    @Async("billingAsyncExecutor")
+    @Async("invoiceGenerationAsyncExecutor")
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onInvoiceGenerationQueued(InvoiceGenerationQueuedEvent event) {
         UUID stageRunId = event.stageRunId();

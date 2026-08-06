@@ -5,6 +5,7 @@ import io.clubone.billing.api.v1.reports.BillingReportSlugs;
 import io.clubone.billing.repo.BillingReportingRepository;
 import io.clubone.billing.repo.BillingReportingRepository.PagedRows;
 import io.clubone.billing.repo.LocationLevelRepository;
+import io.clubone.billing.util.BillingReadExecutors;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -13,6 +14,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Business reporting for /api/v1/billing/reports.
@@ -33,16 +35,19 @@ public class BillingReportingService {
     private final LocationLevelRepository locationLevelRepository;
     private final MetricsService metricsService;
     private final DuePreviewService duePreviewService;
+    private final BillingReadExecutors readExecutors;
 
     public BillingReportingService(
             BillingReportingRepository reportingRepository,
             LocationLevelRepository locationLevelRepository,
             MetricsService metricsService,
-            DuePreviewService duePreviewService) {
+            DuePreviewService duePreviewService,
+            BillingReadExecutors readExecutors) {
         this.reportingRepository = reportingRepository;
         this.locationLevelRepository = locationLevelRepository;
         this.metricsService = metricsService;
         this.duePreviewService = duePreviewService;
+        this.readExecutors = readExecutors;
     }
 
     public List<UUID> resolveFilterLocations(
@@ -155,19 +160,18 @@ public class BillingReportingService {
         if (locs != null && locs.isEmpty()) {
             return table(BillingReportSlugs.BILL_RUN_SUMMARY, "billing_run_id", List.of(), 0L, List.of());
         }
-        PagedRows page =
+        String sortBy = q.hasSort() ? q.sortBy() : "due_date";
+        String order = q.orderOrDefault();
+        int lim = cap(limit);
+        int pageOffset = off(offset);
+        CompletableFuture<PagedRows> pageF = readExecutors.supplyAsync(() ->
                 reportingRepository.searchBillRuns(
-                        from,
-                        to,
-                        locs,
-                        q.q(),
-                        q.status(),
-                        q.hasSort() ? q.sortBy() : "due_date",
-                        q.orderOrDefault(),
-                        cap(limit),
-                        off(offset));
-        Map<String, Object> kpiSource = reportingRepository.billRunKpiTotals(from, to, locs);
-        List<Map<String, Object>> kpis = buildBillRunKpis(kpiSource);
+                        from, to, locs, q.q(), q.status(), sortBy, order, lim, pageOffset));
+        CompletableFuture<Map<String, Object>> kpiF =
+                readExecutors.supplyAsync(() -> reportingRepository.billRunKpiTotals(from, to, locs));
+        CompletableFuture.allOf(pageF, kpiF).join();
+        PagedRows page = pageF.join();
+        List<Map<String, Object>> kpis = buildBillRunKpis(kpiF.join());
         List<Map<String, Object>> rows = page.rows().stream().map(this::shapeBillRunRow).toList();
         return table(BillingReportSlugs.BILL_RUN_SUMMARY, "billing_run_id", rows, page.total(), kpis);
     }
@@ -181,10 +185,28 @@ public class BillingReportingService {
             int limit,
             int offset,
             BillingReportQuery q) {
-        Map<String, Object> t = billRunSummary(from, to, appId, levelId, includeChildren, limit, offset, q);
         List<UUID> locs = locFilterOrEmpty(appId, levelId, includeChildren);
-        Map<String, Object> kpiSource = reportingRepository.billRunStatusKpiTotals(from, to, locs);
-        t.put("kpis", buildBillRunStatusKpis(kpiSource));
+        if (locs != null && locs.isEmpty()) {
+            Map<String, Object> empty =
+                    table(BillingReportSlugs.BILL_RUN_STATUS, "billing_run_id", List.of(), 0L, List.of());
+            empty.put("kpis", buildBillRunStatusKpis(null));
+            return empty;
+        }
+        String sortBy = q.hasSort() ? q.sortBy() : "due_date";
+        String order = q.orderOrDefault();
+        int lim = cap(limit);
+        int pageOffset = off(offset);
+        CompletableFuture<PagedRows> pageF = readExecutors.supplyAsync(() ->
+                reportingRepository.searchBillRuns(
+                        from, to, locs, q.q(), q.status(), sortBy, order, lim, pageOffset));
+        CompletableFuture<Map<String, Object>> statusKpiF =
+                readExecutors.supplyAsync(() -> reportingRepository.billRunStatusKpiTotals(from, to, locs));
+        CompletableFuture.allOf(pageF, statusKpiF).join();
+        PagedRows page = pageF.join();
+        List<Map<String, Object>> rows = page.rows().stream().map(this::shapeBillRunRow).toList();
+        Map<String, Object> t =
+                table(BillingReportSlugs.BILL_RUN_STATUS, "billing_run_id", rows, page.total(), List.of());
+        t.put("kpis", buildBillRunStatusKpis(statusKpiF.join()));
         t.put("report", BillingReportSlugs.BILL_RUN_STATUS);
         return t;
     }
@@ -386,20 +408,26 @@ public class BillingReportingService {
         if (locs != null && locs.isEmpty()) {
             return table(BillingReportSlugs.LOCATION_BILLING, "location_id", List.of(), 0L, null);
         }
-        PagedRows page =
+        String sortBy = q != null && q.hasSort() ? q.sortBy() : "location_name";
+        String order = q != null ? q.orderOrDefault() : "asc";
+        String search = q != null ? q.q() : null;
+        String status = q != null ? q.status() : null;
+        int lim = cap(limit);
+        int pageOffset = off(offset);
+        CompletableFuture<PagedRows> pageF = readExecutors.supplyAsync(() ->
                 reportingRepository.searchLocationBilling(
-                        from,
-                        to,
-                        locs,
-                        q != null ? q.q() : null,
-                        q != null ? q.status() : null,
-                        q != null && q.hasSort() ? q.sortBy() : "location_name",
-                        q != null ? q.orderOrDefault() : "asc",
-                        cap(limit),
-                        off(offset));
-        Map<String, Object> k = reportingRepository.locationRevenueKpiRollup(from, to, locs);
+                        from, to, locs, search, status, sortBy, order, lim, pageOffset));
+        CompletableFuture<Map<String, Object>> kpiF =
+                readExecutors.supplyAsync(() -> reportingRepository.locationRevenueKpiRollup(from, to, locs));
+        CompletableFuture.allOf(pageF, kpiF).join();
+        PagedRows page = pageF.join();
         List<Map<String, Object>> rows = page.rows().stream().map(this::mapLocationRevenueRow).toList();
-        return table(BillingReportSlugs.LOCATION_BILLING, "location_id", rows, page.total(), buildLocationRevenueKpis(k));
+        return table(
+                BillingReportSlugs.LOCATION_BILLING,
+                "location_id",
+                rows,
+                page.total(),
+                buildLocationRevenueKpis(kpiF.join()));
     }
 
     public Map<String, Object> revenueByLocation(
@@ -486,20 +514,21 @@ public class BillingReportingService {
         if (locs != null && locs.isEmpty()) {
             return table(BillingReportSlugs.POST_BILL, "invoice_id", List.of(), 0L, null);
         }
-        PagedRows page =
+        String sortBy = q != null && q.hasSort() ? q.sortBy() : "due_date";
+        String order = q != null ? q.orderOrDefault() : "asc";
+        String search = q != null ? q.q() : null;
+        String status = q != null ? q.status() : null;
+        int lim = cap(limit);
+        int pageOffset = off(offset);
+        CompletableFuture<PagedRows> pageF = readExecutors.supplyAsync(() ->
                 reportingRepository.searchPostBillRows(
-                        from,
-                        to,
-                        locs,
-                        q != null ? q.q() : null,
-                        q != null ? q.status() : null,
-                        q != null && q.hasSort() ? q.sortBy() : "due_date",
-                        q != null ? q.orderOrDefault() : "asc",
-                        cap(limit),
-                        off(offset));
-        Map<String, Object> k = reportingRepository.postBillKpiRollup(from, to, locs);
+                        from, to, locs, search, status, sortBy, order, lim, pageOffset));
+        CompletableFuture<Map<String, Object>> kpiF =
+                readExecutors.supplyAsync(() -> reportingRepository.postBillKpiRollup(from, to, locs));
+        CompletableFuture.allOf(pageF, kpiF).join();
+        PagedRows page = pageF.join();
         List<Map<String, Object>> rows = page.rows().stream().map(this::mapPostBillRow).toList();
-        return table(BillingReportSlugs.POST_BILL, "invoice_id", rows, page.total(), buildPostBillKpis(k));
+        return table(BillingReportSlugs.POST_BILL, "invoice_id", rows, page.total(), buildPostBillKpis(kpiF.join()));
     }
 
     private Map<String, Object> stageRunReport(
@@ -517,19 +546,20 @@ public class BillingReportingService {
         if (locs != null && locs.isEmpty()) {
             return table(reportSlug, "stage_run_id", List.of(), 0L, null);
         }
-        PagedRows page =
+        String sortBy = q != null && q.hasSort() ? q.sortBy() : "started_on";
+        String order = q != null ? q.orderOrDefault() : "desc";
+        String search = q != null ? q.q() : null;
+        String status = q != null ? q.status() : null;
+        int lim = cap(limit);
+        int pageOffset = off(offset);
+        CompletableFuture<PagedRows> pageF = readExecutors.supplyAsync(() ->
                 reportingRepository.searchStageRuns(
-                        from,
-                        to,
-                        locs,
-                        stageCode,
-                        q != null ? q.q() : null,
-                        q != null ? q.status() : null,
-                        q != null && q.hasSort() ? q.sortBy() : "started_on",
-                        q != null ? q.orderOrDefault() : "desc",
-                        cap(limit),
-                        off(offset));
-        Map<String, Object> k = reportingRepository.stageRunKpiRollup(from, to, locs, stageCode);
+                        from, to, locs, stageCode, search, status, sortBy, order, lim, pageOffset));
+        CompletableFuture<Map<String, Object>> kpiF = readExecutors.supplyAsync(
+                () -> reportingRepository.stageRunKpiRollup(from, to, locs, stageCode));
+        CompletableFuture.allOf(pageF, kpiF).join();
+        PagedRows page = pageF.join();
+        Map<String, Object> k = kpiF.join();
         List<Map<String, Object>> rows;
         List<Map<String, Object>> kpis;
         if (BillingReportSlugs.POST_BILL.equals(reportSlug)) {
@@ -570,20 +600,19 @@ public class BillingReportingService {
         if (locs != null && locs.isEmpty()) {
             return table(BillingReportSlugs.REBILL, "dlq_id", List.of(), 0L, null);
         }
-        PagedRows p =
+        String sortBy = q.hasSort() ? q.sortBy() : "due_date";
+        String order = q.orderOrDefault();
+        int lim = cap(limit);
+        int pageOffset = off(offset);
+        CompletableFuture<PagedRows> pageF = readExecutors.supplyAsync(() ->
                 reportingRepository.failedBillingLines(
-                        from,
-                        to,
-                        locs,
-                        q.q(),
-                        q.status(),
-                        q.hasSort() ? q.sortBy() : "due_date",
-                        q.orderOrDefault(),
-                        cap(limit),
-                        off(offset));
+                        from, to, locs, q.q(), q.status(), sortBy, order, lim, pageOffset));
+        CompletableFuture<Map<String, Object>> kpiF =
+                readExecutors.supplyAsync(() -> reportingRepository.dlqKpiRollup(from, to, locs));
+        CompletableFuture.allOf(pageF, kpiF).join();
+        PagedRows p = pageF.join();
         List<Map<String, Object>> rows = p.rows().stream().map(BillingReportingService::mapRebillRow).toList();
-        Map<String, Object> k = reportingRepository.dlqKpiRollup(from, to, locs);
-        return table(BillingReportSlugs.REBILL, "dlq_id", rows, p.total(), buildDlqKpis(k));
+        return table(BillingReportSlugs.REBILL, "dlq_id", rows, p.total(), buildDlqKpis(kpiF.join()));
     }
 
     public Map<String, Object> failedBilling(
@@ -599,19 +628,18 @@ public class BillingReportingService {
         if (locs != null && locs.isEmpty()) {
             return table(BillingReportSlugs.FAILED_BILLING, "dlq_id", List.of(), 0L, null);
         }
-        PagedRows p =
+        String sortBy = q.hasSort() ? q.sortBy() : "due_date";
+        String order = q.orderOrDefault();
+        int lim = cap(limit);
+        int pageOffset = off(offset);
+        CompletableFuture<PagedRows> pageF = readExecutors.supplyAsync(() ->
                 reportingRepository.failedBillingLines(
-                        from,
-                        to,
-                        locs,
-                        q.q(),
-                        q.status(),
-                        q.hasSort() ? q.sortBy() : "due_date",
-                        q.orderOrDefault(),
-                        cap(limit),
-                        off(offset));
-        Map<String, Object> k = reportingRepository.dlqKpiRollup(from, to, locs);
-        return table(BillingReportSlugs.FAILED_BILLING, "dlq_id", p.rows(), p.total(), buildDlqKpis(k));
+                        from, to, locs, q.q(), q.status(), sortBy, order, lim, pageOffset));
+        CompletableFuture<Map<String, Object>> kpiF =
+                readExecutors.supplyAsync(() -> reportingRepository.dlqKpiRollup(from, to, locs));
+        CompletableFuture.allOf(pageF, kpiF).join();
+        PagedRows p = pageF.join();
+        return table(BillingReportSlugs.FAILED_BILLING, "dlq_id", p.rows(), p.total(), buildDlqKpis(kpiF.join()));
     }
 
     public Map<String, Object> paymentCollection(
@@ -627,20 +655,26 @@ public class BillingReportingService {
         if (locs != null && locs.isEmpty()) {
             return table(BillingReportSlugs.PAYMENT_COLLECTION, "payment_method", List.of(), 0L, null);
         }
-        PagedRows page =
+        String sortBy = q != null && q.hasSort() ? q.sortBy() : "billed_amount";
+        String order = q != null ? q.orderOrDefault() : "desc";
+        String search = q != null ? q.q() : null;
+        String status = q != null ? q.status() : null;
+        int lim = cap(limit);
+        int pageOffset = off(offset);
+        CompletableFuture<PagedRows> pageF = readExecutors.supplyAsync(() ->
                 reportingRepository.searchPaymentCollection(
-                        from,
-                        to,
-                        locs,
-                        q != null ? q.q() : null,
-                        q != null ? q.status() : null,
-                        q != null && q.hasSort() ? q.sortBy() : "billed_amount",
-                        q != null ? q.orderOrDefault() : "desc",
-                        cap(limit),
-                        off(offset));
-        Map<String, Object> k = reportingRepository.paymentKpiRollup(from, to, locs);
+                        from, to, locs, search, status, sortBy, order, lim, pageOffset));
+        CompletableFuture<Map<String, Object>> kpiF =
+                readExecutors.supplyAsync(() -> reportingRepository.paymentKpiRollup(from, to, locs));
+        CompletableFuture.allOf(pageF, kpiF).join();
+        PagedRows page = pageF.join();
         List<Map<String, Object>> rows = page.rows().stream().map(this::mapPaymentRow).toList();
-        return table(BillingReportSlugs.PAYMENT_COLLECTION, "payment_method", rows, page.total(), buildPaymentKpis(k));
+        return table(
+                BillingReportSlugs.PAYMENT_COLLECTION,
+                "payment_method",
+                rows,
+                page.total(),
+                buildPaymentKpis(kpiF.join()));
     }
 
     public Map<String, Object> outstandingBalance(
@@ -656,20 +690,26 @@ public class BillingReportingService {
         if (locs != null && locs.isEmpty()) {
             return table(BillingReportSlugs.OUTSTANDING_BALANCE, "location_id", List.of(), 0L, null);
         }
-        PagedRows page =
+        String sortBy = q != null && q.hasSort() ? q.sortBy() : "outstanding_amount";
+        String order = q != null ? q.orderOrDefault() : "desc";
+        String search = q != null ? q.q() : null;
+        String status = q != null ? q.status() : null;
+        int lim = cap(limit);
+        int pageOffset = off(offset);
+        CompletableFuture<PagedRows> pageF = readExecutors.supplyAsync(() ->
                 reportingRepository.searchOutstandingBalance(
-                        from,
-                        to,
-                        locs,
-                        q != null ? q.q() : null,
-                        q != null ? q.status() : null,
-                        q != null && q.hasSort() ? q.sortBy() : "outstanding_amount",
-                        q != null ? q.orderOrDefault() : "desc",
-                        cap(limit),
-                        off(offset));
-        Map<String, Object> k = reportingRepository.outstandingKpiRollup(from, to, locs);
+                        from, to, locs, search, status, sortBy, order, lim, pageOffset));
+        CompletableFuture<Map<String, Object>> kpiF =
+                readExecutors.supplyAsync(() -> reportingRepository.outstandingKpiRollup(from, to, locs));
+        CompletableFuture.allOf(pageF, kpiF).join();
+        PagedRows page = pageF.join();
         List<Map<String, Object>> rows = page.rows().stream().map(this::mapArAgingRow).toList();
-        return table(BillingReportSlugs.OUTSTANDING_BALANCE, "location_id", rows, page.total(), buildOutstandingKpis(k));
+        return table(
+                BillingReportSlugs.OUTSTANDING_BALANCE,
+                "location_id",
+                rows,
+                page.total(),
+                buildOutstandingKpis(kpiF.join()));
     }
 
     public Map<String, Object> arReports(
@@ -727,27 +767,21 @@ public class BillingReportingService {
         if (locs != null && locs.isEmpty()) {
             return table(reportSlug, "subscription_billing_schedule_adjustment_id", List.of(), 0L, null);
         }
-        int total = reportingRepository.countProrationAdjustments(
-                from,
-                to,
-                locs,
-                q != null ? q.q() : null,
-                q != null ? q.status() : null);
-        List<Map<String, Object>> rows =
-                reportingRepository.prorationAdjustment(
-                        from,
-                        to,
-                        locs,
-                        q != null ? q.q() : null,
-                        q != null ? q.status() : null,
-                        cap(limit),
-                        off(offset));
+        String search = q != null ? q.q() : null;
+        String status = q != null ? q.status() : null;
+        int lim = cap(limit);
+        int pageOffset = off(offset);
+        CompletableFuture<Integer> totalF = readExecutors.supplyAsync(() ->
+                reportingRepository.countProrationAdjustments(from, to, locs, search, status));
+        CompletableFuture<List<Map<String, Object>>> rowsF = readExecutors.supplyAsync(() ->
+                reportingRepository.prorationAdjustment(from, to, locs, search, status, lim, pageOffset));
+        CompletableFuture.allOf(totalF, rowsF).join();
         List<Map<String, Object>> out =
-                rows.stream()
+                rowsF.join().stream()
                         .map(r -> catalogKeys ? mapPromotionRow(r) : normalizeProrationRow(r))
                         .toList();
         return table(
-                reportSlug, "subscription_billing_schedule_adjustment_id", out, total, null);
+                reportSlug, "subscription_billing_schedule_adjustment_id", out, totalF.join(), null);
     }
 
     public Map<String, Object> subscriptionActivityReport(
@@ -792,20 +826,21 @@ public class BillingReportingService {
         if (locs != null && locs.isEmpty()) {
             return table(BillingReportSlugs.BILLING_EXCEPTIONS, "dlq_id", List.of(), 0L, null);
         }
-        PagedRows p =
+        String sortBy = q != null && q.hasSort() ? q.sortBy() : "due_date";
+        String order = q != null ? q.orderOrDefault() : "desc";
+        String search = q != null ? q.q() : null;
+        String status = q != null ? q.status() : null;
+        int lim = cap(limit);
+        int pageOffset = off(offset);
+        CompletableFuture<PagedRows> pageF = readExecutors.supplyAsync(() ->
                 reportingRepository.failedBillingLines(
-                        from,
-                        to,
-                        locs,
-                        q != null ? q.q() : null,
-                        q != null ? q.status() : null,
-                        q != null && q.hasSort() ? q.sortBy() : "due_date",
-                        q != null ? q.orderOrDefault() : "desc",
-                        cap(limit),
-                        off(offset));
+                        from, to, locs, search, status, sortBy, order, lim, pageOffset));
+        CompletableFuture<Map<String, Object>> kpiF =
+                readExecutors.supplyAsync(() -> reportingRepository.dlqKpiRollup(from, to, locs));
+        CompletableFuture.allOf(pageF, kpiF).join();
+        PagedRows p = pageF.join();
         List<Map<String, Object>> rows = p.rows().stream().map(this::mapExceptionFromDlq).toList();
-        Map<String, Object> k = reportingRepository.dlqKpiRollup(from, to, locs);
-        return table(BillingReportSlugs.BILLING_EXCEPTIONS, "dlq_id", rows, p.total(), buildDlqKpis(k));
+        return table(BillingReportSlugs.BILLING_EXCEPTIONS, "dlq_id", rows, p.total(), buildDlqKpis(kpiF.join()));
     }
 
     private Map<String, Object> mapExceptionFromDlq(Map<String, Object> m) {

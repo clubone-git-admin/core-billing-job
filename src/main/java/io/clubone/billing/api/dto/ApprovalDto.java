@@ -16,6 +16,9 @@ public record ApprovalDto(
     String approverRole,
     StatusDto approvalStatus,
     UUID approverId,
+    @com.fasterxml.jackson.annotation.JsonProperty("approverName")
+    @com.fasterxml.jackson.annotation.JsonAlias("approver_name")
+    String approverName,
     OffsetDateTime approvedOn,
     String notes,
     OffsetDateTime createdOn

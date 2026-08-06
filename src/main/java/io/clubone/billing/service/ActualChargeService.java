@@ -9,6 +9,8 @@ import io.clubone.billing.repo.MockChargeRepository.MockInvoiceRow;
 import io.clubone.billing.repo.StageRunRepository;
 import io.clubone.billing.repo.SubscriptionBillingHistoryRepository;
 import io.clubone.billing.service.actualcharge.ActualChargeQueuedEvent;
+import io.clubone.billing.util.BillingReadExecutors;
+import io.clubone.billing.util.UtcClock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,10 +24,14 @@ import org.springframework.web.server.ResponseStatusException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 public class ActualChargeService {
@@ -41,6 +47,7 @@ public class ActualChargeService {
     private final SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository;
     private final MockChargeRepository mockChargeRepository;
     private final ActualChargeRepository actualChargeRepository;
+    private final BillingReadExecutors readExecutors;
     private final int pendingStuckThresholdMinutes;
 
     public ActualChargeService(
@@ -52,6 +59,7 @@ public class ActualChargeService {
             SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository,
             MockChargeRepository mockChargeRepository,
             ActualChargeRepository actualChargeRepository,
+            BillingReadExecutors readExecutors,
             @Value("${clubone.billing.actual-charge.pending.stuck-threshold-minutes:30}") int pendingStuckThresholdMinutes) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
@@ -61,6 +69,7 @@ public class ActualChargeService {
         this.subscriptionBillingHistoryRepository = subscriptionBillingHistoryRepository;
         this.mockChargeRepository = mockChargeRepository;
         this.actualChargeRepository = actualChargeRepository;
+        this.readExecutors = readExecutors;
         this.pendingStuckThresholdMinutes = Math.max(1, pendingStuckThresholdMinutes);
     }
 
@@ -107,6 +116,22 @@ public class ActualChargeService {
         }
 
         String status = target.statusCode();
+
+        if (("COMPLETED".equals(status)
+                        || "PARTIALLY_COMPLETED".equals(status)
+                        || "PARTIAL".equals(status))
+                && !regenerateAll
+                && !hasMeaningfulActualChargeWork(target)) {
+            log.info(
+                    "actual-charge start: re-arming hollow {} stageRunId={} billingRunId={}",
+                    status,
+                    target.stageRunId(),
+                    billingRunId);
+            stageRunRepository.prepareStageRunForRerun(target.stageRunId());
+            stageRunRepository.trySetStageRunStatusByCode(target.stageRunId(), "IDLE");
+            target = stageRunRepository.findById(target.stageRunId());
+            status = target != null ? target.statusCode() : "IDLE";
+        }
 
         if ("COMPLETED".equals(status) && !regenerateAll) {
             throw new ResponseStatusException(
@@ -444,11 +469,14 @@ public class ActualChargeService {
         if (billingRunId == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "billingRunId is required");
         }
-        List<StageRunDto> rows =
-                stageRunRepository.listByBillingRunIdAndStageCode(billingRunId, STAGE_CODE, status, limit, offset, sortBy, sortOrder);
-        int total = stageRunRepository.countByBillingRunIdAndStageCode(billingRunId, STAGE_CODE, status);
-        List<ActualChargeListItemDto> data = rows.stream().map(this::toListItem).toList();
-        return PageResponse.of(data, total, limit, offset);
+        CompletableFuture<List<StageRunDto>> rowsF = readExecutors.supplyAsync(() ->
+                stageRunRepository.listByBillingRunIdAndStageCode(
+                        billingRunId, STAGE_CODE, status, limit, offset, sortBy, sortOrder));
+        CompletableFuture<Integer> totalF = readExecutors.supplyAsync(() ->
+                stageRunRepository.countByBillingRunIdAndStageCode(billingRunId, STAGE_CODE, status));
+        CompletableFuture.allOf(rowsF, totalF).join();
+        List<ActualChargeListItemDto> data = rowsF.join().stream().map(this::toListItem).toList();
+        return PageResponse.of(data, totalF.join(), limit, offset);
     }
 
     private ActualChargeListItemDto toListItem(StageRunDto s) {
@@ -687,5 +715,173 @@ public class ActualChargeService {
             return "\"" + s.replace("\"", "\"\"") + "\"";
         }
         return s;
+    }
+
+    /**
+     * Marks the ACTUAL_CHARGE stage run as {@code SCHEDULED} for later dispatch
+     * ({@link io.clubone.billing.service.schedule.ScheduledStageDispatchService}).
+     */
+    @Transactional
+    public Map<String, Object> scheduleRun(ActualChargeScheduledRequest request) {
+        UUID billingRunId = request.billingRunId();
+        OffsetDateTime when = request.scheduledFor().withOffsetSameInstant(ZoneOffset.UTC);
+        if (!when.isAfter(UtcClock.now())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "scheduledFor must be in the future (UTC)");
+        }
+        BillingRunDto br = billingRunService.getBillingRun(billingRunId);
+        assertActualChargeStageReady(br);
+        assertInvoicesLockedForActualCharge(billingRunId);
+
+        StageRunDto existing = request.stageRunId() != null
+                ? resolveStageRun(billingRunId, request.stageRunId())
+                : stageRunRepository.findByBillingRunIdAndStageCode(billingRunId, STAGE_CODE);
+        UUID stageRunId;
+        if (existing != null) {
+            String st = existing.statusCode();
+            if ("RUNNING".equals(st) || "QUEUED".equals(st) || "IN_PROGRESS".equals(st)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Cannot schedule while actual charge is " + st);
+            }
+            if ("IDLE".equals(st) || "PENDING".equals(st) || "SCHEDULED".equals(st)
+                    || "FAILED".equals(st) || "CANCELLED".equals(st) || "WAITING".equals(st)) {
+                stageRunId = existing.stageRunId();
+                if ("FAILED".equals(st) || "CANCELLED".equals(st)) {
+                    stageRunRepository.prepareStageRunForReschedule(stageRunId, when);
+                } else {
+                    stageRunRepository.updateScheduledFor(stageRunId, when);
+                }
+            } else if ("COMPLETED".equals(st) || "PARTIALLY_COMPLETED".equals(st) || "PARTIAL".equals(st)) {
+                // Hollow completes (0 invoices / no charges) happen when IDLE was incorrectly auto-run.
+                // Re-arm those for schedule; block only when real charge work already happened.
+                if (hasMeaningfulActualChargeWork(existing)) {
+                    throw new ResponseStatusException(HttpStatus.CONFLICT,
+                            "Cannot schedule after actual charge completed (" + st + ")");
+                }
+                stageRunId = existing.stageRunId();
+                stageRunRepository.prepareStageRunForReschedule(stageRunId, when);
+                log.info(
+                        "actual-charge schedule: re-arming hollow {} stageRunId={} billingRunId={}",
+                        st,
+                        stageRunId,
+                        billingRunId);
+            } else {
+                stageRunId = stageRunRepository.createStageRun(
+                        billingRunId, STAGE_CODE, when, null, request.triggeredBy(), false);
+            }
+        } else {
+            stageRunId = stageRunRepository.createStageRun(
+                    billingRunId, STAGE_CODE, when, null, request.triggeredBy(), false);
+        }
+
+        stageRunRepository.trySetStageRunStatusByCode(stageRunId, "SCHEDULED");
+        String whenIso = DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(when);
+        Map<String, Object> m = new HashMap<>();
+        StageRunDto refreshed = stageRunRepository.findById(stageRunId);
+        if (refreshed != null && refreshed.summaryJson() != null) {
+            m.putAll(refreshed.summaryJson());
+        }
+        m.put("scheduled_for", whenIso);
+        m.put("timezone", request.timezone() != null && !request.timezone().isBlank()
+                ? request.timezone() : "UTC");
+        if (request.triggeredBy() != null) {
+            m.put("triggered_by", request.triggeredBy().toString());
+            m.put("initiated_by", request.triggeredBy().toString());
+        }
+        stageRunRepository.updateStageRunSummary(stageRunId, m);
+        auditLogRepository.insertAuditLog(
+                "ACTUAL_CHARGE",
+                "BILLING_RUN",
+                billingRunId,
+                "SCHEDULED",
+                request.triggeredBy() != null ? request.triggeredBy().toString() : "system",
+                Map.of("scheduled_for", whenIso, "stageRunId", stageRunId.toString()));
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("scheduledRunId", stageRunId);
+        body.put("billingRunId", billingRunId);
+        body.put("scheduledFor", whenIso);
+        body.put("statusCode", "SCHEDULED");
+        body.put("createdAt", DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(UtcClock.now()));
+        return body;
+    }
+
+    private static boolean hasMeaningfulActualChargeWork(StageRunDto stage) {
+        if (stage == null) {
+            return false;
+        }
+        Map<String, Object> sj = stage.summaryJson();
+        if (sj == null || sj.isEmpty()) {
+            return false;
+        }
+        int selected = intFromSummary(sj, "total_selected", "totalSelected");
+        int success = intFromSummary(sj, "success_count", "successCount");
+        int failed = intFromSummary(sj, "failed_count", "failureCount");
+        int pending = intFromSummary(sj, "pending_count", "pendingCount");
+        int skipped = intFromSummary(sj, "skipped_count", "skippedCount");
+        if (selected > 0 || success > 0 || failed > 0 || pending > 0 || skipped > 0) {
+            return true;
+        }
+        return decimalFromSummary(sj, "charged_amount", "successAmount").signum() > 0
+                || decimalFromSummary(sj, "total_amount_selected", "selectedAmount").signum() > 0
+                || decimalFromSummary(sj, "failed_amount", "failureAmount").signum() > 0;
+    }
+
+    private static int intFromSummary(Map<String, Object> sj, String a, String b) {
+        Object v = sj.get(a);
+        if (v == null) {
+            v = sj.get(b);
+        }
+        if (v instanceof Number n) {
+            return n.intValue();
+        }
+        if (v != null) {
+            try {
+                return Integer.parseInt(v.toString().trim());
+            } catch (NumberFormatException ignored) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    private static BigDecimal decimalFromSummary(Map<String, Object> sj, String a, String b) {
+        Object v = sj.get(a);
+        if (v == null) {
+            v = sj.get(b);
+        }
+        if (v instanceof BigDecimal bd) {
+            return bd;
+        }
+        if (v instanceof Number n) {
+            return BigDecimal.valueOf(n.doubleValue());
+        }
+        if (v != null) {
+            try {
+                return new BigDecimal(v.toString().trim());
+            } catch (NumberFormatException ignored) {
+                return BigDecimal.ZERO;
+            }
+        }
+        return BigDecimal.ZERO;
+    }
+
+    @Transactional
+    public void cancelScheduledRun(UUID scheduledRunId) {
+        StageRunDto s = stageRunRepository.findById(scheduledRunId);
+        if (s == null || !STAGE_CODE.equals(s.stageCode())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Scheduled actual charge not found");
+        }
+        if (!"SCHEDULED".equals(s.statusCode())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Run is not SCHEDULED");
+        }
+        stageRunRepository.cancelStageRun(scheduledRunId, "Schedule cancelled");
+        auditLogRepository.insertAuditLog(
+                "ACTUAL_CHARGE",
+                "BILLING_RUN",
+                s.billingRunId(),
+                "SCHEDULE_CANCELLED",
+                "system",
+                Map.of("reason", "Schedule cancelled", "stageRunId", scheduledRunId.toString()));
     }
 }

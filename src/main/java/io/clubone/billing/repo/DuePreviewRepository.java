@@ -61,6 +61,9 @@ public class DuePreviewRepository {
         CAST(NULL AS date) AS contract_start_date,
         CAST(NULL AS date) AS contract_end_date,
         sis.status_name AS subscription_instance_status_name,
+        si.billing_start_date,
+        si.billing_end_date,
+        COALESCE(sp.is_active, true) AS plan_is_active,
         CAST(NULL AS uuid) AS subscription_purchase_snapshot_id,
         sbs.unit_price,
         COALESCE(sbs.override_amount, sbs.base_amount) AS effective_unit_price,
@@ -178,79 +181,231 @@ public class DuePreviewRepository {
         }
 
         sql.append(" ORDER BY sbs.billing_date ASC, sbs.subscription_instance_id ASC, sbs.cycle_number ASC");
-        
-        return jdbc.query(sql.toString(), params.toArray(), (rs, rowNum) -> {
-            Map<String, Object> row = new HashMap<>();
-            
-            // Basic instance info
-            row.put("billing_schedule_id", rs.getObject("billing_schedule_id", UUID.class));
-            row.put("subscription_instance_id", rs.getObject("subscription_instance_id", UUID.class));
-            row.put("subscription_plan_id", rs.getObject("subscription_plan_id", UUID.class));
-            row.put("subscription_plan_code", rs.getString("subscription_plan_code"));
-            row.put("payment_due_date", rs.getObject("payment_due_date", LocalDate.class));
-            row.put("cycle_number", rs.getObject("cycle_number", Integer.class));
-            row.put("start_date", rs.getObject("start_date", LocalDate.class));
-            row.put("last_billed_on", rs.getObject("last_billed_on", LocalDate.class));
-            
-            // Plan and payment info
-            row.put("client_payment_method_id", rs.getObject("client_payment_method_id", UUID.class));
-            row.put("client_agreement_id", rs.getObject("client_agreement_id", UUID.class));
-            row.put("contract_start_date", rs.getObject("contract_start_date", LocalDate.class));
-            row.put("contract_end_date", rs.getObject("contract_end_date", LocalDate.class));
-            row.put("subscription_instance_status_name", rs.getString("subscription_instance_status_name"));
-            row.put("subscription_purchase_snapshot_id", rs.getObject("subscription_purchase_snapshot_id", UUID.class));
 
-            // Pricing info
-            BigDecimal unitPrice = rs.getObject("unit_price", BigDecimal.class);
-            BigDecimal effectiveUnitPrice = rs.getObject("effective_unit_price", BigDecimal.class);
-            BigDecimal scheduleSubtotal = rs.getObject("schedule_subtotal_before_tax", BigDecimal.class);
-            BigDecimal scheduleTaxAmount = rs.getObject("schedule_tax_amount", BigDecimal.class);
-            BigDecimal scheduleDiscountAmount = rs.getObject("schedule_discount_amount", BigDecimal.class);
-            BigDecimal scheduleFinalAmount = rs.getObject("schedule_final_amount", BigDecimal.class);
-            BigDecimal adjustmentAmount = rs.getObject("adjustment_total_amount", BigDecimal.class);
+        return jdbc.query(sql.toString(), params.toArray(), (rs, rowNum) -> mapDuePreviewRow(rs));
+    }
 
-            BigDecimal subTotal = scheduleSubtotal != null
-                    ? scheduleSubtotal
-                    : (effectiveUnitPrice != null ? effectiveUnitPrice : (unitPrice != null ? unitPrice : BigDecimal.ZERO));
-            BigDecimal taxAmount = scheduleTaxAmount != null ? scheduleTaxAmount : BigDecimal.ZERO;
-            BigDecimal discountAmount = scheduleDiscountAmount != null ? scheduleDiscountAmount : BigDecimal.ZERO;
-            BigDecimal baseTotal = scheduleFinalAmount != null
-                    ? scheduleFinalAmount
-                    : subTotal.add(taxAmount).subtract(discountAmount);
-            BigDecimal totalAmount = baseTotal.add(adjustmentAmount != null ? adjustmentAmount : BigDecimal.ZERO);
-            if (totalAmount.signum() < 0) {
-                totalAmount = BigDecimal.ZERO;
+    /**
+     * Keyset page of due schedule rows for invoice generation (stable {@code billing_schedule_id} order).
+     * Pass {@code afterBillingScheduleId} from the prior page's last id (exclusive); {@code null} for the first page.
+     */
+    public List<Map<String, Object>> getDueInvoicesForPreviewPage(
+            LocalDate dueDate, List<UUID> locationIds, UUID afterBillingScheduleId, int limit) {
+        int pageSize = Math.max(1, Math.min(limit, 5_000));
+        StringBuilder sql = new StringBuilder("""
+            SELECT
+        sbs.billing_schedule_id,
+        si.subscription_instance_id,
+        sbs.subscription_plan_id,
+        sp.subscription_plan_code,
+        sbs.billing_date AS payment_due_date,
+        sbs.cycle_number,
+        sbs.billing_period_start AS start_date,
+        si.last_billed_on,
+        sp.client_payment_method_id,
+        sp.client_agreement_id,
+        CAST(NULL AS date) AS contract_start_date,
+        CAST(NULL AS date) AS contract_end_date,
+        sis.status_name AS subscription_instance_status_name,
+        si.billing_start_date,
+        si.billing_end_date,
+        COALESCE(sp.is_active, true) AS plan_is_active,
+        CAST(NULL AS uuid) AS subscription_purchase_snapshot_id,
+        sbs.unit_price,
+        COALESCE(sbs.override_amount, sbs.base_amount) AS effective_unit_price,
+        sbs.billing_period_start AS price_cycle_start,
+        sbs.billing_period_end AS price_cycle_end,
+        COALESCE(sbs.base_amount, 0::numeric) AS base_amount,
+        COALESCE(sbs.override_amount, sbs.base_amount, 0::numeric) AS override_or_base_amount,
+        COALESCE(sbs.discount_amount, 0::numeric) AS schedule_discount_amount,
+        COALESCE(sbs.tax_amount, 0::numeric) AS schedule_tax_amount,
+        COALESCE(
+            sbs.subtotal_before_tax,
+            GREATEST(COALESCE(sbs.override_amount, sbs.base_amount, 0::numeric) - COALESCE(sbs.discount_amount, 0::numeric), 0::numeric)
+        ) AS schedule_subtotal_before_tax,
+        COALESCE(
+            sbs.final_amount,
+            GREATEST(COALESCE(sbs.override_amount, sbs.base_amount, 0::numeric) - COALESCE(sbs.discount_amount, 0::numeric) + COALESCE(sbs.tax_amount, 0::numeric), 0::numeric)
+        ) AS schedule_final_amount,
+        COALESCE(adj.adjustment_total, 0::numeric) AS adjustment_total_amount,
+        ca.client_role_id AS client_role_id,
+        cr.role_id AS role_id,
+        lcas.name AS client_agreement_status,
+        a.agreement_name,
+        COALESCE(loc_purchased.name, loc.name) AS location_name,
+        pt.method_type_name AS payment_method_name,
+        pt.method_type_name AS payment_type_name,
+        cpm.card_last4,
+        si.subscription_instance_id AS subscription_id,
+        ch.client_first_name,
+        ch.client_last_name,
+        ch.client_email
+    FROM client_subscription_billing.subscription_billing_schedule sbs
+    JOIN client_subscription_billing.subscription_instance si
+      ON si.subscription_instance_id = sbs.subscription_instance_id
+    JOIN client_subscription_billing.subscription_plan sp
+      ON sp.subscription_plan_id = sbs.subscription_plan_id
+    JOIN billing_config.subscription_instance_status sis
+        ON sis.subscription_instance_status_id = si.subscription_instance_status_id
+    LEFT JOIN LATERAL (
+        SELECT
+            SUM(
+                CASE
+                    WHEN UPPER(COALESCE(bat.sign_behavior, 'BOTH')) = 'NEGATIVE' THEN -ABS(sbsa.amount)
+                    WHEN UPPER(COALESCE(bat.sign_behavior, 'BOTH')) = 'POSITIVE' THEN ABS(sbsa.amount)
+                    ELSE sbsa.amount
+                END
+            ) AS adjustment_total
+        FROM client_subscription_billing.subscription_billing_schedule_adjustment sbsa
+        LEFT JOIN billing_config.billing_adjustment_type bat
+          ON bat.billing_adjustment_type_id = sbsa.billing_adjustment_type_id
+        WHERE sbsa.billing_schedule_id = sbs.billing_schedule_id
+          AND COALESCE(sbsa.is_active, true) = true
+    ) adj ON true
+    LEFT JOIN client_agreements.client_agreement ca ON ca.client_agreement_id = sp.client_agreement_id
+    LEFT JOIN client_agreements.lu_client_agreement_status lcas
+        ON lcas.client_agreement_status_id = ca.client_agreement_status_id
+    LEFT JOIN agreements.agreement a ON a.agreement_id = ca.agreement_id
+    LEFT JOIN clients.client_role cr ON cr.client_role_id = ca.client_role_id
+    LEFT JOIN locations.levels pl_purchased ON pl_purchased.level_id = ca.purchased_level_id
+    LEFT JOIN locations.location loc_purchased
+        ON loc_purchased.location_id = pl_purchased.reference_entity_id
+        AND loc_purchased.application_id = pl_purchased.application_id
+    LEFT JOIN locations.location loc ON loc.location_id = cr.location_id
+    LEFT JOIN client_payments.client_payment_method cpm ON cpm.client_payment_method_id = sp.client_payment_method_id
+    LEFT JOIN payment_gateway.payment_gateway_supported_method pgsm
+        ON pgsm.payment_gateway_supported_method_id = cpm.payment_gateway_method_type_id
+    LEFT JOIN payment_gateway.lu_payment_gateway_method_type pt
+        ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id
+    LEFT JOIN LATERAL (
+        SELECT
+            MAX(CASE WHEN cct.name = 'First Name' AND cc.is_active = true
+                AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                THEN cc.characteristic END) AS client_first_name,
+            MAX(CASE WHEN cct.name = 'Last Name' AND cc.is_active = true
+                AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                THEN cc.characteristic END) AS client_last_name,
+            MAX(CASE WHEN cct.name = 'Primary Contact Email' AND cc.is_active = true
+                AND (cc.valid_thru IS NULL OR cc.valid_thru >= CURRENT_DATE)
+                THEN cc.characteristic END) AS client_email
+        FROM clients.client_characteristic cc
+        INNER JOIN clients.client_characteristic_type cct
+            ON cct.client_characteristic_type_id = cc.client_characteristic_type_id
+            AND cct.name IN ('First Name', 'Last Name', 'Primary Contact Email')
+            AND cct.is_active = true
+        WHERE cc.client_role_id = ca.client_role_id
+    ) ch ON true
+    WHERE sbs.application_id = ?::uuid
+    AND sis.status_name = 'ACTIVE'
+    AND sbs.billing_date IS NOT NULL
+    AND sbs.billing_date <= CASE
+          WHEN ?::date IS NOT NULL THEN ?::date
+          ELSE (CURRENT_TIMESTAMP AT TIME ZONE COALESCE(NULLIF(TRIM(si.timezone), ''), 'UTC'))::date
+        END
+    AND sbs.invoice_id IS NULL
+    AND sp.is_active = true
+        """);
+
+        List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
+        params.add(dueDate);
+        params.add(dueDate);
+
+        if (locationIds != null && !locationIds.isEmpty()) {
+            int n = locationIds.size();
+            String placeholders = String.join(",", Collections.nCopies(n, "?::uuid"));
+            sql.append(" AND ca.purchased_level_id IS NOT NULL ")
+                    .append("AND EXISTS (")
+                    .append("SELECT 1 FROM locations.levels pl_scope ")
+                    .append("WHERE pl_scope.level_id = ca.purchased_level_id ")
+                    .append("  AND pl_scope.reference_entity_id IN (")
+                    .append(placeholders)
+                    .append("))");
+            for (UUID id : locationIds) {
+                params.add(id != null ? id.toString() : null);
             }
-            
-            row.put("sub_total", subTotal);
-            row.put("tax_amount", taxAmount);
-            row.put("discount_amount", discountAmount);
-            row.put("total_amount", totalAmount);
-            row.put("adjustment_amount", adjustmentAmount != null ? adjustmentAmount : BigDecimal.ZERO);
-            row.put("base_total_amount", baseTotal);
-            row.put("unit_price", unitPrice);
-            row.put("effective_unit_price", effectiveUnitPrice);
-            row.put("price_cycle_start", rs.getObject("price_cycle_start", LocalDate.class));
-            row.put("price_cycle_end", rs.getObject("price_cycle_end", LocalDate.class));
-            
-            // Client info
-            row.put("client_role_id", rs.getObject("client_role_id", UUID.class));
-            row.put("client_first_name", rs.getString("client_first_name"));
-            row.put("client_last_name", rs.getString("client_last_name"));
-            row.put("client_email", rs.getString("client_email"));
-            
-            // Additional attributes
-            row.put("role_id", rs.getObject("role_id", String.class));
-            row.put("client_agreement_status", rs.getString("client_agreement_status"));
-            row.put("agreement_name", rs.getString("agreement_name"));
-            row.put("location_name", rs.getString("location_name"));
-            row.put("payment_method_name", rs.getString("payment_method_name"));
-            row.put("payment_type_name", rs.getString("payment_type_name"));
-            row.put("card_last4", rs.getString("card_last4"));
-            row.put("subscription_id", rs.getObject("subscription_id", UUID.class));
-            
-            return row;
-        });
+        }
+
+        if (afterBillingScheduleId != null) {
+            sql.append(" AND sbs.billing_schedule_id > ?::uuid");
+            params.add(afterBillingScheduleId.toString());
+        }
+
+        sql.append(" ORDER BY sbs.billing_schedule_id ASC LIMIT ?");
+        params.add(pageSize);
+
+        return jdbc.query(sql.toString(), params.toArray(), (rs, rowNum) -> mapDuePreviewRow(rs));
+    }
+
+    private static Map<String, Object> mapDuePreviewRow(java.sql.ResultSet rs) throws java.sql.SQLException {
+        Map<String, Object> row = new HashMap<>();
+
+        row.put("billing_schedule_id", rs.getObject("billing_schedule_id", UUID.class));
+        row.put("subscription_instance_id", rs.getObject("subscription_instance_id", UUID.class));
+        row.put("subscription_plan_id", rs.getObject("subscription_plan_id", UUID.class));
+        row.put("subscription_plan_code", rs.getString("subscription_plan_code"));
+        row.put("payment_due_date", rs.getObject("payment_due_date", LocalDate.class));
+        row.put("cycle_number", rs.getObject("cycle_number", Integer.class));
+        row.put("start_date", rs.getObject("start_date", LocalDate.class));
+        row.put("last_billed_on", rs.getObject("last_billed_on", LocalDate.class));
+
+        row.put("client_payment_method_id", rs.getObject("client_payment_method_id", UUID.class));
+        row.put("client_agreement_id", rs.getObject("client_agreement_id", UUID.class));
+        row.put("contract_start_date", rs.getObject("contract_start_date", LocalDate.class));
+        row.put("contract_end_date", rs.getObject("contract_end_date", LocalDate.class));
+        row.put("subscription_instance_status_name", rs.getString("subscription_instance_status_name"));
+        row.put("billing_start_date", rs.getObject("billing_start_date", LocalDate.class));
+        row.put("billing_end_date", rs.getObject("billing_end_date", LocalDate.class));
+        row.put("plan_is_active", rs.getObject("plan_is_active", Boolean.class));
+        row.put("subscription_purchase_snapshot_id", rs.getObject("subscription_purchase_snapshot_id", UUID.class));
+
+        BigDecimal unitPrice = rs.getObject("unit_price", BigDecimal.class);
+        BigDecimal effectiveUnitPrice = rs.getObject("effective_unit_price", BigDecimal.class);
+        BigDecimal scheduleSubtotal = rs.getObject("schedule_subtotal_before_tax", BigDecimal.class);
+        BigDecimal scheduleTaxAmount = rs.getObject("schedule_tax_amount", BigDecimal.class);
+        BigDecimal scheduleDiscountAmount = rs.getObject("schedule_discount_amount", BigDecimal.class);
+        BigDecimal scheduleFinalAmount = rs.getObject("schedule_final_amount", BigDecimal.class);
+        BigDecimal adjustmentAmount = rs.getObject("adjustment_total_amount", BigDecimal.class);
+
+        BigDecimal subTotal = scheduleSubtotal != null
+                ? scheduleSubtotal
+                : (effectiveUnitPrice != null ? effectiveUnitPrice : (unitPrice != null ? unitPrice : BigDecimal.ZERO));
+        BigDecimal taxAmount = scheduleTaxAmount != null ? scheduleTaxAmount : BigDecimal.ZERO;
+        BigDecimal discountAmount = scheduleDiscountAmount != null ? scheduleDiscountAmount : BigDecimal.ZERO;
+        BigDecimal baseTotal = scheduleFinalAmount != null
+                ? scheduleFinalAmount
+                : subTotal.add(taxAmount).subtract(discountAmount);
+        BigDecimal totalAmount = baseTotal.add(adjustmentAmount != null ? adjustmentAmount : BigDecimal.ZERO);
+        if (totalAmount.signum() < 0) {
+            totalAmount = BigDecimal.ZERO;
+        }
+
+        row.put("sub_total", subTotal);
+        row.put("tax_amount", taxAmount);
+        row.put("discount_amount", discountAmount);
+        row.put("total_amount", totalAmount);
+        row.put("adjustment_amount", adjustmentAmount != null ? adjustmentAmount : BigDecimal.ZERO);
+        row.put("base_total_amount", baseTotal);
+        row.put("unit_price", unitPrice);
+        row.put("effective_unit_price", effectiveUnitPrice);
+        row.put("price_cycle_start", rs.getObject("price_cycle_start", LocalDate.class));
+        row.put("price_cycle_end", rs.getObject("price_cycle_end", LocalDate.class));
+
+        row.put("client_role_id", rs.getObject("client_role_id", UUID.class));
+        row.put("client_first_name", rs.getString("client_first_name"));
+        row.put("client_last_name", rs.getString("client_last_name"));
+        row.put("client_email", rs.getString("client_email"));
+
+        row.put("role_id", rs.getObject("role_id", String.class));
+        row.put("client_agreement_status", rs.getString("client_agreement_status"));
+        row.put("agreement_name", rs.getString("agreement_name"));
+        row.put("location_name", rs.getString("location_name"));
+        row.put("payment_method_name", rs.getString("payment_method_name"));
+        row.put("payment_type_name", rs.getString("payment_type_name"));
+        row.put("card_last4", rs.getString("card_last4"));
+        row.put("subscription_id", rs.getObject("subscription_id", UUID.class));
+
+        return row;
     }
 
     /**
@@ -261,30 +416,72 @@ public class DuePreviewRepository {
      * @return true if eligible, false otherwise
      */
     public boolean isEligible(UUID subscriptionInstanceId, LocalDate asOfDate) {
-        String sql = """
-            SELECT CASE WHEN COUNT(1) > 0 THEN true ELSE false END
-            FROM client_subscription_billing.subscription_instance si
-            JOIN client_subscription_billing.subscription_plan sp ON sp.subscription_plan_id = si.subscription_plan_id
-            JOIN billing_config.subscription_instance_status ss
-                ON ss.subscription_instance_status_id = si.subscription_instance_status_id
-            WHERE si.application_id = ?::uuid
-              AND si.subscription_instance_id = ?::uuid
-              AND COALESCE(sp.is_active, true) = true
-              AND ss.status_name = 'ACTIVE'
-              AND (si.billing_start_date IS NULL OR si.billing_start_date <= CASE
-                    WHEN ?::date IS NOT NULL THEN ?::date
-                    ELSE (CURRENT_TIMESTAMP AT TIME ZONE COALESCE(NULLIF(TRIM(si.timezone), ''), 'UTC'))::date
-                  END)
-              AND (si.billing_end_date IS NULL OR si.billing_end_date >= CASE
-                    WHEN ?::date IS NOT NULL THEN ?::date
-                    ELSE (CURRENT_TIMESTAMP AT TIME ZONE COALESCE(NULLIF(TRIM(si.timezone), ''), 'UTC'))::date
-                  END)
-        """;
+        if (subscriptionInstanceId == null) {
+            return false;
+        }
+        return findEligibleSubscriptionInstanceIds(List.of(subscriptionInstanceId), asOfDate)
+                .contains(subscriptionInstanceId);
+    }
 
-        String sid = subscriptionInstanceId.toString();
-        Boolean result = jdbc.queryForObject(sql, Boolean.class, requireAppIdStr(), sid,
-                asOfDate, asOfDate, asOfDate, asOfDate);
-        return Boolean.TRUE.equals(result);
+    /**
+     * Batch eligibility check — replaces N× {@link #isEligible} round-trips during due preview.
+     *
+     * @return set of subscription_instance_id that pass ACTIVE / plan / billing-window checks
+     */
+    public Set<UUID> findEligibleSubscriptionInstanceIds(
+            Collection<UUID> subscriptionInstanceIds, LocalDate asOfDate) {
+        if (subscriptionInstanceIds == null || subscriptionInstanceIds.isEmpty()) {
+            return Set.of();
+        }
+        List<UUID> ids = subscriptionInstanceIds.stream()
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (ids.isEmpty()) {
+            return Set.of();
+        }
+
+        Set<UUID> eligible = new HashSet<>();
+        final int chunkSize = 500;
+        for (int i = 0; i < ids.size(); i += chunkSize) {
+            List<UUID> chunk = ids.subList(i, Math.min(i + chunkSize, ids.size()));
+            String placeholders = String.join(",", Collections.nCopies(chunk.size(), "?::uuid"));
+            String sql = """
+                SELECT si.subscription_instance_id
+                FROM client_subscription_billing.subscription_instance si
+                JOIN client_subscription_billing.subscription_plan sp ON sp.subscription_plan_id = si.subscription_plan_id
+                JOIN billing_config.subscription_instance_status ss
+                    ON ss.subscription_instance_status_id = si.subscription_instance_status_id
+                WHERE si.application_id = ?::uuid
+                  AND si.subscription_instance_id IN (%s)
+                  AND COALESCE(sp.is_active, true) = true
+                  AND ss.status_name = 'ACTIVE'
+                  AND (si.billing_start_date IS NULL OR si.billing_start_date <= CASE
+                        WHEN ?::date IS NOT NULL THEN ?::date
+                        ELSE (CURRENT_TIMESTAMP AT TIME ZONE COALESCE(NULLIF(TRIM(si.timezone), ''), 'UTC'))::date
+                      END)
+                  AND (si.billing_end_date IS NULL OR si.billing_end_date >= CASE
+                        WHEN ?::date IS NOT NULL THEN ?::date
+                        ELSE (CURRENT_TIMESTAMP AT TIME ZONE COALESCE(NULLIF(TRIM(si.timezone), ''), 'UTC'))::date
+                      END)
+                """.formatted(placeholders);
+
+            List<Object> params = new ArrayList<>();
+            params.add(requireAppIdStr());
+            for (UUID id : chunk) {
+                params.add(id.toString());
+            }
+            params.add(asOfDate);
+            params.add(asOfDate);
+            params.add(asOfDate);
+            params.add(asOfDate);
+
+            eligible.addAll(jdbc.query(
+                    sql,
+                    params.toArray(),
+                    (rs, rowNum) -> (UUID) rs.getObject("subscription_instance_id")));
+        }
+        return eligible;
     }
 
     /**
@@ -453,5 +650,61 @@ public class DuePreviewRepository {
             }
         }, params.toArray());
         return out;
+    }
+
+    /**
+     * Resolve stage-run creator id + display name (access_user / application_user / summary_json fallback).
+     */
+    public Map<String, Object> findStageRunCreator(UUID stageRunId) {
+        if (stageRunId == null) {
+            return Map.of();
+        }
+        String sql = """
+            SELECT bsr.created_by,
+                   COALESCE(
+                       NULLIF(TRIM(CONCAT_WS(' ', creator_u.first_name, creator_u.last_name)), ''),
+                       NULLIF(TRIM(CONCAT_WS(' ', creator_app_u.first_name, creator_app_u.last_name)), ''),
+                       NULLIF(TRIM(creator_u.email), ''),
+                       NULLIF(TRIM(creator_app_u.email), ''),
+                       NULLIF(TRIM(bsr.summary_json->>'created_by_name'), ''),
+                       NULLIF(TRIM(bsr.summary_json->>'created_by'), '')
+                   ) AS created_by_name,
+                   NULLIF(TRIM(bsr.summary_json->>'created_by'), '') AS summary_created_by
+            FROM client_subscription_billing.billing_stage_run bsr
+            LEFT JOIN access.access_user creator_u ON creator_u.user_id = bsr.created_by
+            LEFT JOIN access.access_application_user creator_aau
+                   ON creator_aau.application_user_id = bsr.created_by
+            LEFT JOIN access.access_user creator_app_u ON creator_app_u.user_id = creator_aau.user_id
+            WHERE bsr.stage_run_id = ?::uuid
+              AND bsr.application_id = ?::uuid
+            """;
+        List<Map<String, Object>> rows = jdbc.query(sql, (rs, rowNum) -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            UUID createdBy = (UUID) rs.getObject("created_by");
+            String name = rs.getString("created_by_name");
+            String summaryCreatedBy = rs.getString("summary_created_by");
+            if (createdBy == null && summaryCreatedBy != null && !summaryCreatedBy.isBlank()) {
+                try {
+                    createdBy = UUID.fromString(summaryCreatedBy);
+                } catch (Exception ignored) {
+                    // keep null; name may still be the raw summary value
+                }
+            }
+            if (name != null) {
+                name = name.trim();
+                if (name.isEmpty()
+                        || (createdBy != null && name.equalsIgnoreCase(createdBy.toString()))) {
+                    name = null;
+                }
+            }
+            if (createdBy != null) {
+                m.put("created_by", createdBy);
+            }
+            if (name != null) {
+                m.put("created_by_name", name);
+            }
+            return m;
+        }, stageRunId.toString(), requireAppIdStr());
+        return rows.isEmpty() ? Map.of() : rows.get(0);
     }
 }

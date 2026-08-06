@@ -14,6 +14,7 @@ import io.clubone.billing.repo.BillingRepository;
 import io.clubone.billing.repo.MockChargeRepository;
 import io.clubone.billing.repo.MockChargeRepository.MockInvoiceRow;
 import io.clubone.billing.repo.StageRunRepository;
+import io.clubone.billing.service.schedule.StageRunLeaseHeartbeat;
 import io.clubone.billing.batch.util.LoggingUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +41,12 @@ public class ActualChargeJobRunner {
     private static final Logger log = LoggerFactory.getLogger(ActualChargeJobRunner.class);
     private static final String STAGE = "ACTUAL_CHARGE";
     private static final String MDC_STAGE_RUN = "actualChargeStageRunId";
+    /** Keyset cursor — last {@code invoice_id} fully paged through, persisted so a crash/reclaim can resume. */
+    private static final String CK_AFTER_INVOICE_ID = "ac_checkpoint_after_invoice_id";
+    private static final String CK_UPDATED_AT = "ac_checkpoint_updated_at";
+    /** Checkpoint a running pass at least this often even mid-page, so a crash loses at most this many rows. */
+    private static final int CHECKPOINT_EVERY_N_ROWS = 50;
+
     private final StageRunRepository stageRunRepository;
     private final BillingRunRepository billingRunRepository;
     private final MockChargeRepository mockChargeRepository;
@@ -50,6 +57,7 @@ public class ActualChargeJobRunner {
     private final int pendingRetryGraceMinutes;
     private final int pendingStuckThresholdMinutes;
     private final int invoicePageSize;
+    private final long leaseHeartbeatSeconds;
 
     public ActualChargeJobRunner(
             StageRunRepository stageRunRepository,
@@ -59,7 +67,8 @@ public class ActualChargeJobRunner {
             BillingRepository billingRepository,
             @Value("${clubone.billing.actual-charge.pending.retry-grace-minutes:30}") int pendingRetryGraceMinutes,
             @Value("${clubone.billing.actual-charge.pending.stuck-threshold-minutes:30}") int pendingStuckThresholdMinutes,
-            @Value("${clubone.billing.charge.invoice-page-size:100}") int invoicePageSize,
+            @Value("${clubone.billing.charge.invoice-page-size:200}") int invoicePageSize,
+            @Value("${clubone.billing.scheduled-stage.lease-heartbeat-seconds:30}") long leaseHeartbeatSeconds,
             PaymentServiceFactory paymentServiceFactory) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
@@ -68,7 +77,8 @@ public class ActualChargeJobRunner {
         this.billingRepository = billingRepository;
         this.pendingRetryGraceMinutes = Math.max(1, pendingRetryGraceMinutes);
         this.pendingStuckThresholdMinutes = Math.max(1, pendingStuckThresholdMinutes);
-        this.invoicePageSize = Math.max(1, Math.min(invoicePageSize, 500));
+        this.invoicePageSize = Math.max(50, Math.min(invoicePageSize, 2_000));
+        this.leaseHeartbeatSeconds = Math.max(5, leaseHeartbeatSeconds);
         this.livePaymentService = paymentServiceFactory.get(RunMode.LIVE);
     }
 
@@ -112,18 +122,31 @@ public class ActualChargeJobRunner {
             return;
         }
         if ("RUNNING".equals(st)) {
-            log.info("actual-charge job: continuing existing RUNNING execution stageRunId={}", stageRunId);
-        } else if ("QUEUED".equals(st) || "PENDING".equals(st) || "SCHEDULED".equals(st) || "IDLE".equals(st)) {
-            log.info(
-                    "actual-charge job: transitioning to RUNNING from status={} stageRunId={}",
-                    st,
-                    stageRunId);
-            stageRunRepository.startStageRun(stageRunId);
+            log.info("actual-charge job: skipped (already RUNNING; another worker owns it) stageRunId={}", stageRunId);
+            return;
+        }
+        if ("QUEUED".equals(st) || "PENDING".equals(st) || "SCHEDULED".equals(st)) {
+            boolean claimed = stageRunRepository.tryClaimStageRunToRunning(
+                    stageRunId, "QUEUED", "PENDING", "SCHEDULED");
+            if (!claimed) {
+                log.info(
+                        "actual-charge job: skipped (lost RUNNING claim) stageRunId={} priorStatus={}",
+                        stageRunId,
+                        st);
+                return;
+            }
+            log.info("actual-charge job: claimed RUNNING from status={} stageRunId={}", st, stageRunId);
             s = stageRunRepository.findById(stageRunId);
             log.info(
-                    "actual-charge job: after startStageRun statusCode={} startedOn={}",
+                    "actual-charge job: after claim statusCode={} startedOn={}",
                     s != null ? s.statusCode() : null,
                     s != null ? s.startedOn() : null);
+        } else if ("IDLE".equals(st)) {
+            // IDLE means "ready when user starts/schedules" — never auto-claim.
+            log.info(
+                    "actual-charge job: skipped (IDLE awaits explicit Start/Schedule) stageRunId={}",
+                    stageRunId);
+            return;
         } else {
             log.warn("actual-charge job: unexpected status — abort stageRunId={} status={}", stageRunId, st);
             return;
@@ -178,6 +201,39 @@ public class ActualChargeJobRunner {
         BigDecimal pendingAmount = BigDecimal.ZERO;
         BigDecimal failedAmount = BigDecimal.ZERO;
 
+        UUID afterInvoiceId = null;
+        if (s.summaryJson() != null) {
+            Object afterObj = s.summaryJson().get(CK_AFTER_INVOICE_ID);
+            if (afterObj != null) {
+                try {
+                    afterInvoiceId = UUID.fromString(afterObj.toString());
+                } catch (IllegalArgumentException ignore) {
+                    afterInvoiceId = null;
+                }
+            }
+            if (afterInvoiceId != null) {
+                processedCount = intFromJson(s.summaryJson().get("total_selected"));
+                success = intFromJson(s.summaryJson().get("success_count"));
+                pending = intFromJson(s.summaryJson().get("pending_count"));
+                failed = intFromJson(s.summaryJson().get("failed_count"));
+                skipped = intFromJson(s.summaryJson().get("skipped_count"));
+                totalSelectedAmount = bigDecimalFromJson(s.summaryJson().get("total_amount_selected"));
+                chargedAmount = bigDecimalFromJson(s.summaryJson().get("charged_amount"));
+                pendingAmount = bigDecimalFromJson(s.summaryJson().get("pending_amount"));
+                failedAmount = bigDecimalFromJson(s.summaryJson().get("failed_amount"));
+                log.info(
+                        "actual-charge job: resuming from checkpoint stageRunId={} afterInvoiceId={} processedCount={} "
+                                + "success={} pending={} failed={} skipped={}",
+                        stageRunId,
+                        afterInvoiceId,
+                        processedCount,
+                        success,
+                        pending,
+                        failed,
+                        skipped);
+            }
+        }
+
         UUID statusOk = billingRepository.resolveBillingStatusIdByCode(BillingStatus.LIVE_FINALIZED.getCode());
         UUID statusPendingCapture = billingRepository.resolveBillingStatusIdByCode(BillingStatus.PENDING_CAPTURE.getCode());
         UUID statusPayFail = billingRepository.resolveBillingStatusIdByCode(BillingStatus.LIVE_PAYMENT_FAILED.getCode());
@@ -193,15 +249,19 @@ public class ActualChargeJobRunner {
                 statusPayFail,
                 statusErr);
 
-        int offset = 0;
-        int idx = 0;
+        int idx = processedCount;
+        int rowsSinceCheckpoint = 0;
+        StageRunLeaseHeartbeat heartbeat =
+                new StageRunLeaseHeartbeat(stageRunRepository, stageRunId, leaseHeartbeatSeconds);
         while (true) {
+            heartbeat.maybeTouch();
             List<MockInvoiceRow> page =
-                    mockChargeRepository.findInvoicesForBillingRun(billingRunId, invoicePageSize, offset);
+                    mockChargeRepository.findInvoicesForBillingRunAfter(billingRunId, afterInvoiceId, invoicePageSize);
             if (page.isEmpty()) {
                 break;
             }
             int rawPageSize = page.size();
+            UUID lastInvoiceIdInPage = page.get(page.size() - 1).invoiceId();
             if (subscriptionFilter != null) {
                 Set<String> filter = subscriptionFilter;
                 page = page.stream()
@@ -210,8 +270,8 @@ public class ActualChargeJobRunner {
                         .toList();
             }
             log.info(
-                    "actual-charge job: processing page offset={} rawPageRows={} afterFilter={} billingRunId={}",
-                    offset,
+                    "actual-charge job: processing page afterInvoiceId={} rawPageRows={} afterFilter={} billingRunId={}",
+                    afterInvoiceId,
                     rawPageSize,
                     page.size(),
                     billingRunId);
@@ -373,9 +433,24 @@ public class ActualChargeJobRunner {
                 } finally {
                     MDC.remove("invoiceId");
                 }
+
+                rowsSinceCheckpoint++;
+                if (rowsSinceCheckpoint >= CHECKPOINT_EVERY_N_ROWS) {
+                    writeCheckpoint(
+                            stageRunId, row.invoiceId(), processedCount, success, pending, failed, skipped,
+                            totalSelectedAmount, chargedAmount, pendingAmount, failedAmount);
+                    rowsSinceCheckpoint = 0;
+                }
             }
 
-            offset += invoicePageSize;
+            // Cursor always advances to the raw page boundary (regardless of subscription filtering above) so a
+            // resumed pass never re-fetches invoices permanently out of scope for this run.
+            afterInvoiceId = lastInvoiceIdInPage;
+            writeCheckpoint(
+                    stageRunId, afterInvoiceId, processedCount, success, pending, failed, skipped,
+                    totalSelectedAmount, chargedAmount, pendingAmount, failedAmount);
+            rowsSinceCheckpoint = 0;
+
             if (rawPageSize < invoicePageSize) {
                 break;
             }
@@ -454,6 +529,73 @@ public class ActualChargeJobRunner {
                 pending,
                 failed,
                 skipped);
+    }
+
+    /**
+     * Persist keyset cursor + running counters into {@code summary_json} so a crash or stale-reclaim
+     * redispatch can resume this pass instead of restarting from the first invoice.
+     */
+    private void writeCheckpoint(
+            UUID stageRunId,
+            UUID afterInvoiceId,
+            int processedCount,
+            int success,
+            int pending,
+            int failed,
+            int skipped,
+            BigDecimal totalSelectedAmount,
+            BigDecimal chargedAmount,
+            BigDecimal pendingAmount,
+            BigDecimal failedAmount) {
+        Map<String, Object> checkpoint = new HashMap<>();
+        checkpoint.put(CK_AFTER_INVOICE_ID, afterInvoiceId != null ? afterInvoiceId.toString() : null);
+        checkpoint.put("total_selected", processedCount);
+        checkpoint.put("success_count", success);
+        checkpoint.put("pending_count", pending);
+        checkpoint.put("failed_count", failed);
+        checkpoint.put("skipped_count", skipped);
+        checkpoint.put("total_amount_selected", totalSelectedAmount);
+        checkpoint.put("charged_amount", chargedAmount);
+        checkpoint.put("pending_amount", pendingAmount);
+        checkpoint.put("failed_amount", failedAmount);
+        checkpoint.put(CK_UPDATED_AT, java.time.OffsetDateTime.now().toString());
+        try {
+            stageRunRepository.mergeStageRunSummaryJson(stageRunId, checkpoint, false);
+        } catch (Exception ex) {
+            log.warn(
+                    "actual-charge job: failed to persist checkpoint stageRunId={} afterInvoiceId={}",
+                    stageRunId,
+                    afterInvoiceId,
+                    ex);
+        }
+    }
+
+    private static int intFromJson(Object o) {
+        if (o instanceof Number n) {
+            return n.intValue();
+        }
+        if (o instanceof String str) {
+            try {
+                return Integer.parseInt(str.trim());
+            } catch (NumberFormatException ignore) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    private static BigDecimal bigDecimalFromJson(Object o) {
+        if (o == null) {
+            return BigDecimal.ZERO;
+        }
+        if (o instanceof BigDecimal bd) {
+            return bd;
+        }
+        try {
+            return new BigDecimal(o.toString().trim());
+        } catch (NumberFormatException ex) {
+            return BigDecimal.ZERO;
+        }
     }
 
     private static boolean isPendingGatewayResult(PaymentResult pr) {

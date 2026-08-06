@@ -67,6 +67,33 @@ public class InvoiceGenerationController {
     }
 
     /**
+     * GET /api/billing/invoice-generation/runs/{id}/report
+     */
+    @GetMapping("/runs/{invoiceGenerationRunId}/report")
+    public ResponseEntity<Map<String, Object>> getReport(@PathVariable UUID invoiceGenerationRunId) {
+        return ResponseEntity.ok(invoiceGenerationService.getReport(invoiceGenerationRunId));
+    }
+
+    /**
+     * GET /api/billing/invoice-generation/runs/{id}/export?format=csv
+     */
+    @GetMapping("/runs/{invoiceGenerationRunId}/export")
+    public ResponseEntity<byte[]> exportRun(
+            @PathVariable UUID invoiceGenerationRunId,
+            @RequestParam(defaultValue = "csv") String format) {
+        if (format != null && !format.isBlank() && !"csv".equalsIgnoreCase(format.trim())) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "Only format=csv is supported");
+        }
+        byte[] body = invoiceGenerationService.exportRunCsv(invoiceGenerationRunId);
+        String filename = "invoice-generation-" + invoiceGenerationRunId + ".csv";
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+                .header(HttpHeaders.CONTENT_TYPE, "text/csv; charset=UTF-8")
+                .body(body);
+    }
+
+    /**
      * GET /api/billing/invoice-generation/runs?billingRunId=...
      */
     @GetMapping("/runs")
@@ -113,8 +140,9 @@ public class InvoiceGenerationController {
 
     /**
      * POST /api/billing/invoice-generation/runs/{invoiceGenerationRunId}/draft-failures/retry-all
-     * <p>Retries all unresolved draft-failure DLQ rows for this invoice generation run (oldest first).
-     * Rows use {@code error_type = INVOICE_GENERATION_DRAFT}.</p>
+     * <p>Retries all unresolved draft-failure DLQ rows ({@code INVOICE_GENERATION_DRAFT}) and re-enqueues
+     * the stage once for any job-level rows ({@code INVOICE_GENERATION_JOB}). Blocked when invoices are locked
+     * or the stage is COMPLETED / CANCELLED.</p>
      */
     @PostMapping("/runs/{invoiceGenerationRunId}/draft-failures/retry-all")
     public ResponseEntity<Map<String, Object>> retryAllDraftFailures(
@@ -129,7 +157,8 @@ public class InvoiceGenerationController {
 
     /**
      * POST /api/billing/invoice-generation/runs/{invoiceGenerationRunId}/draft-failures/{dlqId}/retry
-     * <p>Re-attempts draft invoice creation for one DLQ row. On success the DLQ row is resolved.</p>
+     * <p>Draft rows: re-attempt draft invoice creation. Job-level rows: re-enqueue the IG job.
+     * On success the DLQ row is resolved. Blocked when invoices are locked or stage is COMPLETED / CANCELLED.</p>
      */
     @PostMapping("/runs/{invoiceGenerationRunId}/draft-failures/{dlqId}/retry")
     public ResponseEntity<DLQItemDto> retryOneDraftFailure(
@@ -172,5 +201,24 @@ public class InvoiceGenerationController {
         }
         return ResponseEntity.ok(
                 invoiceGenerationService.revertInvoicesInGenerationRun(invoiceGenerationRunId, request));
+    }
+
+    /**
+     * POST /api/billing/invoice-generation/scheduled-runs
+     * {@code scheduledFor} is stored and compared as UTC ({@code timestamptz}).
+     */
+    @PostMapping("/scheduled-runs")
+    public ResponseEntity<Map<String, Object>> scheduleRun(
+            @Valid @RequestBody InvoiceGenerationScheduledRequest request) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(invoiceGenerationService.scheduleRun(request));
+    }
+
+    /**
+     * DELETE /api/billing/invoice-generation/scheduled-runs/{scheduledRunId}
+     */
+    @DeleteMapping("/scheduled-runs/{scheduledRunId}")
+    public ResponseEntity<Void> cancelScheduledRun(@PathVariable UUID scheduledRunId) {
+        invoiceGenerationService.cancelScheduledRun(scheduledRunId);
+        return ResponseEntity.noContent().build();
     }
 }

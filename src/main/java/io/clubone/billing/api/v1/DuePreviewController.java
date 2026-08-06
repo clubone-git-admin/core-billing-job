@@ -51,14 +51,15 @@ public class DuePreviewController {
     @PostMapping("/runs")
     @Operation(
             summary = "Generate due invoice preview",
-            description = "Generates a preview of due invoices for a given date without creating actual invoices in the database. " +
-                    "The preview file (CSV) is uploaded to S3 bucket. This endpoint performs the same invoice generation logic " +
-                    "as the actual billing job but only generates a preview file."
+            description = "Accepts async generation of due invoices for a given date without creating invoices. " +
+                    "Returns 202 Accepted immediately with stage_run_id and pollUrl. Poll GET /runs/{stageRunId} " +
+                    "until status is COMPLETED or FAILED. The CSV is uploaded to S3 by a background worker " +
+                    "(supports 30k+ rows)."
     )
     @ApiResponses(value = {
             @ApiResponse(
-                    responseCode = "200",
-                    description = "Due preview generated successfully",
+                    responseCode = "202",
+                    description = "Due preview accepted; poll Location / pollUrl until COMPLETED or FAILED",
                     content = @Content(schema = @Schema(implementation = Map.class))
             ),
             @ApiResponse(
@@ -85,7 +86,12 @@ public class DuePreviewController {
 
         try {
             Map<String, Object> response = duePreviewService.generateDuePreview(request);
-            return ResponseEntity.ok(response);
+            String pollUrl = response.get("pollUrl") != null ? response.get("pollUrl").toString() : null;
+            ResponseEntity.BodyBuilder b = ResponseEntity.accepted();
+            if (pollUrl != null && !pollUrl.isBlank()) {
+                b = b.header(HttpHeaders.LOCATION, pollUrl);
+            }
+            return b.body(response);
         } catch (Exception e) {
             log.error("Error generating due preview: billRunId={}, dueDate={}",
                     request.billRunId(), request.dueDate(), e);
@@ -135,9 +141,14 @@ public class DuePreviewController {
             @ApiResponse(responseCode = "404", description = "Stage run not found or not a due preview run")
     })
     public ResponseEntity<Map<String, Object>> getDuePreviewRunDetails(
-            @Parameter(description = "Stage run ID (billing_stage_run.stage_run_id)") @PathVariable UUID stageRunId) {
+            @Parameter(description = "Stage run ID (billing_stage_run.stage_run_id)") @PathVariable UUID stageRunId,
+            @Parameter(description = "When false, skip S3 CSV load — use for async status polling (30k+ rows)")
+            @RequestParam(defaultValue = "true") boolean includeInvoices,
+            @Parameter(description = "Optional max invoice rows when includeInvoices=true (UI safety cap)")
+            @RequestParam(required = false) Integer invoiceLimit) {
 
-        Map<String, Object> response = duePreviewService.getDuePreviewRunDetails(stageRunId);
+        Map<String, Object> response =
+                duePreviewService.getDuePreviewRunDetails(stageRunId, includeInvoices, invoiceLimit);
         return ResponseEntity.ok(response);
     }
 

@@ -1,6 +1,9 @@
 package io.clubone.billing.service.actualcharge;
 
 import io.clubone.billing.batch.util.LoggingUtils;
+import io.clubone.billing.repo.StageRunRepository;
+import io.clubone.billing.security.TenantContext;
+import io.clubone.billing.security.TenantContexts;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -22,12 +25,14 @@ public class ActualChargeQueuedListener {
     private static final String MDC_STAGE_RUN = "actualChargeStageRunId";
 
     private final ActualChargeJobRunner jobRunner;
+    private final StageRunRepository stageRunRepository;
 
-    public ActualChargeQueuedListener(ActualChargeJobRunner jobRunner) {
+    public ActualChargeQueuedListener(ActualChargeJobRunner jobRunner, StageRunRepository stageRunRepository) {
         this.jobRunner = jobRunner;
+        this.stageRunRepository = stageRunRepository;
     }
 
-    @Async("billingAsyncExecutor")
+    @Async("actualChargeAsyncExecutor")
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onActualChargeQueued(ActualChargeQueuedEvent event) {
         UUID stageRunId = event.stageRunId();
@@ -45,7 +50,18 @@ public class ActualChargeQueuedListener {
                     thread,
                     billingRunId,
                     stageRunId);
-            jobRunner.process(stageRunId);
+            // Reclaim path (StaleStageRunReclaimService) runs on a scheduler thread — the async task decorator
+            // captures TenantContext at submit time, but fall back to a DB-resolved background tenant if it's
+            // missing (e.g. direct invocation without a request/reclaim TenantContext already set).
+            TenantContext ctx = TenantContext.get();
+            if (ctx == null) {
+                ctx = stageRunRepository.resolveBackgroundTenant(stageRunId);
+            }
+            if (ctx == null) {
+                log.error("actual-charge async aborted: no tenant for stageRunId={}", stageRunId);
+                return;
+            }
+            TenantContexts.run(ctx, () -> jobRunner.process(stageRunId));
             long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
             log.info(
                     "actual-charge async [AFTER_COMMIT] jobRunner.process finished OK thread={} billingRunId={} stageRunId={} durationMs={}",

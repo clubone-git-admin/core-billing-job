@@ -12,10 +12,15 @@ import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Persists draft invoices for a billing run (aligned with due-preview candidate rows),
@@ -25,8 +30,11 @@ import java.util.UUID;
 public class InvoiceGenerationRepository {
 
     private static final Logger log = LoggerFactory.getLogger(InvoiceGenerationRepository.class);
+    private static final int ALREADY_INVOICED_CHUNK = 500;
 
     private final JdbcTemplate jdbc;
+    /** Process-lifetime cache for lookup table UUIDs (charge-line kind / entity type). */
+    private final ConcurrentHashMap<String, UUID> lookupIdCache = new ConcurrentHashMap<>();
 
     public InvoiceGenerationRepository(@Qualifier("cluboneJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
@@ -144,6 +152,78 @@ public class InvoiceGenerationRepository {
      * Some environments use {@code PLANNED}; others use {@code PENDING}/{@code DUE}. {@code PAID} is excluded.
      */
     private static final String SCHEDULE_STATUS_OPEN_FOR_INVOICE = "('PENDING', 'DUE', 'PLANNED')";
+
+    /**
+     * True when this subscription already has a schedule row linked to an invoice for the billing run
+     * (used to make reclaim / re-run idempotent).
+     */
+    public boolean hasLinkedInvoiceForBillingRunAndSubscription(UUID billingRunId, UUID subscriptionInstanceId) {
+        if (billingRunId == null || subscriptionInstanceId == null) {
+            return false;
+        }
+        Integer found = jdbc.query(
+                """
+                SELECT 1
+                FROM client_subscription_billing.subscription_billing_schedule sbs
+                WHERE sbs.billing_run_id = ?::uuid
+                  AND sbs.subscription_instance_id = ?::uuid
+                  AND sbs.invoice_id IS NOT NULL
+                LIMIT 1
+                """,
+                rs -> rs.next() ? 1 : null,
+                billingRunId.toString(),
+                subscriptionInstanceId.toString());
+        return found != null;
+    }
+
+    /**
+     * Batch form of {@link #hasLinkedInvoiceForBillingRunAndSubscription} for a candidate page.
+     *
+     * @return subscription_instance_ids that already have an invoice linked for this billing run
+     */
+    public Set<UUID> findSubscriptionInstanceIdsAlreadyInvoicedForBillingRun(
+            UUID billingRunId, Collection<UUID> subscriptionInstanceIds) {
+        if (billingRunId == null || subscriptionInstanceIds == null || subscriptionInstanceIds.isEmpty()) {
+            return Set.of();
+        }
+        List<UUID> ids = new ArrayList<>();
+        for (UUID id : subscriptionInstanceIds) {
+            if (id != null) {
+                ids.add(id);
+            }
+        }
+        if (ids.isEmpty()) {
+            return Set.of();
+        }
+        Set<UUID> already = new HashSet<>();
+        for (int from = 0; from < ids.size(); from += ALREADY_INVOICED_CHUNK) {
+            List<UUID> chunk = ids.subList(from, Math.min(from + ALREADY_INVOICED_CHUNK, ids.size()));
+            String placeholders = String.join(",", java.util.Collections.nCopies(chunk.size(), "?::uuid"));
+            List<Object> params = new ArrayList<>(chunk.size() + 1);
+            params.add(billingRunId.toString());
+            for (UUID id : chunk) {
+                params.add(id.toString());
+            }
+            already.addAll(jdbc.query(
+                    """
+                    SELECT DISTINCT sbs.subscription_instance_id
+                    FROM client_subscription_billing.subscription_billing_schedule sbs
+                    WHERE sbs.billing_run_id = ?::uuid
+                      AND sbs.subscription_instance_id IN (%s)
+                      AND sbs.invoice_id IS NOT NULL
+                    """.formatted(placeholders),
+                    params.toArray(),
+                    (rs, rowNum) -> (UUID) rs.getObject("subscription_instance_id")));
+        }
+        return already;
+    }
+
+    /** Warm common lookup IDs once per job (avoids N× lu_* round-trips per draft). */
+    public void warmInvoiceGenerationLookups() {
+        lookupChargeLineKindId("SUBSCRIPTION_RECURRING");
+        lookupTransactionsEntityTypeId("AGREEMENT", "Agreement");
+        lookupTransactionsEntityTypeId("SUBSCRIPTION_PLAN", "Subscription plan", "Item");
+    }
 
     /**
      * Assigns {@code invoice_id} (and {@code billing_run_id}) on {@code subscription_billing_schedule}.
@@ -573,6 +653,11 @@ public class InvoiceGenerationRepository {
      * (not {@code code} / {@code entity_type_name}).
      */
     private UUID lookupTransactionsEntityTypeId(String... codesOrNames) {
+        String cacheKey = "entityType:" + String.join("|", codesOrNames);
+        UUID cached = lookupIdCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
         for (String token : codesOrNames) {
             if (token == null || token.isBlank()) {
                 continue;
@@ -593,6 +678,7 @@ public class InvoiceGenerationRepository {
                         token,
                         token);
                 if (id != null) {
+                    lookupIdCache.put(cacheKey, id);
                     return id;
                 }
             } catch (DataAccessException ignored) {
@@ -608,8 +694,13 @@ public class InvoiceGenerationRepository {
             return null;
         }
         String t = code.trim();
+        String cacheKey = "chargeLineKind:" + t.toLowerCase();
+        UUID cached = lookupIdCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
         try {
-            return jdbc.query(
+            UUID id = jdbc.query(
                     """
                     SELECT charge_line_kind_id
                     FROM transactions.lu_charge_line_kind
@@ -619,6 +710,10 @@ public class InvoiceGenerationRepository {
                     """,
                     rs -> rs.next() ? (UUID) rs.getObject("charge_line_kind_id") : null,
                     t);
+            if (id != null) {
+                lookupIdCache.put(cacheKey, id);
+            }
+            return id;
         } catch (DataAccessException ex) {
             return null;
         }

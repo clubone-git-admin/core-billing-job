@@ -9,6 +9,7 @@ import io.clubone.billing.repo.MockChargeRepository;
 import io.clubone.billing.repo.MockChargeRepository.MandateProbe;
 import io.clubone.billing.repo.MockChargeRepository.MockInvoiceRow;
 import io.clubone.billing.repo.StageRunRepository;
+import io.clubone.billing.service.schedule.StageRunLeaseHeartbeat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -40,6 +41,11 @@ public class MockChargeJobRunner {
     private static final String STAGE = "MOCK_CHARGE";
     private static final String STATUS_WAITING = "WAITING";
     private static final String MDC_STAGE_RUN = "mockChargeStageRunId";
+    /** Keyset cursor — last {@code invoice_id} fully paged through, persisted so a crash/reclaim can resume. */
+    private static final String CK_AFTER_INVOICE_ID = "mc_checkpoint_after_invoice_id";
+    private static final String CK_UPDATED_AT = "mc_checkpoint_updated_at";
+    /** Checkpoint a running pass at least this often even mid-page, so a crash loses at most this many rows. */
+    private static final int CHECKPOINT_EVERY_N_ROWS = 50;
 
     private final StageRunRepository stageRunRepository;
     private final BillingRunRepository billingRunRepository;
@@ -53,6 +59,7 @@ public class MockChargeJobRunner {
      */
     private final boolean skipMandateMaxAmountCheck;
     private final int invoicePageSize;
+    private final long leaseHeartbeatSeconds;
 
     private record ValidationResult(
             MockChargeOutcome outcome,
@@ -68,14 +75,16 @@ public class MockChargeJobRunner {
             AuditLogRepository auditLogRepository,
             @Value("${clubone.billing.mock-charge.skip-currency-check:true}") boolean skipCurrencyCheck,
             @Value("${clubone.billing.mock-charge.skip-mandate-max-amount-check:false}") boolean skipMandateMaxAmountCheck,
-            @Value("${clubone.billing.mock-charge.invoice-page-size:50}") int invoicePageSize) {
+            @Value("${clubone.billing.mock-charge.invoice-page-size:200}") int invoicePageSize,
+            @Value("${clubone.billing.scheduled-stage.lease-heartbeat-seconds:30}") long leaseHeartbeatSeconds) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
         this.mockChargeRepository = mockChargeRepository;
         this.auditLogRepository = auditLogRepository;
         this.skipCurrencyCheck = skipCurrencyCheck;
         this.skipMandateMaxAmountCheck = skipMandateMaxAmountCheck;
-        this.invoicePageSize = Math.max(1, Math.min(invoicePageSize, 100));
+        this.invoicePageSize = Math.max(50, Math.min(invoicePageSize, 2_000));
+        this.leaseHeartbeatSeconds = Math.max(5, leaseHeartbeatSeconds);
     }
 
     /** Worker completion/failure — {@code entity_type = STAGE_RUN} for audit tab parity with API-driven events. */
@@ -125,32 +134,55 @@ public class MockChargeJobRunner {
             log.info("mock-charge job: skipped (terminal) stageRunId={} status={}", stageRunId, st);
             return;
         }
+        boolean claimedByThisWorker = false;
+        boolean freshWaitingRerun = false;
         if (STATUS_WAITING.equals(st)) {
             // Re-run after a completed mock pass: enqueue updates queued_at; status may stay WAITING if QUEUED is missing in DB.
             if (isWaitingRerunRequested(s)) {
                 log.info(
-                        "mock-charge job: WAITING but queued_at is after mock_charge_completed_at — rerun requested, forcing startStageRun stageRunId={}",
+                        "mock-charge job: WAITING but queued_at is after mock_charge_completed_at — claiming RUNNING stageRunId={}",
                         stageRunId);
-                stageRunRepository.startStageRun(stageRunId);
+                claimedByThisWorker = stageRunRepository.tryClaimStageRunToRunning(stageRunId, "WAITING");
+                if (!claimedByThisWorker) {
+                    log.info("mock-charge job: skipped (lost WAITING→RUNNING claim) stageRunId={}", stageRunId);
+                    return;
+                }
+                freshWaitingRerun = true;
+                // Fresh full re-evaluation pass: clear any leftover checkpoint so counters start at 0
+                // instead of resuming from the previous (already-completed) pass's cursor.
+                Map<String, Object> clearCheckpoint = new HashMap<>();
+                clearCheckpoint.put(CK_AFTER_INVOICE_ID, null);
+                stageRunRepository.mergeStageRunSummaryJson(stageRunId, clearCheckpoint, false);
                 s = stageRunRepository.findById(stageRunId);
                 st = s != null ? s.statusCode() : null;
-                log.info("mock-charge job: after forced startStageRun statusCode={}", st);
+                log.info("mock-charge job: after WAITING claim statusCode={}", st);
             } else {
                 log.info("mock-charge job: skipped (WAITING, no new rerun request) stageRunId={}", stageRunId);
                 return;
             }
         }
 
-        if ("RUNNING".equals(st)) {
-            log.info("mock-charge job: continuing existing RUNNING stageRunId={}", stageRunId);
-        } else if ("QUEUED".equals(st) || "PENDING".equals(st) || "SCHEDULED".equals(st) || "IDLE".equals(st)) {
-            log.info("mock-charge job: transitioning to RUNNING from status={} stageRunId={}", st, stageRunId);
-            stageRunRepository.startStageRun(stageRunId);
-            s = stageRunRepository.findById(stageRunId);
-            log.info("mock-charge job: after startStageRun statusCode={} startedOn={}", s != null ? s.statusCode() : null, s != null ? s.startedOn() : null);
-        } else {
-            log.warn("mock-charge job: skipped — unexpected status stageRunId={} status={}", stageRunId, st);
+        if (!claimedByThisWorker && "RUNNING".equals(st)) {
+            log.info("mock-charge job: skipped (already RUNNING; another worker owns it) stageRunId={}", stageRunId);
             return;
+        }
+        if (!claimedByThisWorker) {
+            if ("QUEUED".equals(st) || "PENDING".equals(st) || "SCHEDULED".equals(st) || "IDLE".equals(st)) {
+                claimedByThisWorker = stageRunRepository.tryClaimStageRunToRunning(
+                        stageRunId, "QUEUED", "PENDING", "SCHEDULED", "IDLE");
+                if (!claimedByThisWorker) {
+                    log.info("mock-charge job: skipped (lost RUNNING claim) stageRunId={} priorStatus={}",
+                            stageRunId, st);
+                    return;
+                }
+                log.info("mock-charge job: claimed RUNNING from status={} stageRunId={}", st, stageRunId);
+                s = stageRunRepository.findById(stageRunId);
+                log.info("mock-charge job: after claim statusCode={} startedOn={}",
+                        s != null ? s.statusCode() : null, s != null ? s.startedOn() : null);
+            } else {
+                log.warn("mock-charge job: skipped — unexpected status stageRunId={} status={}", stageRunId, st);
+                return;
+            }
         }
 
         UUID billingRunId = s.billingRunId();
@@ -191,17 +223,57 @@ public class MockChargeJobRunner {
             BigDecimal blockedAmount = BigDecimal.ZERO;
             Map<String, Integer> breakdown = new HashMap<>();
 
-            int offset = 0;
-            int idx = 0;
+            UUID afterInvoiceId = null;
+            if (!freshWaitingRerun && s.summaryJson() != null) {
+                Object afterObj = s.summaryJson().get(CK_AFTER_INVOICE_ID);
+                if (afterObj != null) {
+                    try {
+                        afterInvoiceId = UUID.fromString(afterObj.toString());
+                    } catch (IllegalArgumentException ignore) {
+                        afterInvoiceId = null;
+                    }
+                }
+                if (afterInvoiceId != null) {
+                    total = intFromJson(s.summaryJson().get("total_candidates"));
+                    eligible = intFromJson(s.summaryJson().get("eligible_count"));
+                    blocked = intFromJson(s.summaryJson().get("blocked_count"));
+                    totalAmount = bigDecimalFromJson(s.summaryJson().get("total_amount"));
+                    eligibleAmount = bigDecimalFromJson(s.summaryJson().get("eligible_amount"));
+                    blockedAmount = bigDecimalFromJson(s.summaryJson().get("blocked_amount"));
+                    Object bd = s.summaryJson().get("blocked_breakdown");
+                    if (bd instanceof Map<?, ?> bdMap) {
+                        for (Map.Entry<?, ?> e : bdMap.entrySet()) {
+                            if (e.getKey() != null) {
+                                breakdown.put(String.valueOf(e.getKey()), intFromJson(e.getValue()));
+                            }
+                        }
+                    }
+                    log.info(
+                            "mock-charge job: resuming from checkpoint stageRunId={} afterInvoiceId={} total={} eligible={} blocked={}",
+                            stageRunId,
+                            afterInvoiceId,
+                            total,
+                            eligible,
+                            blocked);
+                }
+            }
+
+            int idx = total;
             int rawCount = 0;
+            int rowsSinceCheckpoint = 0;
+            UUID lastProcessedInvoiceId = afterInvoiceId;
+            StageRunLeaseHeartbeat heartbeat =
+                    new StageRunLeaseHeartbeat(stageRunRepository, stageRunId, leaseHeartbeatSeconds);
             while (true) {
+                heartbeat.maybeTouch();
                 List<MockInvoiceRow> page =
-                        mockChargeRepository.findInvoicesForBillingRun(billingRunId, invoicePageSize, offset);
+                        mockChargeRepository.findInvoicesForBillingRunAfter(billingRunId, afterInvoiceId, invoicePageSize);
                 if (page.isEmpty()) {
                     break;
                 }
                 int rawPageSize = page.size();
                 rawCount += rawPageSize;
+                UUID lastInvoiceIdInPage = page.get(page.size() - 1).invoiceId();
                 if (subscriptionFilter != null) {
                     Set<String> filter = subscriptionFilter;
                     page = page.stream()
@@ -209,10 +281,22 @@ public class MockChargeJobRunner {
                                     && filter.contains(r.subscriptionInstanceId().toString()))
                             .toList();
                 }
+
+                // Skip invoices already mock-evaluated for this stage run (idempotent on crash/reclaim resume) —
+                // do not re-insert history rows or double-count them into the running totals.
+                List<UUID> pageInvoiceIdsForDedupe =
+                        page.stream().map(MockInvoiceRow::invoiceId).filter(id -> id != null).toList();
+                Set<UUID> alreadyEvaluated = mockChargeRepository.findInvoiceIdsAlreadyMockEvaluatedForStageRun(
+                        stageRunId, pageInvoiceIdsForDedupe);
+                if (!alreadyEvaluated.isEmpty()) {
+                    page = page.stream().filter(r -> !alreadyEvaluated.contains(r.invoiceId())).toList();
+                }
+
                 log.info(
-                        "mock-charge job: processing page offset={} rawPageRows={} afterFilter={} billingRunId={}",
-                        offset,
+                        "mock-charge job: processing page afterInvoiceId={} rawPageRows={} alreadyEvaluated={} afterFilter={} billingRunId={}",
+                        afterInvoiceId,
                         rawPageSize,
+                        alreadyEvaluated.size(),
                         page.size(),
                         billingRunId);
 
@@ -304,9 +388,26 @@ public class MockChargeJobRunner {
                         blocked++;
                         blockedAmount = blockedAmount.add(amt);
                     }
+
+                    lastProcessedInvoiceId = row.invoiceId();
+                    rowsSinceCheckpoint++;
+                    if (rowsSinceCheckpoint >= CHECKPOINT_EVERY_N_ROWS) {
+                        writeCheckpoint(
+                                stageRunId, lastProcessedInvoiceId, total, eligible, blocked,
+                                totalAmount, eligibleAmount, blockedAmount, breakdown);
+                        rowsSinceCheckpoint = 0;
+                    }
                 }
 
-                offset += invoicePageSize;
+                // Cursor always advances to the raw page boundary (regardless of filtering/dedupe above) so a
+                // resumed pass never re-fetches invoices permanently out of scope for this run.
+                afterInvoiceId = lastInvoiceIdInPage;
+                lastProcessedInvoiceId = afterInvoiceId;
+                writeCheckpoint(
+                        stageRunId, afterInvoiceId, total, eligible, blocked,
+                        totalAmount, eligibleAmount, blockedAmount, breakdown);
+                rowsSinceCheckpoint = 0;
+
                 if (rawPageSize < invoicePageSize) {
                     break;
                 }
@@ -379,6 +480,69 @@ public class MockChargeJobRunner {
             failDetails.put("exception", e.getClass().getName());
             failDetails.put("message", e.getMessage() != null ? e.getMessage() : "");
             auditMockChargeJob("ASYNC_JOB_FAILED", stageRunId, billingRunId, failDetails);
+        }
+    }
+
+    /**
+     * Persist keyset cursor + running counters into {@code summary_json} so a crash or stale-reclaim
+     * redispatch can resume this pass instead of restarting from the first invoice.
+     */
+    private void writeCheckpoint(
+            UUID stageRunId,
+            UUID afterInvoiceId,
+            int total,
+            int eligible,
+            int blocked,
+            BigDecimal totalAmount,
+            BigDecimal eligibleAmount,
+            BigDecimal blockedAmount,
+            Map<String, Integer> breakdown) {
+        Map<String, Object> checkpoint = new HashMap<>();
+        checkpoint.put(CK_AFTER_INVOICE_ID, afterInvoiceId != null ? afterInvoiceId.toString() : null);
+        checkpoint.put("total_candidates", total);
+        checkpoint.put("eligible_count", eligible);
+        checkpoint.put("blocked_count", blocked);
+        checkpoint.put("total_amount", totalAmount);
+        checkpoint.put("eligible_amount", eligibleAmount);
+        checkpoint.put("blocked_amount", blockedAmount);
+        checkpoint.put("blocked_breakdown", new HashMap<>(breakdown));
+        checkpoint.put(CK_UPDATED_AT, java.time.OffsetDateTime.now().toString());
+        try {
+            stageRunRepository.mergeStageRunSummaryJson(stageRunId, checkpoint, false);
+        } catch (Exception ex) {
+            log.warn(
+                    "mock-charge job: failed to persist checkpoint stageRunId={} afterInvoiceId={}",
+                    stageRunId,
+                    afterInvoiceId,
+                    ex);
+        }
+    }
+
+    private static int intFromJson(Object o) {
+        if (o instanceof Number n) {
+            return n.intValue();
+        }
+        if (o instanceof String str) {
+            try {
+                return Integer.parseInt(str.trim());
+            } catch (NumberFormatException ignore) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    private static BigDecimal bigDecimalFromJson(Object o) {
+        if (o == null) {
+            return BigDecimal.ZERO;
+        }
+        if (o instanceof BigDecimal bd) {
+            return bd;
+        }
+        try {
+            return new BigDecimal(o.toString().trim());
+        } catch (NumberFormatException ex) {
+            return BigDecimal.ZERO;
         }
     }
 

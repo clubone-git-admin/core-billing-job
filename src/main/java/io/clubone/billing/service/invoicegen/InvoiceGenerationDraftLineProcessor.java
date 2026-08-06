@@ -8,8 +8,11 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -49,7 +52,9 @@ public class InvoiceGenerationDraftLineProcessor {
         enum SkipReason {
             NO_SUBSCRIPTION_ID,
             INELIGIBLE,
-            NO_CLIENT_ROLE
+            NO_CLIENT_ROLE,
+            /** Schedule already has an invoice for this billing run (safe reclaim / rerun). */
+            ALREADY_INVOICED
         }
 
         record Skipped(SkipReason reason, UUID subscriptionInstanceIdOrNull) implements LineOutcome {}
@@ -58,21 +63,76 @@ public class InvoiceGenerationDraftLineProcessor {
     }
 
     /**
+     * Prefetch eligible subscription ids for a candidate page — one/few SQL round-trips
+     * instead of N× {@link DuePreviewRepository#isEligible}.
+     */
+    public Set<UUID> resolveEligibleIds(List<Map<String, Object>> rows, LocalDate dueDate) {
+        if (rows == null || rows.isEmpty() || dueDate == null) {
+            return Set.of();
+        }
+        List<UUID> ids = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows) {
+            if (row == null) {
+                continue;
+            }
+            Object raw = row.get("subscription_instance_id");
+            if (raw instanceof UUID id) {
+                ids.add(id);
+            }
+        }
+        if (ids.isEmpty()) {
+            return Set.of();
+        }
+        return duePreviewRepository.findEligibleSubscriptionInstanceIds(ids, dueDate);
+    }
+
+    /**
      * Process one candidate. Exceptions anywhere (eligibility, casts, DB) become {@link LineOutcome.DraftFailed}.
      */
     public LineOutcome processLine(Map<String, Object> row, UUID billingRunId, LocalDate dueDate) {
+        return processLine(row, billingRunId, dueDate, null, null);
+    }
+
+    /**
+     * @param eligibleIds when non-null, membership replaces per-row {@code isEligible} SQL
+     */
+    public LineOutcome processLine(
+            Map<String, Object> row, UUID billingRunId, LocalDate dueDate, Set<UUID> eligibleIds) {
+        return processLine(row, billingRunId, dueDate, eligibleIds, null);
+    }
+
+    /**
+     * @param eligibleIds when non-null, membership replaces per-row {@code isEligible} SQL
+     * @param alreadyInvoicedIds when non-null, membership replaces per-row already-invoiced SQL
+     */
+    public LineOutcome processLine(
+            Map<String, Object> row,
+            UUID billingRunId,
+            LocalDate dueDate,
+            Set<UUID> eligibleIds,
+            Set<UUID> alreadyInvoicedIds) {
         try {
             UUID subscriptionInstanceId = (UUID) row.get("subscription_instance_id");
             if (subscriptionInstanceId == null) {
                 return new LineOutcome.Skipped(LineOutcome.SkipReason.NO_SUBSCRIPTION_ID, null);
             }
-            if (!duePreviewRepository.isEligible(subscriptionInstanceId, dueDate)) {
+            boolean eligible = eligibleIds != null
+                    ? eligibleIds.contains(subscriptionInstanceId)
+                    : duePreviewRepository.isEligible(subscriptionInstanceId, dueDate);
+            if (!eligible) {
                 return new LineOutcome.Skipped(LineOutcome.SkipReason.INELIGIBLE, subscriptionInstanceId);
             }
             UUID clientRoleId = (UUID) row.get("client_role_id");
             if (clientRoleId == null) {
                 log.warn("Invoice generation: skip row (no client_role_id) subscriptionInstanceId={}", subscriptionInstanceId);
                 return new LineOutcome.Skipped(LineOutcome.SkipReason.NO_CLIENT_ROLE, subscriptionInstanceId);
+            }
+            boolean alreadyInvoiced = alreadyInvoicedIds != null
+                    ? alreadyInvoicedIds.contains(subscriptionInstanceId)
+                    : invoiceGenerationRepository.hasLinkedInvoiceForBillingRunAndSubscription(
+                            billingRunId, subscriptionInstanceId);
+            if (alreadyInvoiced) {
+                return new LineOutcome.Skipped(LineOutcome.SkipReason.ALREADY_INVOICED, subscriptionInstanceId);
             }
             UUID clientAgreementId = (UUID) row.get("client_agreement_id");
             UUID subscriptionPlanId = (UUID) row.get("subscription_plan_id");

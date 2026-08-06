@@ -6,6 +6,8 @@ import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.StageRunRepository;
 import io.clubone.billing.repo.SubscriptionBillingHistoryRepository;
 import io.clubone.billing.service.mockcharge.MockChargeQueuedEvent;
+import io.clubone.billing.util.BillingReadExecutors;
+import io.clubone.billing.util.UtcClock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
@@ -19,6 +21,8 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -26,6 +30,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 public class MockChargeService {
@@ -41,6 +46,7 @@ public class MockChargeService {
     private final ApplicationEventPublisher applicationEventPublisher;
     private final AuditLogRepository auditLogRepository;
     private final SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository;
+    private final BillingReadExecutors readExecutors;
 
     public MockChargeService(
             StageRunRepository stageRunRepository,
@@ -48,13 +54,15 @@ public class MockChargeService {
             BillingRunService billingRunService,
             ApplicationEventPublisher applicationEventPublisher,
             AuditLogRepository auditLogRepository,
-            SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository) {
+            SubscriptionBillingHistoryRepository subscriptionBillingHistoryRepository,
+            BillingReadExecutors readExecutors) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
         this.billingRunService = billingRunService;
         this.applicationEventPublisher = applicationEventPublisher;
         this.auditLogRepository = auditLogRepository;
         this.subscriptionBillingHistoryRepository = subscriptionBillingHistoryRepository;
+        this.readExecutors = readExecutors;
     }
 
     /**
@@ -168,18 +176,55 @@ public class MockChargeService {
                     toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
                     MockChargeStartHttpStatus.OK_200);
         }
-        if ("QUEUED".equals(status) || "SCHEDULED".equals(status)) {
+        if ("SCHEDULED".equals(status)) {
+            OffsetDateTime when = target.scheduledFor();
+            if (when != null && when.isAfter(UtcClock.now())) {
+                log.info("mock-charge: still SCHEDULED for future {} — not enqueueing: stageRunId={}",
+                        when, target.stageRunId());
+                return new MockChargeCommandResult(
+                        toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
+                        MockChargeStartHttpStatus.OK_200);
+            }
+            boolean claimed = stageRunRepository.tryTransitionStageRunStatus(
+                    target.stageRunId(), "QUEUED", "SCHEDULED");
+            if (!claimed) {
+                claimed = stageRunRepository.tryTransitionStageRunStatus(
+                        target.stageRunId(), "PENDING", "SCHEDULED");
+            }
+            if (!claimed) {
+                log.info("mock-charge: lost SCHEDULED claim (another instance won): stageRunId={}",
+                        target.stageRunId());
+                return new MockChargeCommandResult(
+                        toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
+                        MockChargeStartHttpStatus.OK_200);
+            }
             mergeMockChargeSummary(target.stageRunId(), target, request, idempotencyKey);
             if (idempotencyKey != null && !idempotencyKey.isBlank()) {
                 stageRunRepository.updateIdempotencyKey(target.stageRunId(), idempotencyKey.trim());
             }
-            publishMockChargeQueued(target.stageRunId(), "QUEUED_or_SCHEDULED_republish");
+            publishMockChargeQueued(target.stageRunId(), "SCHEDULED_due");
             auditMockChargeStage(
                     "WORKER_REPUBLISHED",
                     target.stageRunId(),
                     billingRunId,
                     request.triggeredBy() != null ? request.triggeredBy().toString() : "system",
-                    Map.of("reason", "QUEUED_or_SCHEDULED_republish"));
+                    Map.of("reason", "SCHEDULED_due"));
+            return new MockChargeCommandResult(
+                    toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
+                    MockChargeStartHttpStatus.OK_200);
+        }
+        if ("QUEUED".equals(status)) {
+            mergeMockChargeSummary(target.stageRunId(), target, request, idempotencyKey);
+            if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+                stageRunRepository.updateIdempotencyKey(target.stageRunId(), idempotencyKey.trim());
+            }
+            publishMockChargeQueued(target.stageRunId(), "QUEUED_republish");
+            auditMockChargeStage(
+                    "WORKER_REPUBLISHED",
+                    target.stageRunId(),
+                    billingRunId,
+                    request.triggeredBy() != null ? request.triggeredBy().toString() : "system",
+                    Map.of("reason", "QUEUED_republish"));
             return new MockChargeCommandResult(
                     toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
                     MockChargeStartHttpStatus.OK_200);
@@ -189,8 +234,28 @@ public class MockChargeService {
             return startNewExecution(billingRunId, request, idempotencyKey, billingRun);
         }
         if ("FAILED".equals(status) || "CANCELLED".equals(status)) {
-            log.info("mock-charge service: branch={} — new execution", status);
-            return startNewExecution(billingRunId, request, idempotencyKey, billingRun);
+            UUID reuseId = target.stageRunId();
+            log.info("mock-charge service: branch={} — reuse stage for re-run stageRunId={}", status, reuseId);
+            stageRunRepository.prepareStageRunForRerun(reuseId);
+            if (!stageRunRepository.trySetStageRunStatusByCode(reuseId, "PENDING")
+                    && !stageRunRepository.trySetStageRunStatusByCode(reuseId, "IDLE")) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Could not reset CANCELLED/FAILED stage for re-run");
+            }
+            mergeMockChargeSummary(reuseId, stageRunRepository.findById(reuseId), request, idempotencyKey);
+            if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+                try {
+                    stageRunRepository.updateIdempotencyKey(reuseId, idempotencyKey.trim());
+                } catch (DataIntegrityViolationException ex) {
+                    StageRunDto again = stageRunRepository.findByIdempotencyKey(idempotencyKey.trim());
+                    if (again != null) {
+                        return new MockChargeCommandResult(
+                                toRunResponse(again, billingRun), MockChargeStartHttpStatus.OK_200);
+                    }
+                    throw ex;
+                }
+            }
+            return enqueueMockCharge(reuseId, billingRun);
         }
         if ("IDLE".equals(status) && regenerateAll) {
             log.info("mock-charge service: branch=IDLE_regenerateAll — new execution");
@@ -389,11 +454,14 @@ public class MockChargeService {
         if (billingRunId == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "billingRunId is required");
         }
-        List<StageRunDto> rows = stageRunRepository.listByBillingRunIdAndStageCode(
-                billingRunId, STAGE_CODE, status, limit, offset, sortBy, sortOrder);
-        int total = stageRunRepository.countByBillingRunIdAndStageCode(billingRunId, STAGE_CODE, status);
-        List<MockChargeListItemDto> data = rows.stream().map(this::toListItem).toList();
-        return PageResponse.of(data, total, limit, offset);
+        CompletableFuture<List<StageRunDto>> rowsF = readExecutors.supplyAsync(() ->
+                stageRunRepository.listByBillingRunIdAndStageCode(
+                        billingRunId, STAGE_CODE, status, limit, offset, sortBy, sortOrder));
+        CompletableFuture<Integer> totalF = readExecutors.supplyAsync(() ->
+                stageRunRepository.countByBillingRunIdAndStageCode(billingRunId, STAGE_CODE, status));
+        CompletableFuture.allOf(rowsF, totalF).join();
+        List<MockChargeListItemDto> data = rowsF.join().stream().map(this::toListItem).toList();
+        return PageResponse.of(data, totalF.join(), limit, offset);
     }
 
     private MockChargeListItemDto toListItem(StageRunDto s) {
@@ -667,8 +735,10 @@ public class MockChargeService {
 
         if (nextSr == null) {
             if (actualChargeNext) {
+                // scheduled_for must stay null — due poller only fires SCHEDULED rows, but a
+                // past scheduled_for is misleading and was previously set to now() on proceed.
                 UUID newId = stageRunRepository.createStageRun(
-                        billingRunId, nextCode, OffsetDateTime.now(), null, actorUserId, false);
+                        billingRunId, nextCode, null, null, actorUserId, false);
                 if (!stageRunRepository.trySetStageRunStatusByCode(newId, "IDLE")) {
                     log.warn(
                             "Could not set ACTUAL_CHARGE stage to IDLE (is IDLE in billing_config.stage_run_status?): stageRunId={}",
@@ -683,8 +753,30 @@ public class MockChargeService {
             return;
         }
         String st = nextSr.statusCode();
-        if ("PENDING".equals(st) || "QUEUED".equals(st)) {
-            if (actualChargeNext) {
+        if (actualChargeNext) {
+            // Re-arm hollow / terminal AC rows so the user can Start or Schedule (do not leave COMPLETED).
+            if ("COMPLETED".equals(st)
+                    || "PARTIALLY_COMPLETED".equals(st)
+                    || "PARTIAL".equals(st)
+                    || "FAILED".equals(st)
+                    || "CANCELLED".equals(st)) {
+                stageRunRepository.prepareStageRunForRerun(nextSr.stageRunId());
+                if (!stageRunRepository.trySetStageRunStatusByCode(nextSr.stageRunId(), "IDLE")) {
+                    log.warn(
+                            "Could not reset ACTUAL_CHARGE to IDLE after proceed (was {}) stageRunId={}",
+                            st,
+                            nextSr.stageRunId());
+                } else {
+                    log.info(
+                            "Reset ACTUAL_CHARGE stage to IDLE after proceed (was {}) stageRunId={} billingRunId={}",
+                            st,
+                            nextSr.stageRunId(),
+                            billingRunId);
+                }
+                return;
+            }
+            if ("PENDING".equals(st) || "QUEUED".equals(st) || "WAITING".equals(st) || "IDLE".equals(st)) {
+                stageRunRepository.prepareStageRunForRerun(nextSr.stageRunId());
                 if (!stageRunRepository.trySetStageRunStatusByCode(nextSr.stageRunId(), "IDLE")) {
                     log.warn(
                             "Could not set ACTUAL_CHARGE stage to IDLE (is IDLE in billing_config.stage_run_status?): stageRunId={}",
@@ -695,9 +787,11 @@ public class MockChargeService {
                         st,
                         nextSr.stageRunId(),
                         billingRunId);
-            } else {
-                stageRunRepository.startStageRun(nextSr.stageRunId());
             }
+            return;
+        }
+        if ("PENDING".equals(st) || "QUEUED".equals(st)) {
+            stageRunRepository.startStageRun(nextSr.stageRunId());
         }
     }
 
@@ -905,34 +999,67 @@ public class MockChargeService {
     @Transactional
     public Map<String, Object> scheduleRun(MockChargeScheduledRequest request) {
         UUID billingRunId = request.billingRunId();
+        OffsetDateTime when = request.scheduledFor().withOffsetSameInstant(ZoneOffset.UTC);
+        if (!when.isAfter(UtcClock.now())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "scheduledFor must be in the future (UTC)");
+        }
         BillingRunDto br = billingRunService.getBillingRun(billingRunId);
         assertMockChargeStageReady(br);
         assertInvoicesLockedForMockCharge(billingRunId);
-        UUID stageRunId = stageRunRepository.createStageRun(
-                billingRunId,
-                STAGE_CODE,
-                request.scheduledFor(),
-                null,
-                request.triggeredBy(),
-                false);
-        stageRunRepository.trySetStageRunStatusByCode(stageRunId, "SCHEDULED");
-        Map<String, Object> m = new HashMap<>();
-        m.put("scheduled_for", request.scheduledFor().toString());
-        if (request.timezone() != null) {
-            m.put("timezone", request.timezone());
+
+        StageRunDto existing = stageRunRepository.findByBillingRunIdAndStageCode(billingRunId, STAGE_CODE);
+        UUID stageRunId;
+        if (existing != null) {
+            String st = existing.statusCode();
+            if ("RUNNING".equals(st) || "QUEUED".equals(st)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Cannot schedule while mock charge is " + st);
+            }
+            if ("IDLE".equals(st) || "PENDING".equals(st) || "SCHEDULED".equals(st)
+                    || "FAILED".equals(st) || "CANCELLED".equals(st)) {
+                stageRunId = existing.stageRunId();
+                if ("FAILED".equals(st) || "CANCELLED".equals(st)) {
+                    stageRunRepository.prepareStageRunForReschedule(stageRunId, when);
+                } else {
+                    stageRunRepository.updateScheduledFor(stageRunId, when);
+                }
+            } else {
+                stageRunId = stageRunRepository.createStageRun(
+                        billingRunId, STAGE_CODE, when, null, request.triggeredBy(), false);
+            }
+        } else {
+            stageRunId = stageRunRepository.createStageRun(
+                    billingRunId, STAGE_CODE, when, null, request.triggeredBy(), false);
         }
+
+        stageRunRepository.trySetStageRunStatusByCode(stageRunId, "SCHEDULED");
+        String whenIso = DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(when);
+        Map<String, Object> m = new HashMap<>();
+        StageRunDto refreshed = stageRunRepository.findById(stageRunId);
+        if (refreshed != null && refreshed.summaryJson() != null) {
+            m.putAll(refreshed.summaryJson());
+        }
+        m.put("scheduled_for", whenIso);
+        m.put("timezone", request.timezone() != null && !request.timezone().isBlank()
+                ? request.timezone() : "UTC");
         stageRunRepository.updateStageRunSummary(stageRunId, m);
         auditMockChargeStage(
                 "SCHEDULED",
                 stageRunId,
                 billingRunId,
                 request.triggeredBy() != null ? request.triggeredBy().toString() : "system",
-                Map.of("scheduled_for", request.scheduledFor().toString()));
-        return Map.of(
-                "scheduledRunId", stageRunId,
-                "scheduledFor", request.scheduledFor().toString());
+                Map.of("scheduled_for", whenIso));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("scheduledRunId", stageRunId);
+        body.put("billingRunId", billingRunId);
+        body.put("scheduledFor", whenIso);
+        body.put("statusCode", "SCHEDULED");
+        body.put("createdAt", DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(UtcClock.now()));
+        return body;
     }
 
+    @Transactional
     public void cancelScheduledRun(UUID scheduledRunId) {
         StageRunDto s = stageRunRepository.findById(scheduledRunId);
         if (s == null || !STAGE_CODE.equals(s.stageCode())) {

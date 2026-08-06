@@ -29,6 +29,9 @@ public record BillingRunDto(
     OffsetDateTime endedOn,
     Map<String, Object> summaryJson,
     UUID createdBy,
+    @JsonProperty("createdByName")
+    @JsonAlias("created_by_name")
+    String createdByName,
     OffsetDateTime createdOn,
     OffsetDateTime modifiedOn,
     UUID sourceRunId,

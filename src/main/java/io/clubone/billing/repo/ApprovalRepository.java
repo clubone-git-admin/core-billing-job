@@ -29,9 +29,19 @@ public class ApprovalRepository {
             SELECT bra.approval_id, bra.billing_run_id, bra.approval_level,
                    bra.approver_role, bra.status_code, bra.approver_id,
                    bra.approved_on, bra.notes, bra.created_on,
-                   ap.display_name AS approval_status_display
+                   ap.display_name AS approval_status_display,
+                   COALESCE(
+                       NULLIF(TRIM(CONCAT_WS(' ', au.first_name, au.last_name)), ''),
+                       NULLIF(TRIM(CONCAT_WS(' ', app_u.first_name, app_u.last_name)), ''),
+                       NULLIF(TRIM(au.email), ''),
+                       NULLIF(TRIM(app_u.email), '')
+                   ) AS approver_name
             FROM client_subscription_billing.billing_run_approval bra
             LEFT JOIN billing_config.approval_status ap ON ap.status_code = bra.status_code
+            LEFT JOIN access.access_user au ON au.user_id = bra.approver_id
+            LEFT JOIN access.access_application_user aau
+                   ON aau.application_user_id = bra.approver_id
+            LEFT JOIN access.access_user app_u ON app_u.user_id = aau.user_id
             WHERE bra.billing_run_id = ?::uuid
             ORDER BY bra.approval_level ASC
             """;
@@ -46,6 +56,14 @@ public class ApprovalRepository {
             OffsetDateTime approvedOn = rs.getObject("approved_on", OffsetDateTime.class);
             String notes = rs.getString("notes");
             OffsetDateTime createdOn = rs.getObject("created_on", OffsetDateTime.class);
+            String approverName = rs.getString("approver_name");
+            if (approverName != null) {
+                approverName = approverName.trim();
+                if (approverName.isEmpty()
+                        || (approverId != null && approverName.equalsIgnoreCase(approverId.toString()))) {
+                    approverName = null;
+                }
+            }
 
             StatusDto approvalStatus = new StatusDto(
                     statusCode,
@@ -55,7 +73,7 @@ public class ApprovalRepository {
 
             return new ApprovalDto(
                     approvalId, billingRunIdResult, approvalLevel, approverRole,
-                    approvalStatus, approverId, approvedOn, notes, createdOn
+                    approvalStatus, approverId, approverName, approvedOn, notes, createdOn
             );
         });
     }
@@ -114,6 +132,90 @@ public class ApprovalRepository {
             WHERE billing_run_id = ?::uuid AND approval_level = ?
             """,
                 approverId.toString(), notes, billingRunId.toString(), approvalLevel);
+    }
+
+    /**
+     * After a due-preview re-run following denial, reopen approval so the new preview can be approved.
+     * Resets REJECTED/DENIED rows to PENDING and clears billing_run rejection fields.
+     */
+    public void resetRejectedApprovalsToPending(UUID billingRunId) {
+        UUID pendingStatusId;
+        try {
+            pendingStatusId = jdbc.queryForObject(
+                    "SELECT approval_status_id FROM billing_config.approval_status WHERE status_code = ? LIMIT 1",
+                    UUID.class,
+                    "PENDING");
+        } catch (Exception e) {
+            pendingStatusId = null;
+        }
+        if (pendingStatusId != null) {
+            jdbc.update("""
+                UPDATE client_subscription_billing.billing_run_approval
+                SET status_code = 'PENDING',
+                    approval_status_id = ?::uuid,
+                    approver_id = NULL,
+                    approved_on = NULL,
+                    notes = NULL
+                WHERE billing_run_id = ?::uuid
+                  AND UPPER(TRIM(status_code)) IN ('REJECTED', 'DENIED')
+                """,
+                    pendingStatusId.toString(), billingRunId.toString());
+        } else {
+            jdbc.update("""
+                UPDATE client_subscription_billing.billing_run_approval
+                SET status_code = 'PENDING',
+                    approver_id = NULL,
+                    approved_on = NULL,
+                    notes = NULL
+                WHERE billing_run_id = ?::uuid
+                  AND UPPER(TRIM(status_code)) IN ('REJECTED', 'DENIED')
+                """,
+                    billingRunId.toString());
+        }
+
+        // Clear run-level rejection so GET …/billing/runs no longer reports DENIED.
+        try {
+            UUID runPendingId = pendingStatusId;
+            if (runPendingId == null) {
+                jdbc.update("""
+                    UPDATE client_subscription_billing.billing_run
+                    SET approval_status_id = NULL,
+                        approved_by = NULL,
+                        approved_on = NULL,
+                        approval_notes = NULL,
+                        modified_on = now()
+                    WHERE billing_run_id = ?::uuid
+                      AND (
+                        approval_status_id IS NULL
+                        OR approval_status_id IN (
+                          SELECT approval_status_id FROM billing_config.approval_status
+                          WHERE UPPER(TRIM(status_code)) IN ('REJECTED', 'DENIED')
+                        )
+                      )
+                    """,
+                        billingRunId.toString());
+            } else {
+                jdbc.update("""
+                    UPDATE client_subscription_billing.billing_run br
+                    SET approval_status_id = ?::uuid,
+                        approved_by = NULL,
+                        approved_on = NULL,
+                        approval_notes = NULL,
+                        modified_on = now()
+                    WHERE br.billing_run_id = ?::uuid
+                      AND (
+                        br.approval_status_id IS NULL
+                        OR br.approval_status_id IN (
+                          SELECT approval_status_id FROM billing_config.approval_status
+                          WHERE UPPER(TRIM(status_code)) IN ('REJECTED', 'DENIED')
+                        )
+                      )
+                    """,
+                        runPendingId.toString(), billingRunId.toString());
+            }
+        } catch (Exception e) {
+            // Non-blocking: approvals[] reset is enough for UI reopen.
+        }
     }
 
     /**

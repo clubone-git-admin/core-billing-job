@@ -100,6 +100,18 @@ public class ActualChargeController {
         return ResponseEntity.ok(actualChargeService.cancel(actualChargeRunId, request));
     }
 
+    @PostMapping("/scheduled-runs")
+    public ResponseEntity<Map<String, Object>> scheduleRun(
+            @Valid @RequestBody ActualChargeScheduledRequest request) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(actualChargeService.scheduleRun(request));
+    }
+
+    @DeleteMapping("/scheduled-runs/{scheduledRunId}")
+    public ResponseEntity<Void> cancelScheduledRun(@PathVariable UUID scheduledRunId) {
+        actualChargeService.cancelScheduledRun(scheduledRunId);
+        return ResponseEntity.noContent().build();
+    }
+
     @PostMapping("/runs/{actualChargeRunId}/retry")
     public ResponseEntity<ActualChargeRunResponse> retryRun(
             @PathVariable UUID actualChargeRunId,

@@ -5,6 +5,7 @@ import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.LocationLevelRepository.LocationRow;
 import io.clubone.billing.repo.StageRunRepository;
 import io.clubone.billing.repo.ApprovalRepository;
+import io.clubone.billing.util.BillingReadExecutors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -12,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Service for billing run operations.
@@ -26,18 +28,21 @@ public class BillingRunService {
     private final ApprovalRepository approvalRepository;
     private final DuePreviewService duePreviewService;
     private final BillingRunScopeService billingRunScopeService;
+    private final BillingReadExecutors readExecutors;
 
     public BillingRunService(
             BillingRunRepository billingRunRepository,
             StageRunRepository stageRunRepository,
             ApprovalRepository approvalRepository,
             DuePreviewService duePreviewService,
-            BillingRunScopeService billingRunScopeService) {
+            BillingRunScopeService billingRunScopeService,
+            BillingReadExecutors readExecutors) {
         this.billingRunRepository = billingRunRepository;
         this.stageRunRepository = stageRunRepository;
         this.approvalRepository = approvalRepository;
         this.duePreviewService = duePreviewService;
         this.billingRunScopeService = billingRunScopeService;
+        this.readExecutors = readExecutors;
     }
 
     public PageResponse<BillingRunDto> listBillingRuns(
@@ -45,14 +50,16 @@ public class BillingRunService {
             LocalDate dueDateTo, UUID locationId, Integer limit, Integer offset,
             String sortBy, String sortOrder) {
 
-        List<BillingRunDto> runs = billingRunRepository.findBillingRuns(
-                statusCode, currentStageCode, dueDateFrom, dueDateTo, locationId,
-                limit, offset, sortBy, sortOrder);
+        CompletableFuture<List<BillingRunDto>> runsF = readExecutors.supplyAsync(() ->
+                billingRunRepository.findBillingRuns(
+                        statusCode, currentStageCode, dueDateFrom, dueDateTo, locationId,
+                        limit, offset, sortBy, sortOrder));
+        CompletableFuture<Integer> totalF = readExecutors.supplyAsync(() ->
+                billingRunRepository.countBillingRuns(
+                        statusCode, currentStageCode, dueDateFrom, dueDateTo, locationId));
 
-        Integer total = billingRunRepository.countBillingRuns(
-                statusCode, currentStageCode, dueDateFrom, dueDateTo, locationId);
-
-        return PageResponse.of(runs, total, limit, offset);
+        CompletableFuture.allOf(runsF, totalF).join();
+        return PageResponse.of(runsF.join(), totalF.join(), limit, offset);
     }
 
     public BillingRunDto getBillingRun(UUID billingRunId) {
@@ -61,17 +68,40 @@ public class BillingRunService {
             return null;
         }
 
-        // Load stages and approvals (rehydrate DUE_PREVIEW file refs from snapshot when approve overwrote summary_json)
+        // Independent enrichments — fan out under tenant-aware read pool (no outer TX).
+        CompletableFuture<List<StageRunDto>> stagesF = readExecutors.supplyAsync(() ->
+                duePreviewService.enrichDuePreviewStageSummaries(
+                        billingRunId, stageRunRepository.findByBillingRunId(billingRunId)));
+        CompletableFuture<List<ApprovalDto>> approvalsF = readExecutors.supplyAsync(() ->
+                approvalRepository.findByBillingRunId(billingRunId));
+
+        CompletableFuture.allOf(stagesF, approvalsF).join();
+        return withHistory(billingRun, stagesF.join(), approvalsF.join());
+    }
+
+    /**
+     * Sequential enrich for use inside an open write {@code @Transactional} — do not fan out
+     * JDBC onto other threads while the request thread holds a connection.
+     */
+    private BillingRunDto getBillingRunInTx(UUID billingRunId) {
+        BillingRunDto billingRun = billingRunRepository.findById(billingRunId);
+        if (billingRun == null) {
+            return null;
+        }
         List<StageRunDto> stageHistory = duePreviewService.enrichDuePreviewStageSummaries(
                 billingRunId, stageRunRepository.findByBillingRunId(billingRunId));
         List<ApprovalDto> approvals = approvalRepository.findByBillingRunId(billingRunId);
+        return withHistory(billingRun, stageHistory, approvals);
+    }
 
+    private static BillingRunDto withHistory(
+            BillingRunDto billingRun, List<StageRunDto> stageHistory, List<ApprovalDto> approvals) {
         return new BillingRunDto(
                 billingRun.billingRunId(), billingRun.billingRunCode(), billingRun.dueDate(),
                 billingRun.locationId(), billingRun.locationName(),
                 billingRun.billingRunStatus(), billingRun.currentStage(), billingRun.approvalStatus(),
                 billingRun.startedOn(), billingRun.endedOn(), billingRun.summaryJson(),
-                billingRun.createdBy(), billingRun.createdOn(), billingRun.modifiedOn(),
+                billingRun.createdBy(), billingRun.createdByName(), billingRun.createdOn(), billingRun.modifiedOn(),
                 billingRun.sourceRunId(), billingRun.sourceRunCode(), billingRun.approvedBy(),
                 billingRun.approvedOn(), billingRun.approvalNotes(),
                 billingRun.locationLevelId(), billingRun.includeChildLocations(),
@@ -127,7 +157,7 @@ public class BillingRunService {
                         includeIds,
                         scope.scopeSummary());
 
-        return getBillingRun(billingRunId);
+        return getBillingRunInTx(billingRunId);
     }
 
     public ScopePreviewResponse scopePreview(ScopePreviewRequest request) {
@@ -166,7 +196,7 @@ public class BillingRunService {
         billingRunRepository.updateBillingRun(
                 billingRunId, request.summaryJson(), request.approvalNotes());
 
-        return getBillingRun(billingRunId);
+        return getBillingRunInTx(billingRunId);
     }
 
     @Transactional
@@ -179,7 +209,7 @@ public class BillingRunService {
         billingRunRepository.cancelBillingRun(billingRunId);
         // TODO: Update approval_notes with cancellation reason
 
-        return getBillingRun(billingRunId);
+        return getBillingRunInTx(billingRunId);
     }
 
     @Transactional
@@ -219,6 +249,7 @@ public class BillingRunService {
         );
     }
 
+    @Transactional(readOnly = true)
     public BillingRunDto getBillingRunByKey(String idempotencyKey) {
         return billingRunRepository.findByIdempotencyKey(idempotencyKey);
     }

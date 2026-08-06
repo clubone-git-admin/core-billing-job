@@ -5,12 +5,15 @@ import io.clubone.billing.api.dto.PageResponse;
 import io.clubone.billing.repo.DLQRepository;
 import io.clubone.billing.repo.LocationLevelRepository;
 import io.clubone.billing.service.invoicegen.InvoiceGenerationStageDlqSummaryService;
+import io.clubone.billing.util.BillingReadExecutors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Service for Dead Letter Queue operations.
@@ -23,16 +26,24 @@ public class DLQService {
     private final DLQRepository dlqRepository;
     private final LocationLevelRepository locationLevelRepository;
     private final InvoiceGenerationStageDlqSummaryService invoiceGenerationStageDlqSummaryService;
+    private final BillingReadExecutors readExecutors;
+    /** Spring proxy — bulk ops call single-item {@code @Transactional} methods correctly. */
+    private final DLQService self;
 
     public DLQService(
             DLQRepository dlqRepository,
             LocationLevelRepository locationLevelRepository,
-            InvoiceGenerationStageDlqSummaryService invoiceGenerationStageDlqSummaryService) {
+            InvoiceGenerationStageDlqSummaryService invoiceGenerationStageDlqSummaryService,
+            BillingReadExecutors readExecutors,
+            @Lazy DLQService self) {
         this.dlqRepository = dlqRepository;
         this.locationLevelRepository = locationLevelRepository;
         this.invoiceGenerationStageDlqSummaryService = invoiceGenerationStageDlqSummaryService;
+        this.readExecutors = readExecutors;
+        this.self = self;
     }
 
+    /** Parallel list+count — no outer TX (workers need separate pool connections). */
     public PageResponse<DLQItemDto> listDLQItems(
             UUID billingRunId,
             UUID locationLevelId,
@@ -43,15 +54,39 @@ public class DLQService {
             Boolean resolved,
             Integer limit, Integer offset, String sortBy, String sortOrder) {
         List<UUID> locationIds = resolveLocationIds(locationLevelId, includeChildLocations);
+        return listDLQItemsParallel(
+                billingRunId, stageRunId, locationIds, failureTypeCode, errorType, resolved,
+                limit, offset, sortBy, sortOrder);
+    }
 
-        List<DLQItemDto> items = dlqRepository.findDLQItems(
-                billingRunId, stageRunId, locationIds, failureTypeCode, errorType, resolved, limit, offset, sortBy, sortOrder);
-
-        Integer total =
+    private PageResponse<DLQItemDto> listDLQItemsParallel(
+            UUID billingRunId,
+            UUID stageRunId,
+            List<UUID> locationIds,
+            String failureTypeCode,
+            String errorType,
+            Boolean resolved,
+            Integer limit,
+            Integer offset,
+            String sortBy,
+            String sortOrder) {
+        CompletableFuture<List<DLQItemDto>> itemsF = readExecutors.supplyAsync(() ->
+                dlqRepository.findDLQItems(
+                        billingRunId,
+                        stageRunId,
+                        locationIds,
+                        failureTypeCode,
+                        errorType,
+                        resolved,
+                        limit,
+                        offset,
+                        sortBy,
+                        sortOrder));
+        CompletableFuture<Integer> totalF = readExecutors.supplyAsync(() ->
                 dlqRepository.countDLQItems(
-                        billingRunId, stageRunId, locationIds, failureTypeCode, errorType, resolved);
-
-        return PageResponse.of(items, total, limit, offset);
+                        billingRunId, stageRunId, locationIds, failureTypeCode, errorType, resolved));
+        CompletableFuture.allOf(itemsF, totalF).join();
+        return PageResponse.of(itemsF.join(), totalF.join(), limit, offset);
     }
 
     private List<UUID> resolveLocationIds(UUID locationLevelId, Boolean includeChildLocations) {
@@ -66,6 +101,7 @@ public class DLQService {
                 .toList();
     }
 
+    @Transactional(readOnly = true)
     public DLQItemDto getDLQItem(UUID dlqId) {
         return dlqRepository.findById(dlqId);
     }
@@ -101,7 +137,10 @@ public class DLQService {
         return dlqRepository.findById(dlqId);
     }
 
-    @Transactional
+    /**
+     * Not {@code @Transactional}: each item runs in its own TX via {@link #self} so one failure
+     * does not roll back the whole bulk, and connections are not held for the full loop.
+     */
     public Map<String, Object> bulkRetryDLQItems(Map<String, Object> request) {
         @SuppressWarnings("unchecked")
         List<String> dlqIds = (List<String>) request.getOrDefault("dlq_ids", Collections.emptyList());
@@ -115,7 +154,7 @@ public class DLQService {
         for (String dlqIdStr : dlqIds) {
             try {
                 UUID dlqId = UUID.fromString(dlqIdStr);
-                DLQItemDto item = retryDLQItem(dlqId, retryConfig);
+                DLQItemDto item = self.retryDLQItem(dlqId, retryConfig);
                 if (item != null) {
                     retried++;
                     results.add(Map.of(
@@ -149,7 +188,9 @@ public class DLQService {
         );
     }
 
-    @Transactional
+    /**
+     * Not {@code @Transactional}: per-item TX via {@link #self}.
+     */
     public Map<String, Object> bulkResolveDLQItems(Map<String, Object> request) {
         @SuppressWarnings("unchecked")
         List<String> dlqIds = (List<String>) request.getOrDefault("dlq_ids", Collections.emptyList());
@@ -169,7 +210,7 @@ public class DLQService {
                         "resolution_notes", resolutionNotes,
                         "resolution_action", resolutionAction
                 );
-                DLQItemDto item = resolveDLQItem(dlqId, resolveRequest);
+                DLQItemDto item = self.resolveDLQItem(dlqId, resolveRequest);
                 if (item != null && item.resolved()) {
                     resolved++;
                     results.add(Map.of(
