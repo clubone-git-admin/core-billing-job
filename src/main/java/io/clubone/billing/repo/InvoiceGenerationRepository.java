@@ -116,7 +116,18 @@ public class InvoiceGenerationRepository {
             SELECT
                 gen_random_uuid(),
                 'GEN-' || replace(gen_random_uuid()::text, '-', ''),
-                ?::timestamp,
+                COALESCE(
+                    (
+                        SELECT (now() AT TIME ZONE tz.timezone_code)
+                          FROM clients.client_role cr
+                          JOIN locations.location loc ON loc.location_id = cr.location_id
+                          JOIN locations.lu_timezone tz ON tz.timezone_id = loc.timezone_id
+                         WHERE cr.client_role_id = ?::uuid
+                           AND COALESCE(tz.is_active, true) = true
+                         LIMIT 1
+                    ),
+                    (now() AT TIME ZONE 'UTC')
+                ),
                 ?::uuid,
                 (SELECT invoice_status_id FROM transactions.lu_invoice_status WHERE status_name = 'PENDING' LIMIT 1),
                 ?::numeric,
@@ -144,7 +155,7 @@ public class InvoiceGenerationRepository {
         return jdbc.queryForObject(
                 sql,
                 UUID.class,
-                Timestamp.from(Instant.now()),
+                clientRoleId.toString(),
                 clientRoleId.toString(),
                 st,
                 tax,
