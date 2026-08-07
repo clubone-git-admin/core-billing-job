@@ -2,6 +2,7 @@ package io.clubone.billing.service.invoicegen;
 
 import io.clubone.billing.repo.DuePreviewRepository;
 import io.clubone.billing.repo.InvoiceGenerationRepository;
+import io.clubone.billing.service.currency.FxRateService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -27,12 +28,15 @@ public class InvoiceGenerationDraftLineProcessor {
 
     private final DuePreviewRepository duePreviewRepository;
     private final InvoiceGenerationRepository invoiceGenerationRepository;
+    private final FxRateService fxRateService;
 
     public InvoiceGenerationDraftLineProcessor(
             DuePreviewRepository duePreviewRepository,
-            InvoiceGenerationRepository invoiceGenerationRepository) {
+            InvoiceGenerationRepository invoiceGenerationRepository,
+            FxRateService fxRateService) {
         this.duePreviewRepository = duePreviewRepository;
         this.invoiceGenerationRepository = invoiceGenerationRepository;
+        this.fxRateService = fxRateService;
     }
 
     /**
@@ -46,7 +50,8 @@ public class InvoiceGenerationDraftLineProcessor {
                 BigDecimal total,
                 UUID purchaseSnapshotIdOrNull,
                 boolean scheduleLinked,
-                boolean entityLineOk
+                boolean entityLineOk,
+                String currencyCode
         ) implements LineOutcome {}
 
         enum SkipReason {
@@ -155,6 +160,28 @@ public class InvoiceGenerationDraftLineProcessor {
             if (invoiceId == null) {
                 return new LineOutcome.DraftFailed(subscriptionInstanceId, "insertDraftInvoice returned null", null);
             }
+            String currencyCode = invoiceGenerationRepository.findInvoiceCurrencyCode(invoiceId);
+            if (currencyCode != null && !currencyCode.isBlank()) {
+                try {
+                    BigDecimal totalForFx = total != null ? total : BigDecimal.ZERO;
+                    fxRateService.toReporting(totalForFx, currencyCode).ifPresent(rep ->
+                            invoiceGenerationRepository.updateReportingProjection(
+                                    invoiceId,
+                                    rep.amountReporting(),
+                                    rep.fxRateId(),
+                                    rep.fxAsOf()));
+                } catch (Exception fxEx) {
+                    log.debug(
+                            "Invoice generation: reporting FX skipped invoiceId={} currency={} err={}",
+                            invoiceId,
+                            currencyCode,
+                            fxEx.getMessage());
+                }
+            } else {
+                log.warn(
+                        "Invoice generation: currency_code blank after draft insert — reporting FX skipped invoiceId={}",
+                        invoiceId);
+            }
          //   int i = 1/0;
             Optional<UUID> scheduleId =
                     invoiceGenerationRepository.assignInvoiceToSubscriptionBillingSchedule(
@@ -192,7 +219,8 @@ public class InvoiceGenerationDraftLineProcessor {
                     total != null ? total : BigDecimal.ZERO,
                     purchaseSnapshotId,
                     scheduleLinked,
-                    entityOk);
+                    entityOk,
+                    currencyCode);
         } catch (Exception ex) {
             log.warn(
                     "Invoice generation: row processing failed billingRunId={} err={}",

@@ -9,6 +9,7 @@ import io.clubone.billing.repo.MockChargeRepository;
 import io.clubone.billing.repo.MockChargeRepository.MandateProbe;
 import io.clubone.billing.repo.MockChargeRepository.MockInvoiceRow;
 import io.clubone.billing.repo.StageRunRepository;
+import io.clubone.billing.service.currency.CurrencySummaryAccumulator;
 import io.clubone.billing.service.schedule.StageRunLeaseHeartbeat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -73,7 +74,7 @@ public class MockChargeJobRunner {
             BillingRunRepository billingRunRepository,
             MockChargeRepository mockChargeRepository,
             AuditLogRepository auditLogRepository,
-            @Value("${clubone.billing.mock-charge.skip-currency-check:true}") boolean skipCurrencyCheck,
+            @Value("${clubone.billing.mock-charge.skip-currency-check:false}") boolean skipCurrencyCheck,
             @Value("${clubone.billing.mock-charge.skip-mandate-max-amount-check:false}") boolean skipMandateMaxAmountCheck,
             @Value("${clubone.billing.mock-charge.invoice-page-size:200}") int invoicePageSize,
             @Value("${clubone.billing.scheduled-stage.lease-heartbeat-seconds:30}") long leaseHeartbeatSeconds) {
@@ -222,6 +223,7 @@ public class MockChargeJobRunner {
             BigDecimal eligibleAmount = BigDecimal.ZERO;
             BigDecimal blockedAmount = BigDecimal.ZERO;
             Map<String, Integer> breakdown = new HashMap<>();
+            CurrencySummaryAccumulator currencySummary = new CurrencySummaryAccumulator();
 
             UUID afterInvoiceId = null;
             if (!freshWaitingRerun && s.summaryJson() != null) {
@@ -248,13 +250,15 @@ public class MockChargeJobRunner {
                             }
                         }
                     }
+                    currencySummary.restoreFrom(s.summaryJson());
                     log.info(
-                            "mock-charge job: resuming from checkpoint stageRunId={} afterInvoiceId={} total={} eligible={} blocked={}",
+                            "mock-charge job: resuming from checkpoint stageRunId={} afterInvoiceId={} total={} eligible={} blocked={} currencies={}",
                             stageRunId,
                             afterInvoiceId,
                             total,
                             eligible,
-                            blocked);
+                            blocked,
+                            s.summaryJson().get("currencies"));
                 }
             }
 
@@ -375,18 +379,26 @@ public class MockChargeJobRunner {
                                 row.subTotal(),
                                 row.taxAmount(),
                                 row.discountAmount(),
-                                row.totalAmount());
+                                row.totalAmount(),
+                                row.invoiceCurrencyCode());
                     } else {
                         log.warn("mock-charge job: no subscription_instance_id — history row not inserted invoiceId={}", row.invoiceId());
                     }
 
                     breakdown.merge(vr.outcome().name(), 1, Integer::sum);
+                    String ccy = row.invoiceCurrencyCode();
+                    currencySummary.addCount(ccy, "total_candidates", 1);
+                    currencySummary.addAmount(ccy, "total_amount", amt);
                     if (vr.outcome() == MockChargeOutcome.READY_FOR_CHARGE || vr.outcome() == MockChargeOutcome.ELIGIBLE) {
                         eligible++;
                         eligibleAmount = eligibleAmount.add(amt);
+                        currencySummary.addCount(ccy, "eligible_count", 1);
+                        currencySummary.addAmount(ccy, "eligible_amount", amt);
                     } else {
                         blocked++;
                         blockedAmount = blockedAmount.add(amt);
+                        currencySummary.addCount(ccy, "blocked_count", 1);
+                        currencySummary.addAmount(ccy, "blocked_amount", amt);
                     }
 
                     lastProcessedInvoiceId = row.invoiceId();
@@ -394,7 +406,7 @@ public class MockChargeJobRunner {
                     if (rowsSinceCheckpoint >= CHECKPOINT_EVERY_N_ROWS) {
                         writeCheckpoint(
                                 stageRunId, lastProcessedInvoiceId, total, eligible, blocked,
-                                totalAmount, eligibleAmount, blockedAmount, breakdown);
+                                totalAmount, eligibleAmount, blockedAmount, breakdown, currencySummary);
                         rowsSinceCheckpoint = 0;
                     }
                 }
@@ -405,7 +417,7 @@ public class MockChargeJobRunner {
                 lastProcessedInvoiceId = afterInvoiceId;
                 writeCheckpoint(
                         stageRunId, afterInvoiceId, total, eligible, blocked,
-                        totalAmount, eligibleAmount, blockedAmount, breakdown);
+                        totalAmount, eligibleAmount, blockedAmount, breakdown, currencySummary);
                 rowsSinceCheckpoint = 0;
 
                 if (rawPageSize < invoicePageSize) {
@@ -436,6 +448,13 @@ public class MockChargeJobRunner {
             }
             merged.put("provider_confidence", computeProviderConfidence(total, totalAmount, eligibleAmount, eligible));
             merged.put("blocked_breakdown", breakdown);
+            currencySummary.mergeInto(merged);
+            if (Boolean.TRUE.equals(merged.get("mixed_currency"))) {
+                merged.put("total_amount", null);
+                merged.put("eligible_amount", null);
+                merged.put("blocked_amount", null);
+                merged.put("total_amount_note", "Use by_currency — mixed currencies cannot be summed");
+            }
             merged.put("mock_charge_completed_at", java.time.OffsetDateTime.now().toString());
             merged.put("awaiting_mock_charge_proceed", true);
 
@@ -496,7 +515,8 @@ public class MockChargeJobRunner {
             BigDecimal totalAmount,
             BigDecimal eligibleAmount,
             BigDecimal blockedAmount,
-            Map<String, Integer> breakdown) {
+            Map<String, Integer> breakdown,
+            CurrencySummaryAccumulator currencySummary) {
         Map<String, Object> checkpoint = new HashMap<>();
         checkpoint.put(CK_AFTER_INVOICE_ID, afterInvoiceId != null ? afterInvoiceId.toString() : null);
         checkpoint.put("total_candidates", total);
@@ -506,6 +526,9 @@ public class MockChargeJobRunner {
         checkpoint.put("eligible_amount", eligibleAmount);
         checkpoint.put("blocked_amount", blockedAmount);
         checkpoint.put("blocked_breakdown", new HashMap<>(breakdown));
+        if (currencySummary != null) {
+            currencySummary.putInto(checkpoint);
+        }
         checkpoint.put(CK_UPDATED_AT, java.time.OffsetDateTime.now().toString());
         try {
             stageRunRepository.mergeStageRunSummaryJson(stageRunId, checkpoint, false);
@@ -627,12 +650,11 @@ public class MockChargeJobRunner {
     }
 
     /**
-     * When either side is missing currency metadata, do not block (data not wired yet).
-     * When both present, they must match ignoring case.
+     * Fail closed when invoice or mandate currency is blank after stamp era.
      */
     private static boolean currenciesAlignForCharge(String invoiceCurrency, String mandateCurrency) {
         if (invoiceCurrency == null || invoiceCurrency.isBlank() || mandateCurrency == null || mandateCurrency.isBlank()) {
-            return true;
+            return false;
         }
         return invoiceCurrency.trim().equalsIgnoreCase(mandateCurrency.trim());
     }

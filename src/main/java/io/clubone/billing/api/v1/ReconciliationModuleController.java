@@ -280,6 +280,8 @@ public class ReconciliationModuleController {
             @RequestParam(required = false) List<String> stage,
             @RequestParam(required = false) Boolean slaBreached,
             @RequestParam(required = false) String search,
+            @RequestParam(required = false) String currencyCode,
+            @RequestParam(required = false) String currency,
             @RequestParam(required = false, defaultValue = "1") Integer page,
             @RequestParam(required = false, defaultValue = "20") Integer pageSize
     ) {
@@ -293,6 +295,10 @@ public class ReconciliationModuleController {
         filters.put("stage", stage == null ? List.of() : stage);
         filters.put("slaBreached", slaBreached);
         filters.put("search", search);
+        String ccy = currencyCode != null && !currencyCode.isBlank() ? currencyCode : currency;
+        if (ccy != null && !ccy.isBlank()) {
+            filters.put("currencyCode", ccy.trim().toUpperCase());
+        }
         filters.put("page", page);
         filters.put("pageSize", pageSize);
         Map<String, Object> payload = service.listExceptions(filters);

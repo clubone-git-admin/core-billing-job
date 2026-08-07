@@ -6,6 +6,8 @@ import java.util.UUID;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 
+import io.clubone.billing.api.dto.currency.MoneyAmountDto;
+
 /**
  * DTO for dashboard KPIs.
  */
@@ -15,7 +17,9 @@ public record DashboardKPIDto(
     Map<String, LastRunByStage> lastRunsByStage,
     Forecast forecast,
     DLQSummary dlqSummary,
-    List<RecentActivity> recentActivity
+    List<RecentActivity> recentActivity,
+    /** Org reporting currency used for consolidated money fields. */
+    String reportingCurrencyCode
 ) {
     public record Summary(
         Integer totalRuns,
@@ -24,8 +28,22 @@ public record DashboardKPIDto(
         Integer failedRuns,
         Integer totalInvoices,
         Double totalAmount,
-        Double successRate
+        Double successRate,
+        /** Dual-display money (transactional + locked reporting projection). */
+        MoneyAmountDto totalAmountMoney,
+        /** True when more than one transactional currency is present in the KPI scope. */
+        Boolean mixedCurrencies
     ) {
+        public Summary(
+                Integer totalRuns,
+                Integer activeRuns,
+                Integer completedRuns,
+                Integer failedRuns,
+                Integer totalInvoices,
+                Double totalAmount,
+                Double successRate) {
+            this(totalRuns, activeRuns, completedRuns, failedRuns, totalInvoices, totalAmount, successRate, null, null);
+        }
     }
     
     public record LastRunByStage(
@@ -37,8 +55,31 @@ public record DashboardKPIDto(
         java.time.OffsetDateTime startedOn,
         java.time.OffsetDateTime endedOn,
         Integer invoicesCount,
-        Double totalAmount
+        Double totalAmount,
+        MoneyAmountDto totalAmountMoney
     ) {
+        public LastRunByStage(
+                UUID billingRunId,
+                String billingRunCode,
+                java.time.LocalDate dueDate,
+                String statusCode,
+                String currentStageCode,
+                java.time.OffsetDateTime startedOn,
+                java.time.OffsetDateTime endedOn,
+                Integer invoicesCount,
+                Double totalAmount) {
+            this(
+                    billingRunId,
+                    billingRunCode,
+                    dueDate,
+                    statusCode,
+                    currentStageCode,
+                    startedOn,
+                    endedOn,
+                    invoicesCount,
+                    totalAmount,
+                    null);
+        }
     }
     
     public record Forecast(
@@ -48,8 +89,12 @@ public record DashboardKPIDto(
     ) {
         public record ForecastPeriod(
             Integer invoiceCount,
-            Double totalAmount
+            Double totalAmount,
+            MoneyAmountDto totalAmountMoney
         ) {
+            public ForecastPeriod(Integer invoiceCount, Double totalAmount) {
+                this(invoiceCount, totalAmount, null);
+            }
         }
     }
     

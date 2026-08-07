@@ -42,6 +42,8 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
     private final LocalDate asOfDate;
     /** Per-run eligibility cache — avoids N× identical SQL for repeated subscription instances. */
     private final Map<UUID, Boolean> eligibilityCache = new ConcurrentHashMap<>();
+    /** Per-run invoice currency cache. */
+    private final Map<UUID, String> rowCurrencyCache = new ConcurrentHashMap<>();
 
     public BillingItemProcessor(JdbcTemplate jdbc,
                                 io.clubone.billing.batch.BillingJobProperties props,
@@ -150,16 +152,17 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
             out.setMock(false);
 
             long amountMinor = toMinor(row.getTotalAmount());
+            String currency = resolveInvoiceCurrency(row.getInvoiceId());
 
             // Audit: Payment initiated
-            auditService.logPaymentInitiated(row.getInvoiceId(), null, amountMinor, "INR", "system");
+            auditService.logPaymentInitiated(row.getInvoiceId(), null, amountMinor, currency, "system");
 
             PaymentResult pr = paymentService.billInvoiceRecurring(
                     row.getInvoiceId(),
                     row.getClientRoleId(),
                     row.getClientPaymentMethodId(),
                     amountMinor,
-                    "INR"
+                    currency
             );
 
             // Persist payment IDs into history row
@@ -355,6 +358,36 @@ public class BillingItemProcessor implements ItemProcessor<DueInvoiceRow, Billin
                 "check_eligibility",
                 e
             );
+        }
+    }
+
+    private String resolveInvoiceCurrency(UUID invoiceId) {
+        if (invoiceId == null) {
+            throw new BillingDataException(
+                    "invoiceId required to resolve currency", null, runId, "invoiceId", null);
+        }
+        if (rowCurrencyCache.containsKey(invoiceId)) {
+            return rowCurrencyCache.get(invoiceId);
+        }
+        try {
+            String code = jdbc.query(
+                    """
+                    SELECT upper(trim(currency_code)) AS currency_code
+                    FROM transactions.invoice
+                    WHERE invoice_id = ?::uuid
+                    LIMIT 1
+                    """,
+                    rs -> rs.next() ? rs.getString("currency_code") : null,
+                    invoiceId.toString());
+            if (code == null || code.isBlank()) {
+                throw new BillingDataException(
+                        "Invoice currency_code missing", invoiceId, runId, "currency_code", null);
+            }
+            rowCurrencyCache.put(invoiceId, code);
+            return code;
+        } catch (DataAccessException ex) {
+            throw new BillingDataException(
+                    "Failed to resolve invoice currency", invoiceId, runId, "currency_code", null, ex);
         }
     }
 

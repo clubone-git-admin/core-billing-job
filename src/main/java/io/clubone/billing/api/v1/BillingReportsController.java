@@ -126,6 +126,7 @@ public class BillingReportsController {
             @RequestParam(required = false) String sortBy,
             @RequestParam(required = false, defaultValue = "asc") String sortOrder,
             @RequestParam(required = false) String status,
+            @RequestParam(required = false) String currencyCode,
             @RequestParam(required = false, defaultValue = "json") String format) {
         String resolved = BillingReportSlugs.resolve(reportSlug);
         if (resolved == null) {
@@ -137,7 +138,7 @@ public class BillingReportsController {
                                     "code", "REPORT_NOT_FOUND",
                                     "details", Map.of("report_slug", reportSlug)));
         }
-        BillingReportQuery reportQuery = BillingReportQuery.of(q, sortBy, sortOrder, status);
+        BillingReportQuery reportQuery = BillingReportQuery.of(q, sortBy, sortOrder, status, currencyCode);
         int effectiveLimit = effectiveReportLimit(limit, format);
         LocalDate from = dueDateFrom != null ? dueDateFrom : defaultDueDateFrom();
         LocalDate to = dueDateTo != null ? dueDateTo : defaultDueDateTo();

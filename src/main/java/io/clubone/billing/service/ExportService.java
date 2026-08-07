@@ -72,7 +72,7 @@ public class ExportService {
 
     public byte[] exportForecast(LocalDate date, String format) {
         List<Map<String, Object>> items =
-                forecastRepository.getForecastAggregated(date, date, "day", List.of());
+                forecastRepository.getForecastAggregated(date, date, "day", List.of(), null);
 
         if ("csv".equalsIgnoreCase(format)) {
             return exportForecastToCSV(items);

@@ -228,6 +228,13 @@ public class SubscriptionBillingHistoryRepository {
             SELECT h.subscription_billing_history_id, h.invoice_id, h.subscription_instance_id,
                    h.billing_attempt_on, h.failure_reason, h.is_mock, h.billing_run_id, h.stage_run_id,
                    h.invoice_sub_total, h.invoice_tax_amount, h.invoice_discount_amount, h.invoice_total_amount,
+                   COALESCE(NULLIF(TRIM(h.currency_code::text), ''), NULLIF(TRIM(i.currency_code::text), '')) AS currency_code,
+                   i.amount_reporting,
+                   i.fx_as_of,
+                   (SELECT bts.reporting_currency_code
+                      FROM billing_config.billing_tenant_settings bts
+                     WHERE bts.application_id = i.application_id
+                     LIMIT 1) AS reporting_currency_code,
                    h.mock_charge_status, h.mock_charge_failure_code, h.mock_charge_details,
                    h.simulated_on,
                    h.client_payment_intent_id, h.client_payment_transaction_id,
@@ -399,6 +406,13 @@ public class SubscriptionBillingHistoryRepository {
                          + COALESCE(h.invoice_tax_amount, i.tax_amount, 0)
                          - COALESCE(h.invoice_discount_amount, i.discount_amount, 0)
                 END AS invoice_total_amount,
+                COALESCE(NULLIF(TRIM(h.currency_code::text), ''), NULLIF(TRIM(i.currency_code::text), '')) AS currency_code,
+                i.amount_reporting,
+                i.fx_as_of,
+                (SELECT bts.reporting_currency_code
+                   FROM billing_config.billing_tenant_settings bts
+                  WHERE bts.application_id = i.application_id
+                  LIMIT 1) AS reporting_currency_code,
                 h.mock_charge_status,
                 h.mock_charge_failure_code,
                 h.mock_charge_details,
@@ -595,6 +609,13 @@ public class SubscriptionBillingHistoryRepository {
                          + COALESCE(h.invoice_tax_amount, i.tax_amount, 0)
                          - COALESCE(h.invoice_discount_amount, i.discount_amount, 0)
                 END AS invoice_total_amount,
+                COALESCE(NULLIF(TRIM(h.currency_code::text), ''), NULLIF(TRIM(i.currency_code::text), '')) AS currency_code,
+                i.amount_reporting,
+                i.fx_as_of,
+                (SELECT bts.reporting_currency_code
+                   FROM billing_config.billing_tenant_settings bts
+                  WHERE bts.application_id = i.application_id
+                  LIMIT 1) AS reporting_currency_code,
                 h.mock_charge_status,
                 h.mock_charge_failure_code,
                 h.mock_charge_details,
@@ -1123,7 +1144,11 @@ public class SubscriptionBillingHistoryRepository {
                 blankToNull(rs.getString("actual_charge_status")),
                 (UUID) rs.getObject("client_payment_intent_id"),
                 (UUID) rs.getObject("client_payment_transaction_id"),
-                blankToNull(rs.getString("invoice_status")));
+                blankToNull(rs.getString("invoice_status")),
+                blankToNull(rs.getString("currency_code")),
+                rs.getBigDecimal("amount_reporting"),
+                blankToNull(rs.getString("reporting_currency_code")),
+                toOffsetUtc(rs.getTimestamp("fx_as_of")));
     }
 
     private static String objectToTrimmedString(Object value) {

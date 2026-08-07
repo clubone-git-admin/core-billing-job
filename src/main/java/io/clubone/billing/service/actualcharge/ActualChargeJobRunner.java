@@ -14,6 +14,7 @@ import io.clubone.billing.repo.BillingRepository;
 import io.clubone.billing.repo.MockChargeRepository;
 import io.clubone.billing.repo.MockChargeRepository.MockInvoiceRow;
 import io.clubone.billing.repo.StageRunRepository;
+import io.clubone.billing.service.currency.CurrencySummaryAccumulator;
 import io.clubone.billing.service.schedule.StageRunLeaseHeartbeat;
 import io.clubone.billing.batch.util.LoggingUtils;
 import org.slf4j.Logger;
@@ -200,6 +201,7 @@ public class ActualChargeJobRunner {
         BigDecimal chargedAmount = BigDecimal.ZERO;
         BigDecimal pendingAmount = BigDecimal.ZERO;
         BigDecimal failedAmount = BigDecimal.ZERO;
+        CurrencySummaryAccumulator currencySummary = new CurrencySummaryAccumulator();
 
         UUID afterInvoiceId = null;
         if (s.summaryJson() != null) {
@@ -292,6 +294,19 @@ public class ActualChargeJobRunner {
             Map<UUID, UUID> paymentMethods =
                     actualChargeRepository.findClientPaymentMethodIdsForSubscriptionInstances(pageSubIds);
 
+            // Process currency shards together within each keyset page (stable within invoice_id order).
+            page = page.stream()
+                    .sorted((a, b) -> {
+                        String ca = a.invoiceCurrencyCode() != null ? a.invoiceCurrencyCode() : "";
+                        String cb = b.invoiceCurrencyCode() != null ? b.invoiceCurrencyCode() : "";
+                        int c = ca.compareToIgnoreCase(cb);
+                        if (c != 0) {
+                            return c;
+                        }
+                        return a.invoiceId().compareTo(b.invoiceId());
+                    })
+                    .toList();
+
             for (MockInvoiceRow row : page) {
                 idx++;
                 processedCount++;
@@ -351,9 +366,15 @@ public class ActualChargeJobRunner {
                     continue;
                 }
 
-                String currency = row.invoiceCurrencyCode() != null && !row.invoiceCurrencyCode().isBlank()
-                        ? row.invoiceCurrencyCode()
-                        : "INR";
+                String currency = row.invoiceCurrencyCode();
+                if (currency == null || currency.isBlank()) {
+                    skipped++;
+                    log.warn(
+                            "actual-charge skip invoice {}: missing invoice.currency_code (fail closed)",
+                            row.invoiceId());
+                    continue;
+                }
+                currency = currency.trim().toUpperCase();
                 long amountMinor = amt.multiply(BigDecimal.valueOf(100)).setScale(0, RoundingMode.HALF_UP).longValue();
 
                 try {
@@ -390,6 +411,8 @@ public class ActualChargeJobRunner {
                                 pr.getClientPaymentTransactionId());
                         success++;
                         chargedAmount = chargedAmount.add(amt);
+                        currencySummary.addCount(currency, "success_count", 1);
+                        currencySummary.addAmount(currency, "charged_amount", amt);
                     } else if (isPendingGatewayResult(pr)) {
                         actualChargeRepository.insertLiveChargeHistoryRow(
                                 row.subscriptionInstanceId(),
@@ -406,6 +429,8 @@ public class ActualChargeJobRunner {
                                 pr.getClientPaymentTransactionId());
                         pending++;
                         pendingAmount = pendingAmount.add(amt);
+                        currencySummary.addCount(currency, "pending_count", 1);
+                        currencySummary.addAmount(currency, "pending_amount", amt);
                     } else {
                         insertFailureRow(
                                 stageRunId,
@@ -415,7 +440,11 @@ public class ActualChargeJobRunner {
                                 pr.getFailureReason() != null ? pr.getFailureReason() : "payment failed");
                         failed++;
                         failedAmount = failedAmount.add(amt);
+                        currencySummary.addCount(currency, "failed_count", 1);
+                        currencySummary.addAmount(currency, "failed_amount", amt);
                     }
+                    currencySummary.addCount(currency, "total_selected", 1);
+                    currencySummary.addAmount(currency, "total_amount_selected", amt);
                 } catch (Exception ex) {
                     log.warn(
                             "actual-charge invoice {}: payment EXCEPTION invoiceId={}",
@@ -478,6 +507,18 @@ public class ActualChargeJobRunner {
         merged.put("pendingAmount", pendingAmount);
         merged.put("failed_amount", failedAmount);
         merged.put("failureAmount", failedAmount);
+        currencySummary.mergeInto(merged);
+        if (Boolean.TRUE.equals(merged.get("mixed_currency"))) {
+            merged.put("total_amount_selected", null);
+            merged.put("selectedAmount", null);
+            merged.put("charged_amount", null);
+            merged.put("successAmount", null);
+            merged.put("pending_amount", null);
+            merged.put("pendingAmount", null);
+            merged.put("failed_amount", null);
+            merged.put("failureAmount", null);
+            merged.put("total_amount_note", "Use by_currency — mixed currencies cannot be summed");
+        }
         merged.put("actual_charge_run_id", stageRunId.toString());
         merged.put("actualChargeRunId", stageRunId.toString());
         merged.put("batch_id", stageRunId.toString());

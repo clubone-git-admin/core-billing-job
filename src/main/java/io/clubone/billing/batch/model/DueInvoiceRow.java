@@ -18,4 +18,6 @@ public class DueInvoiceRow {
   private BigDecimal discountAmount;
   private BigDecimal totalAmount;
   private UUID clientPaymentMethodId; //
+  /** ISO-4217 currency stamped on the invoice (transactional). */
+  private String currencyCode;
 }

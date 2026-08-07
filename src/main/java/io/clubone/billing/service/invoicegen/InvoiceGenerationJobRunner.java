@@ -7,6 +7,7 @@ import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.DuePreviewRepository;
 import io.clubone.billing.repo.InvoiceGenerationRepository;
 import io.clubone.billing.repo.StageRunRepository;
+import io.clubone.billing.service.currency.CurrencySummaryAccumulator;
 import io.clubone.billing.service.schedule.StageRunLeaseHeartbeat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -144,6 +145,8 @@ public class InvoiceGenerationJobRunner {
         Set<String> purchaseSnapshotIdsUsed = readCheckpointStringSet(merged, "purchase_snapshot_ids_used");
         List<Map<String, Object>> skippedRows = readCheckpointSkippedRows(merged);
         UUID afterBillingScheduleId = readCheckpointUuid(merged, CK_AFTER_SCHEDULE_ID);
+        CurrencySummaryAccumulator currencySummary = new CurrencySummaryAccumulator();
+        restoreCurrencySummary(merged, currencySummary);
         boolean resumable = afterBillingScheduleId != null || candidatesSeen > 0;
         if (resumable) {
             log.info(
@@ -217,8 +220,11 @@ public class InvoiceGenerationJobRunner {
                                                 row, billingRunId, dueDate, eligibleIds, alreadyInvoicedIds);
                                 if (outcome instanceof InvoiceGenerationDraftLineProcessor.LineOutcome.Success success) {
                                     created++;
-                                    totalAmount = totalAmount.add(
-                                            success.total() != null ? success.total() : BigDecimal.ZERO);
+                                    BigDecimal lineTotal =
+                                            success.total() != null ? success.total() : BigDecimal.ZERO;
+                                    totalAmount = totalAmount.add(lineTotal);
+                                    currencySummary.addAmount(success.currencyCode(), "totalAmount", lineTotal);
+                                    currencySummary.addCount(success.currencyCode(), "invoicesCreated", 1);
                                     if (success.purchaseSnapshotIdOrNull() != null
                                             && purchaseSnapshotIdsUsed.size() < MAX_PURCHASE_SNAPSHOT_IDS_IN_SUMMARY) {
                                         purchaseSnapshotIdsUsed.add(success.purchaseSnapshotIdOrNull().toString());
@@ -290,7 +296,8 @@ public class InvoiceGenerationJobRunner {
                                             entityLineMiss,
                                             totalAmount,
                                             purchaseSnapshotIdsUsed,
-                                            skippedRows);
+                                            skippedRows,
+                                            currencySummary);
                                     rowsSinceCheckpoint = 0;
                                 }
                             }
@@ -312,7 +319,8 @@ public class InvoiceGenerationJobRunner {
                                     entityLineMiss,
                                     totalAmount,
                                     purchaseSnapshotIdsUsed,
-                                    skippedRows);
+                                    skippedRows,
+                                    currencySummary);
 
                             if (page.size() < candidatePageSize) {
                                 break;
@@ -379,7 +387,15 @@ public class InvoiceGenerationJobRunner {
             merged.put("skippedRowsReturned", skippedRows.size());
         }
         merged.put("candidateRows", candidatesSeen);
-        merged.put("totalAmount", totalAmount);
+        currencySummary.mergeInto(merged);
+        Object currenciesObj = merged.get("currencies");
+        boolean mixed = currenciesObj instanceof List<?> cl && cl.size() > 1;
+        if (mixed) {
+            merged.put("totalAmount", null);
+            merged.put("total_amount_note", "Use by_currency — mixed currencies cannot be summed");
+        } else {
+            merged.put("totalAmount", totalAmount);
+        }
         // Do not store tens of thousands of UUIDs in summary_json — list invoices by billing_run_id.
         merged.put("invoices_scoped_by_billing_run", true);
         merged.remove("generated_invoice_ids");
@@ -471,7 +487,8 @@ public class InvoiceGenerationJobRunner {
             int entityLineMiss,
             BigDecimal totalAmount,
             Set<String> purchaseSnapshotIdsUsed,
-            List<Map<String, Object>> skippedRows) {
+            List<Map<String, Object>> skippedRows,
+            CurrencySummaryAccumulator currencySummary) {
         Map<String, Object> checkpoint = new LinkedHashMap<>();
         if (afterBillingScheduleId != null) {
             checkpoint.put(CK_AFTER_SCHEDULE_ID, afterBillingScheduleId.toString());
@@ -497,8 +514,39 @@ public class InvoiceGenerationJobRunner {
         checkpoint.put("invoices_scoped_by_billing_run", true);
         checkpoint.put("ig_paged_processing", true);
         checkpoint.put("ig_checkpoint_at", java.time.OffsetDateTime.now().toString());
+        if (currencySummary != null) {
+            currencySummary.mergeInto(checkpoint);
+        }
         merged.putAll(checkpoint);
         stageRunRepository.mergeStageRunSummaryJson(stageRunId, checkpoint, false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void restoreCurrencySummary(Map<String, Object> merged, CurrencySummaryAccumulator acc) {
+        if (merged == null || acc == null) {
+            return;
+        }
+        Object byCur = merged.get("by_currency");
+        if (!(byCur instanceof Map<?, ?> map)) {
+            return;
+        }
+        for (Map.Entry<?, ?> e : map.entrySet()) {
+            if (e.getKey() == null || !(e.getValue() instanceof Map<?, ?> bucket)) {
+                continue;
+            }
+            String ccy = String.valueOf(e.getKey());
+            Object amt = bucket.get("totalAmount");
+            if (amt != null) {
+                BigDecimal bd = amt instanceof BigDecimal b
+                        ? b
+                        : (amt instanceof Number n ? BigDecimal.valueOf(n.doubleValue()) : BigDecimal.ZERO);
+                acc.addAmount(ccy, "totalAmount", bd);
+            }
+            Object cnt = bucket.get("invoicesCreated");
+            if (cnt instanceof Number n) {
+                acc.addCount(ccy, "invoicesCreated", n.intValue());
+            }
+        }
     }
 
     private static int readCheckpointInt(Map<String, Object> summary, String key) {

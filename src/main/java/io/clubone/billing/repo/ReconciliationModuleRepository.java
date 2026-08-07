@@ -3615,6 +3615,24 @@ public class ReconciliationModuleRepository {
                 args.add(q);
             }
         }
+        String currencyCode = asString(filters.get("currencyCode"));
+        if (currencyCode == null || currencyCode.isBlank()) {
+            currencyCode = asString(filters.get("currency"));
+        }
+        if (currencyCode != null && !currencyCode.isBlank()) {
+            sql.append("""
+                     AND EXISTS (
+                        SELECT 1 FROM reconciliation.reconciliation_run rr_ccy
+                        WHERE UPPER(TRIM(COALESCE(rr_ccy.filters_json->>'currency', rr_ccy.filters_json->>'currencyCode', ''))) = ?
+                          AND (
+                              re.reconciliation_run_id = rr_ccy.reconciliation_run_id
+                              OR re.origin_reconciliation_run_id = rr_ccy.reconciliation_run_id
+                              OR re.latest_reconciliation_run_id = rr_ccy.reconciliation_run_id
+                          )
+                    )
+                    """);
+            args.add(currencyCode.trim().toUpperCase());
+        }
     }
 
     private static final String EXCEPTION_LIST_FROM_SQL = """

@@ -11,14 +11,24 @@ public record BillingReportQuery(
         String q,
         String sortBy,
         String sortOrder,
-        String status) {
+        String status,
+        String currencyCode) {
 
     public static final String DEFAULT_SORT_ORDER = "asc";
 
     public static BillingReportQuery of(
             String q, String sortBy, String sortOrder, String status) {
+        return of(q, sortBy, sortOrder, status, null);
+    }
+
+    public static BillingReportQuery of(
+            String q, String sortBy, String sortOrder, String status, String currencyCode) {
         return new BillingReportQuery(
-                blankToNull(q), blankToNull(sortBy), normalizeOrder(sortOrder), blankToNull(status));
+                blankToNull(q),
+                blankToNull(sortBy),
+                normalizeOrder(sortOrder),
+                blankToNull(status),
+                normalizeCurrency(currencyCode));
     }
 
     public boolean hasQ() {
@@ -31,6 +41,10 @@ public record BillingReportQuery(
 
     public boolean hasStatus() {
         return status != null;
+    }
+
+    public boolean hasCurrencyCode() {
+        return currencyCode != null;
     }
 
     /** asc or desc (lowercase). */
@@ -55,5 +69,10 @@ public record BillingReportQuery(
         }
         String t = s.trim().toLowerCase();
         return t.isEmpty() ? null : t;
+    }
+
+    private static String normalizeCurrency(String s) {
+        String t = blankToNull(s);
+        return t == null ? null : t.toUpperCase();
     }
 }

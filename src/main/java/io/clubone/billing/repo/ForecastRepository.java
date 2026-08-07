@@ -36,7 +36,7 @@ public class ForecastRepository {
      * Get forecast items aggregated by date.
      */
     public List<Map<String, Object>> getForecastAggregated(
-            LocalDate from, LocalDate to, String groupBy, List<UUID> locationIds) {
+            LocalDate from, LocalDate to, String groupBy, List<UUID> locationIds, String currencyCode) {
         StringBuilder sql = new StringBuilder("""
             SELECT
                 sbs.billing_date AS payment_due_date,
@@ -57,22 +57,8 @@ public class ForecastRepository {
         params.add(from);
         params.add(to);
         params.add(requireAppIdStr());
-        if (locationIds != null && !locationIds.isEmpty()) {
-            String in = inClausePlaceholders(locationIds.size());
-            sql.append(" AND EXISTS (")
-                    .append("SELECT 1 ")
-                    .append("FROM client_subscription_billing.subscription_plan sp ")
-                    .append("JOIN client_agreements.client_agreement ca ON ca.client_agreement_id = sp.client_agreement_id ")
-                    .append("JOIN agreements.agreement_location al ON al.agreement_location_id = ca.agreement_location_id ")
-                    .append("JOIN locations.levels lv ON lv.level_id = al.level_id ")
-                    .append("WHERE sp.subscription_plan_id = si.subscription_plan_id ")
-                    .append("AND lv.reference_entity_id IN (")
-                    .append(in)
-                    .append(")) ");
-            for (UUID u : locationIds) {
-                params.add(u.toString());
-            }
-        }
+        appendLocationFilter(sql, params, locationIds, "si");
+        appendCurrencyFilter(sql, params, currencyCode, "si", "i");
         sql.append(" GROUP BY sbs.billing_date ORDER BY sbs.billing_date ");
         return jdbc.queryForList(sql.toString(), params.toArray());
     }
@@ -81,7 +67,7 @@ public class ForecastRepository {
      * Get forecast items with details.
      */
     public List<Map<String, Object>> getForecastItems(
-            LocalDate from, LocalDate to, Integer limit, Integer offset, List<UUID> locationIds) {
+            LocalDate from, LocalDate to, Integer limit, Integer offset, List<UUID> locationIds, String currencyCode) {
         StringBuilder sql = new StringBuilder("""
             SELECT
                 sbs.billing_date AS payment_due_date,
@@ -108,22 +94,8 @@ public class ForecastRepository {
         params.add(from);
         params.add(to);
         params.add(requireAppIdStr());
-        if (locationIds != null && !locationIds.isEmpty()) {
-            String in = inClausePlaceholders(locationIds.size());
-            sql.append(" AND EXISTS (")
-                    .append("SELECT 1 ")
-                    .append("FROM client_subscription_billing.subscription_plan sp ")
-                    .append("JOIN client_agreements.client_agreement ca ON ca.client_agreement_id = sp.client_agreement_id ")
-                    .append("JOIN agreements.agreement_location al ON al.agreement_location_id = ca.agreement_location_id ")
-                    .append("JOIN locations.levels lv ON lv.level_id = al.level_id ")
-                    .append("WHERE sp.subscription_plan_id = si.subscription_plan_id ")
-                    .append("AND lv.reference_entity_id IN (")
-                    .append(in)
-                    .append(")) ");
-            for (UUID u : locationIds) {
-                params.add(u.toString());
-            }
-        }
+        appendLocationFilter(sql, params, locationIds, "si");
+        appendCurrencyFilter(sql, params, currencyCode, "si", "i");
         sql.append(" ORDER BY sbs.billing_date, sbs.subscription_instance_id LIMIT ? OFFSET ? ");
         params.add(limit);
         params.add(offset);
@@ -133,12 +105,14 @@ public class ForecastRepository {
     /**
      * Count forecast items.
      */
-    public Integer countForecastItems(LocalDate from, LocalDate to, List<UUID> locationIds) {
+    public Integer countForecastItems(
+            LocalDate from, LocalDate to, List<UUID> locationIds, String currencyCode) {
         StringBuilder sql = new StringBuilder("""
             SELECT COUNT(1)
             FROM client_subscription_billing.subscription_billing_schedule sbs
             JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
             JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id
+            LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
             WHERE sbs.billing_date >= ? AND sbs.billing_date <= ?
               AND sbs.application_id = ?::uuid
               AND bss.status_code IN """
@@ -150,22 +124,8 @@ public class ForecastRepository {
         params.add(from);
         params.add(to);
         params.add(requireAppIdStr());
-        if (locationIds != null && !locationIds.isEmpty()) {
-            String in = inClausePlaceholders(locationIds.size());
-            sql.append(" AND EXISTS (")
-                    .append("SELECT 1 ")
-                    .append("FROM client_subscription_billing.subscription_plan sp ")
-                    .append("JOIN client_agreements.client_agreement ca ON ca.client_agreement_id = sp.client_agreement_id ")
-                    .append("JOIN agreements.agreement_location al ON al.agreement_location_id = ca.agreement_location_id ")
-                    .append("JOIN locations.levels lv ON lv.level_id = al.level_id ")
-                    .append("WHERE sp.subscription_plan_id = si.subscription_plan_id ")
-                    .append("AND lv.reference_entity_id IN (")
-                    .append(in)
-                    .append(")) ");
-            for (UUID u : locationIds) {
-                params.add(u.toString());
-            }
-        }
+        appendLocationFilter(sql, params, locationIds, "si");
+        appendCurrencyFilter(sql, params, currencyCode, "si", "i");
         return jdbc.queryForObject(sql.toString(), Integer.class, params.toArray());
     }
 
@@ -173,11 +133,70 @@ public class ForecastRepository {
         return String.join(",", Collections.nCopies(n, "?::uuid"));
     }
 
+    private void appendLocationFilter(
+            StringBuilder sql, List<Object> params, List<UUID> locationIds, String instanceAlias) {
+        if (locationIds == null || locationIds.isEmpty()) {
+            return;
+        }
+        String in = inClausePlaceholders(locationIds.size());
+        sql.append(" AND EXISTS (")
+                .append("SELECT 1 ")
+                .append("FROM client_subscription_billing.subscription_plan sp ")
+                .append("JOIN client_agreements.client_agreement ca ON ca.client_agreement_id = sp.client_agreement_id ")
+                .append("JOIN agreements.agreement_location al ON al.agreement_location_id = ca.agreement_location_id ")
+                .append("JOIN locations.levels lv ON lv.level_id = al.level_id ")
+                .append("WHERE sp.subscription_plan_id = ")
+                .append(instanceAlias)
+                .append(".subscription_plan_id ")
+                .append("AND lv.reference_entity_id IN (")
+                .append(in)
+                .append(")) ");
+        for (UUID u : locationIds) {
+            params.add(u.toString());
+        }
+    }
+
+    /**
+     * Prefer invoice.currency_code; otherwise location currency via agreement.
+     */
+    private void appendCurrencyFilter(
+            StringBuilder sql,
+            List<Object> params,
+            String currencyCode,
+            String instanceAlias,
+            String invoiceAlias) {
+        if (currencyCode == null || currencyCode.isBlank()) {
+            return;
+        }
+        sql.append("""
+             AND EXISTS (
+                SELECT 1
+                FROM client_subscription_billing.subscription_plan sp_ccy
+                JOIN client_agreements.client_agreement ca_ccy
+                  ON ca_ccy.client_agreement_id = sp_ccy.client_agreement_id
+                JOIN agreements.agreement_location al_ccy
+                  ON al_ccy.agreement_location_id = ca_ccy.agreement_location_id
+                JOIN locations.levels lv_ccy ON lv_ccy.level_id = al_ccy.level_id
+                JOIN locations.location loc_ccy ON loc_ccy.location_id = lv_ccy.reference_entity_id
+                JOIN locations.lu_currency cur_ccy ON cur_ccy.currency_id = loc_ccy.currency_id
+                WHERE sp_ccy.subscription_plan_id = """)
+                .append(instanceAlias)
+                .append("""
+                .subscription_plan_id
+                  AND UPPER(TRIM(COALESCE(NULLIF(""" )
+                .append(invoiceAlias)
+                .append("""
+                .currency_code, ''), cur_ccy.currency_code))) = ?
+            )
+            """);
+        params.add(currencyCode.trim().toUpperCase());
+    }
+
     /**
      * Get forecast summary for a specific date.
      */
-    public Map<String, Object> getForecastSummary(LocalDate date) {
-        String sql = """
+    public Map<String, Object> getForecastSummary(LocalDate date, String currencyCode) {
+        StringBuilder sql = new StringBuilder("""
             SELECT
                 COUNT(DISTINCT sbs.billing_schedule_id) AS total_invoices,
                 COALESCE(SUM(COALESCE(i.total_amount, sbs.final_amount, 0)), 0) AS total_amount,
@@ -187,15 +206,20 @@ public class ForecastRepository {
                 COALESCE(SUM(CASE WHEN bss.status_code = 'DUE' THEN COALESCE(i.total_amount, sbs.final_amount, 0) END), 0) AS due_amount
             FROM client_subscription_billing.subscription_billing_schedule sbs
             JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
+            JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id
             LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
             WHERE sbs.billing_date = ?
               AND sbs.application_id = ?::uuid
               AND bss.status_code IN """
                     + FORECAST_OPEN_STATUS_SQL
                     + """
-            """;
+            """);
 
-        return jdbc.queryForMap(sql, date, requireAppIdStr());
+        List<Object> params = new ArrayList<>();
+        params.add(date);
+        params.add(requireAppIdStr());
+        appendCurrencyFilter(sql, params, currencyCode, "si", "i");
+        return jdbc.queryForMap(sql.toString(), params.toArray());
     }
 
     /**
@@ -203,7 +227,7 @@ public class ForecastRepository {
      */
     public List<Map<String, Object>> getForecastInvoices(
             LocalDate date, String search, UUID locationId, Boolean hasWarnings,
-            Integer limit, Integer offset) {
+            Integer limit, Integer offset, String currencyCode) {
 
         StringBuilder sql = new StringBuilder("""
             SELECT
@@ -259,6 +283,7 @@ public class ForecastRepository {
             params.add(locationId.toString());
         }
 
+        appendCurrencyFilter(sql, params, currencyCode, "si", "i");
         sql.append(" ORDER BY sbs.subscription_instance_id LIMIT ? OFFSET ?");
         params.add(limit);
         params.add(offset);

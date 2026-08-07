@@ -104,6 +104,7 @@ public class InvoiceGenerationRepository {
                 tax_amount,
                 discount_amount,
                 total_amount,
+                currency_code,
                 is_paid,
                 is_active,
                 billing_run_id,
@@ -122,6 +123,14 @@ public class InvoiceGenerationRepository {
                 ?::numeric,
                 ?::numeric,
                 ?::numeric,
+                (
+                    SELECT upper(trim(c.currency_code))
+                    FROM clients.client_role cr
+                    JOIN locations.location loc ON loc.location_id = cr.location_id
+                    JOIN locations.lu_currency c ON c.currency_id = loc.currency_id
+                    WHERE cr.client_role_id = ?::uuid
+                    LIMIT 1
+                ),
                 false,
                 true,
                 ?::uuid,
@@ -141,9 +150,58 @@ public class InvoiceGenerationRepository {
                 tax,
                 disc,
                 tot,
+                clientRoleId.toString(),
                 billingRunId != null ? billingRunId.toString() : null,
                 clientAgreementId != null ? clientAgreementId.toString() : null,
                 createdByResolved != null ? createdByResolved.toString() : null,
+                requireAppIdStr());
+    }
+
+    public String findInvoiceCurrencyCode(UUID invoiceId) {
+        if (invoiceId == null) {
+            return null;
+        }
+        try {
+            return jdbc.query(
+                    """
+                    SELECT upper(trim(currency_code)) AS currency_code
+                    FROM transactions.invoice
+                    WHERE invoice_id = ?::uuid
+                      AND application_id = ?::uuid
+                    LIMIT 1
+                    """,
+                    rs -> rs.next() ? rs.getString("currency_code") : null,
+                    invoiceId.toString(),
+                    requireAppIdStr());
+        } catch (DataAccessException ex) {
+            return null;
+        }
+    }
+
+    /**
+     * Sets locked reporting projection when an FX rate exists. Missing rate leaves columns null (does not block IG).
+     */
+    public void updateReportingProjection(
+            UUID invoiceId,
+            BigDecimal amountReporting,
+            UUID fxRateId,
+            Instant fxAsOf) {
+        if (invoiceId == null) {
+            return;
+        }
+        jdbc.update(
+                """
+                UPDATE transactions.invoice
+                SET amount_reporting = ?::numeric,
+                    fx_rate_id = ?::uuid,
+                    fx_as_of = ?::timestamptz
+                WHERE invoice_id = ?::uuid
+                  AND application_id = ?::uuid
+                """,
+                amountReporting,
+                fxRateId != null ? fxRateId.toString() : null,
+                fxAsOf != null ? Timestamp.from(fxAsOf) : null,
+                invoiceId.toString(),
                 requireAppIdStr());
     }
 

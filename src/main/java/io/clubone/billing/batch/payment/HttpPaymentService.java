@@ -4,6 +4,7 @@ import io.clubone.billing.batch.BillingJobProperties;
 import io.clubone.billing.batch.metrics.BillingMetrics;
 import io.clubone.billing.batch.model.GatewayStatus;
 import io.clubone.billing.batch.ratelimit.BillingRateLimiter;
+import io.clubone.billing.service.currency.GatewayMidCurrencyService;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
 import org.slf4j.Logger;
@@ -20,6 +21,7 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
 import java.net.SocketTimeoutException;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -44,14 +46,20 @@ public class HttpPaymentService implements PaymentService {
 	private final RestTemplate rt;
 	private final BillingRateLimiter rateLimiter;
 	private final BillingMetrics metrics;
+	private final GatewayMidCurrencyService gatewayMidCurrencyService;
 	
 	// ThreadLocal to track attempt counts per call for test mode
 	private final ThreadLocal<Map<String, AtomicInteger>> attemptCounters = ThreadLocal.withInitial(ConcurrentHashMap::new);
 
-	public HttpPaymentService(BillingJobProperties props, BillingRateLimiter rateLimiter, BillingMetrics metrics) {
+	public HttpPaymentService(
+			BillingJobProperties props,
+			BillingRateLimiter rateLimiter,
+			BillingMetrics metrics,
+			GatewayMidCurrencyService gatewayMidCurrencyService) {
 		this.props = props;
 		this.rateLimiter = rateLimiter;
 		this.metrics = metrics;
+		this.gatewayMidCurrencyService = gatewayMidCurrencyService;
 		this.rt = createRestTemplate();
 	}
 
@@ -110,13 +118,19 @@ public class HttpPaymentService implements PaymentService {
 
 			// 2) create intent
 			String createIntentUrl = props.getPayment().getHttp().getBaseUrl() + props.getPayment().getHttp().getCreateIntentPath();
-			Map<String, Object> createIntentReq = Map.of(
-					"clientRoleId", clientRoleId.toString(),
-					"invoiceId", invoiceId.toString(),
-					"clientPaymentMethodId", clientPaymentMethodId.toString(),
-					"amountMinor", amountMinor,
-					"currency", currencyCode,
-					"paymentTypeCode", props.getPayment().getHttp().getPaymentTypeCode());
+			Map<String, Object> createIntentReq = new HashMap<>();
+			createIntentReq.put("clientRoleId", clientRoleId.toString());
+			createIntentReq.put("invoiceId", invoiceId.toString());
+			createIntentReq.put("clientPaymentMethodId", clientPaymentMethodId.toString());
+			createIntentReq.put("amountMinor", amountMinor);
+			createIntentReq.put("currency", currencyCode);
+			createIntentReq.put("paymentTypeCode", props.getPayment().getHttp().getPaymentTypeCode());
+			gatewayMidCurrencyService
+					.resolveMidForPayment(clientPaymentMethodId, currencyCode, null)
+					.ifPresent(mid -> {
+						createIntentReq.put("midCode", mid);
+						log.info("billInvoiceRecurring resolved MID for currency {}: midCode={}", currencyCode, mid);
+					});
 			Map<String, Object> intentResp = postJson("create-intent", createIntentUrl, createIntentReq);
 			log.debug("billInvoiceRecurring create-intent RESP: invoiceId={} response={}", invoiceId, intentResp);
 

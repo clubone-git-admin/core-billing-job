@@ -2,17 +2,21 @@ package io.clubone.billing.service;
 
 import io.clubone.billing.api.dto.BillingRunDto;
 import io.clubone.billing.api.dto.DashboardKPIDto;
+import io.clubone.billing.api.dto.currency.MoneyAmountDto;
 import io.clubone.billing.dashboard.DashboardApiConstants;
 import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.CrmDashboardRepository;
 import io.clubone.billing.repo.DashboardRepository;
 import io.clubone.billing.repo.LocationLevelRepository;
 import io.clubone.billing.security.AccessContext;
+import io.clubone.billing.service.currency.BillingTenantSettingsService;
 import io.clubone.billing.util.BillingReadExecutors;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.YearMonth;
@@ -32,6 +36,7 @@ public class DashboardService {
     private final BillingRunRepository billingRunRepository;
     private final CrmDashboardRepository crmDashboardRepository;
     private final BillingReadExecutors readExecutors;
+    private final BillingTenantSettingsService tenantSettingsService;
     private static final Set<String> ALLOWED_SEGMENTS = Set.of("7D", "30D", "MTD", "YTD");
 
     /** Short TTL — overview is analytical; repeat loads within 60s hit memory. */
@@ -46,12 +51,14 @@ public class DashboardService {
             LocationLevelRepository locationLevelRepository,
             BillingRunRepository billingRunRepository,
             CrmDashboardRepository crmDashboardRepository,
-            BillingReadExecutors readExecutors) {
+            BillingReadExecutors readExecutors,
+            BillingTenantSettingsService tenantSettingsService) {
         this.dashboardRepository = dashboardRepository;
         this.locationLevelRepository = locationLevelRepository;
         this.billingRunRepository = billingRunRepository;
         this.crmDashboardRepository = crmDashboardRepository;
         this.readExecutors = readExecutors;
+        this.tenantSettingsService = tenantSettingsService;
     }
 
     public DashboardKPIDto getKPIs(UUID locationId, String dateRange) {
@@ -81,20 +88,34 @@ public class DashboardService {
         Long successfulInvoices = ((Number) summaryStats.getOrDefault("successful_invoices", 0L)).longValue();
         Double successRate = totalAttempts > 0 ? (successfulInvoices.doubleValue() / totalAttempts.doubleValue()) * 100 : 0.0;
 
+        String reportingCcy = tenantSettingsService.getReportingCurrencyCode();
+        MoneyAmountDto summaryMoney = moneyFromRow(
+                summaryStats, "total_amount", "total_amount_reporting", "reporting_amount_count", reportingCcy);
+        boolean mixed = currencyCount(summaryStats) > 1;
+        Double displayTotal = mixed && summaryMoney.amountReporting() == null
+                ? null
+                : (summaryMoney.amountReporting() != null
+                        ? summaryMoney.amountReporting().doubleValue()
+                        : summaryMoney.amount() == null ? 0.0 : summaryMoney.amount().doubleValue());
+
         DashboardKPIDto.Summary summary = new DashboardKPIDto.Summary(
                 ((Number) summaryStats.getOrDefault("total_runs", 0)).intValue(),
                 ((Number) summaryStats.getOrDefault("active_runs", 0)).intValue(),
                 ((Number) summaryStats.getOrDefault("completed_runs", 0)).intValue(),
                 ((Number) summaryStats.getOrDefault("failed_runs", 0)).intValue(),
                 ((Number) summaryStats.getOrDefault("total_invoices", 0)).intValue(),
-                ((Number) summaryStats.getOrDefault("total_amount", 0.0)).doubleValue(),
-                successRate
+                displayTotal,
+                successRate,
+                summaryMoney,
+                mixed
         );
 
         // Map last runs by stage
         Map<String, DashboardKPIDto.LastRunByStage> lastRunsMap = new HashMap<>();
         for (Map<String, Object> run : lastRunsByStage) {
             String stageCode = (String) run.get("current_stage_code");
+            MoneyAmountDto runMoney = moneyFromRow(
+                    run, "total_amount", "total_amount_reporting", "reporting_amount_count", reportingCcy);
             lastRunsMap.put(stageCode, new DashboardKPIDto.LastRunByStage(
                     (UUID) run.get("billing_run_id"),
                     (String) run.get("billing_run_code"),
@@ -104,23 +125,33 @@ public class DashboardService {
                     (OffsetDateTime) run.get("started_on"),
                     (OffsetDateTime) run.get("ended_on"),
                     ((Number) run.getOrDefault("invoices_count", 0)).intValue(),
-                    ((Number) run.getOrDefault("total_amount", 0.0)).doubleValue()
+                    ((Number) run.getOrDefault("total_amount", 0.0)).doubleValue(),
+                    runMoney
             ));
         }
 
         DashboardKPIDto.Forecast forecast = new DashboardKPIDto.Forecast(
-                new DashboardKPIDto.Forecast.ForecastPeriod(
-                        ((Number) forecastData.getOrDefault("due_7_days_count", 0)).intValue(),
-                        ((Number) forecastData.getOrDefault("due_7_days_amount", 0.0)).doubleValue()
-                ),
-                new DashboardKPIDto.Forecast.ForecastPeriod(
-                        ((Number) forecastData.getOrDefault("due_30_days_count", 0)).intValue(),
-                        ((Number) forecastData.getOrDefault("due_30_days_amount", 0.0)).doubleValue()
-                ),
-                new DashboardKPIDto.Forecast.ForecastPeriod(
-                        ((Number) forecastData.getOrDefault("due_90_days_count", 0)).intValue(),
-                        ((Number) forecastData.getOrDefault("due_90_days_amount", 0.0)).doubleValue()
-                )
+                forecastPeriod(
+                        forecastData,
+                        "due_7_days_count",
+                        "due_7_days_amount",
+                        "due_7_days_amount_reporting",
+                        "due_7_days_reporting_count",
+                        reportingCcy),
+                forecastPeriod(
+                        forecastData,
+                        "due_30_days_count",
+                        "due_30_days_amount",
+                        "due_30_days_amount_reporting",
+                        "due_30_days_reporting_count",
+                        reportingCcy),
+                forecastPeriod(
+                        forecastData,
+                        "due_90_days_count",
+                        "due_90_days_amount",
+                        "due_90_days_amount_reporting",
+                        "due_90_days_reporting_count",
+                        reportingCcy)
         );
 
         DashboardKPIDto.DLQSummary dlqSummaryDto = new DashboardKPIDto.DLQSummary(
@@ -149,8 +180,105 @@ public class DashboardService {
                 lastRunsMap,
                 forecast,
                 dlqSummaryDto,
-                recentActivityList
+                recentActivityList,
+                reportingCcy
         );
+    }
+
+    private static int currencyCount(Map<String, Object> row) {
+        Object v = row.get("currency_count");
+        if (v instanceof Number n) {
+            return n.intValue();
+        }
+        return 0;
+    }
+
+    private static DashboardKPIDto.Forecast.ForecastPeriod forecastPeriod(
+            Map<String, Object> forecastData,
+            String countKey,
+            String amountKey,
+            String reportingKey,
+            String reportingCountKey,
+            String reportingCcy) {
+        MoneyAmountDto money =
+                moneyFromRow(forecastData, amountKey, reportingKey, reportingCountKey, reportingCcy);
+        return new DashboardKPIDto.Forecast.ForecastPeriod(
+                ((Number) forecastData.getOrDefault(countKey, 0)).intValue(),
+                ((Number) forecastData.getOrDefault(amountKey, 0.0)).doubleValue(),
+                money);
+    }
+
+    private static MoneyAmountDto moneyFromRow(
+            Map<String, Object> row,
+            String amountKey,
+            String reportingKey,
+            String reportingCountKey,
+            String reportingCcy) {
+        BigDecimal amount = toBd(row.get(amountKey));
+        int reportingCount = currencyCount(Map.of("currency_count", row.getOrDefault(reportingCountKey, 0)));
+        BigDecimal reporting = reportingCount > 0 ? toBd(row.get(reportingKey)) : null;
+        String ccy = blankToNull(row.get("sample_currency_code"));
+        if (currencyCount(row) > 1) {
+            ccy = null;
+        }
+        Instant fxAsOf = toInstant(row.get("fx_as_of_max"));
+        if (reporting == null) {
+            return MoneyAmountDto.of(amount, ccy);
+        }
+        return new MoneyAmountDto(amount, ccy, reporting, reportingCcy, fxAsOf);
+    }
+
+    private static BigDecimal toBd(Object o) {
+        if (o == null) {
+            return null;
+        }
+        if (o instanceof BigDecimal bd) {
+            return bd;
+        }
+        if (o instanceof Number n) {
+            return BigDecimal.valueOf(n.doubleValue());
+        }
+        try {
+            return new BigDecimal(String.valueOf(o));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static Instant toInstant(Object o) {
+        if (o == null) {
+            return null;
+        }
+        if (o instanceof Instant i) {
+            return i;
+        }
+        if (o instanceof OffsetDateTime odt) {
+            return odt.toInstant();
+        }
+        if (o instanceof java.sql.Timestamp ts) {
+            return ts.toInstant();
+        }
+        if (o instanceof java.util.Date d) {
+            return d.toInstant();
+        }
+        return null;
+    }
+
+    private static String blankToNull(Object o) {
+        if (o == null) {
+            return null;
+        }
+        String s = String.valueOf(o).trim();
+        return s.isEmpty() ? null : s.toUpperCase();
+    }
+
+    private void stampReportingCurrency(Map<String, Object> payload) {
+        if (payload == null) {
+            return;
+        }
+        String reporting = tenantSettingsService.getReportingCurrencyCode();
+        payload.put("reportingCurrencyCode", reporting);
+        payload.put("reporting_currency_code", reporting);
     }
 
     public Map<String, Object> getTrends(String metric, String period, String groupBy, UUID locationId) {
@@ -359,6 +487,8 @@ public class DashboardService {
         out.put("contracts", contracts);
         out.put(DashboardApiConstants.JSON_CHARTS, charts);
         out.put("recent_runs", recentRuns);
+        stampReportingCurrency(out);
+        stampReportingCurrency(summary);
         return out;
     }
 

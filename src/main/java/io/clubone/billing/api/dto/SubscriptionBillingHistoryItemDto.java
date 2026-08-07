@@ -82,6 +82,14 @@ public record SubscriptionBillingHistoryItemDto(
         UUID clientPaymentIntentId,
         UUID clientPaymentTransactionId,
         /** {@code transactions.lu_invoice_status.status_name} (e.g. PENDING, DUE). */
-        String invoiceStatus
+        String invoiceStatus,
+        /** ISO-4217 transactional currency stamped on invoice / history. */
+        String currencyCode,
+        /** Locked reporting projection of {@link #invoiceTotalAmount} when FX was available at IG. */
+        BigDecimal amountReporting,
+        /** Org reporting currency used for {@link #amountReporting} (when known). */
+        String reportingCurrencyCode,
+        /** FX snapshot timestamp for {@link #amountReporting}. */
+        OffsetDateTime fxAsOf
 ) {
 }

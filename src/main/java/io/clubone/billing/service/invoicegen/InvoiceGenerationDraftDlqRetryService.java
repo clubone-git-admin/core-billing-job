@@ -408,6 +408,32 @@ public class InvoiceGenerationDraftDlqRetryService {
         if (success.total() != null) {
             patch.put("totalAmount", readBigDecimal(sj, "totalAmount").add(success.total()));
         }
+        String ccy = success.currencyCode() != null ? success.currencyCode() : "UNK";
+        @SuppressWarnings("unchecked")
+        Map<String, Object> byCurrency = sj.get("by_currency") instanceof Map<?, ?> existing
+                ? new java.util.LinkedHashMap<>((Map<String, Object>) existing)
+                : new java.util.LinkedHashMap<>();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> bucket = byCurrency.get(ccy) instanceof Map<?, ?> b
+                ? new java.util.LinkedHashMap<>((Map<String, Object>) b)
+                : new java.util.LinkedHashMap<>();
+        bucket.put("invoicesCreated", readInt(bucket, "invoicesCreated") + 1);
+        if (success.total() != null) {
+            bucket.put("totalAmount", readBigDecimal(bucket, "totalAmount").add(success.total()));
+        }
+        byCurrency.put(ccy, bucket);
+        patch.put("by_currency", byCurrency);
+        java.util.LinkedHashSet<String> currencies = new java.util.LinkedHashSet<>();
+        if (sj.get("currencies") instanceof List<?> list) {
+            for (Object o : list) {
+                if (o != null) {
+                    currencies.add(o.toString());
+                }
+            }
+        }
+        currencies.add(ccy);
+        patch.put("currencies", new ArrayList<>(currencies));
+        patch.put("mixed_currency", currencies.size() > 1);
         stageRunRepository.mergeStageRunSummaryJson(stageRunId, patch, false);
     }
 

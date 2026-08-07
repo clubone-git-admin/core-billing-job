@@ -46,12 +46,18 @@ public class DashboardRepository {
                 COUNT(DISTINCT CASE WHEN brs.status_code IN ('FAILED_SYSTEM', 'CANCELLED') THEN br.billing_run_id END) AS failed_runs,
                 COUNT(DISTINCT sbh.invoice_id) AS total_invoices,
                 COALESCE(SUM(sbh.invoice_total_amount), 0) AS total_amount,
+                COALESCE(SUM(i.amount_reporting), 0) AS total_amount_reporting,
+                COUNT(i.amount_reporting) AS reporting_amount_count,
+                COUNT(DISTINCT NULLIF(UPPER(TRIM(COALESCE(sbh.currency_code::text, i.currency_code::text))), '')) AS currency_count,
+                MAX(NULLIF(UPPER(TRIM(COALESCE(sbh.currency_code::text, i.currency_code::text))), '')) AS sample_currency_code,
+                MAX(i.fx_as_of) AS fx_as_of_max,
                 COUNT(DISTINCT CASE WHEN bs.is_success = true THEN sbh.subscription_billing_history_id END) AS successful_invoices,
                 COUNT(DISTINCT sbh.subscription_billing_history_id) AS total_attempts
             FROM client_subscription_billing.billing_run br
             LEFT JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
             LEFT JOIN client_subscription_billing.subscription_billing_history sbh ON sbh.billing_run_id = br.billing_run_id
             LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id
+            LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id
             WHERE br.application_id = ?::uuid
               AND br.created_on >= ?
             """);
@@ -78,11 +84,17 @@ public class DashboardRepository {
                 brs.status_code AS status_code, bsc.stage_code AS current_stage_code,
                 br.started_on, br.ended_on,
                 COUNT(DISTINCT sbh.invoice_id) AS invoices_count,
-                COALESCE(SUM(sbh.invoice_total_amount), 0) AS total_amount
+                COALESCE(SUM(sbh.invoice_total_amount), 0) AS total_amount,
+                COALESCE(SUM(i.amount_reporting), 0) AS total_amount_reporting,
+                COUNT(i.amount_reporting) AS reporting_amount_count,
+                COUNT(DISTINCT NULLIF(UPPER(TRIM(COALESCE(sbh.currency_code::text, i.currency_code::text))), '')) AS currency_count,
+                MAX(NULLIF(UPPER(TRIM(COALESCE(sbh.currency_code::text, i.currency_code::text))), '')) AS sample_currency_code,
+                MAX(i.fx_as_of) AS fx_as_of_max
             FROM client_subscription_billing.billing_run br
             JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id
             LEFT JOIN client_subscription_billing.subscription_billing_history sbh ON sbh.billing_run_id = br.billing_run_id
+            LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id
             WHERE br.application_id = ?::uuid
               AND br.created_on >= ?
             """;
@@ -113,10 +125,19 @@ public class DashboardRepository {
             SELECT 
                 COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN sbs.billing_schedule_id END) AS due_7_days_count,
                 COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN COALESCE(i.total_amount, sbs.final_amount, 0) END), 0) AS due_7_days_amount,
+                COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN i.amount_reporting END), 0) AS due_7_days_amount_reporting,
+                COUNT(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN i.amount_reporting END) AS due_7_days_reporting_count,
                 COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN sbs.billing_schedule_id END) AS due_30_days_count,
                 COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN COALESCE(i.total_amount, sbs.final_amount, 0) END), 0) AS due_30_days_amount,
+                COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN i.amount_reporting END), 0) AS due_30_days_amount_reporting,
+                COUNT(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN i.amount_reporting END) AS due_30_days_reporting_count,
                 COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' THEN sbs.billing_schedule_id END) AS due_90_days_count,
-                COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' THEN COALESCE(i.total_amount, sbs.final_amount, 0) END), 0) AS due_90_days_amount
+                COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' THEN COALESCE(i.total_amount, sbs.final_amount, 0) END), 0) AS due_90_days_amount,
+                COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' THEN i.amount_reporting END), 0) AS due_90_days_amount_reporting,
+                COUNT(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' THEN i.amount_reporting END) AS due_90_days_reporting_count,
+                COUNT(DISTINCT NULLIF(UPPER(TRIM(i.currency_code::text)), '')) AS currency_count,
+                MAX(NULLIF(UPPER(TRIM(i.currency_code::text)), '')) AS sample_currency_code,
+                MAX(i.fx_as_of) AS fx_as_of_max
             FROM client_subscription_billing.subscription_billing_schedule sbs
             JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
             LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id

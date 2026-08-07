@@ -328,6 +328,7 @@ public class ActualChargeRepository {
                     invoice_tax_amount,
                     invoice_discount_amount,
                     invoice_total_amount,
+                    currency_code,
                     application_id
                 ) VALUES (
                     gen_random_uuid(),
@@ -347,6 +348,8 @@ public class ActualChargeRepository {
                     ?::numeric,
                     ?::numeric,
                     ?::numeric,
+                    (SELECT upper(trim(i.currency_code)) FROM transactions.invoice i
+                     WHERE i.invoice_id = ?::uuid LIMIT 1),
                     ?::uuid
                 )
                 """,
@@ -362,6 +365,7 @@ public class ActualChargeRepository {
                 tax,
                 discount,
                 total,
+                invoiceId.toString(),
                 requireAppIdStr());
     }
 

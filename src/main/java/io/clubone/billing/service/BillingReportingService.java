@@ -5,6 +5,7 @@ import io.clubone.billing.api.v1.reports.BillingReportSlugs;
 import io.clubone.billing.repo.BillingReportingRepository;
 import io.clubone.billing.repo.BillingReportingRepository.PagedRows;
 import io.clubone.billing.repo.LocationLevelRepository;
+import io.clubone.billing.service.currency.BillingTenantSettingsService;
 import io.clubone.billing.util.BillingReadExecutors;
 import org.springframework.stereotype.Service;
 
@@ -36,18 +37,21 @@ public class BillingReportingService {
     private final MetricsService metricsService;
     private final DuePreviewService duePreviewService;
     private final BillingReadExecutors readExecutors;
+    private final BillingTenantSettingsService tenantSettingsService;
 
     public BillingReportingService(
             BillingReportingRepository reportingRepository,
             LocationLevelRepository locationLevelRepository,
             MetricsService metricsService,
             DuePreviewService duePreviewService,
-            BillingReadExecutors readExecutors) {
+            BillingReadExecutors readExecutors,
+            BillingTenantSettingsService tenantSettingsService) {
         this.reportingRepository = reportingRepository;
         this.locationLevelRepository = locationLevelRepository;
         this.metricsService = metricsService;
         this.duePreviewService = duePreviewService;
         this.readExecutors = readExecutors;
+        this.tenantSettingsService = tenantSettingsService;
     }
 
     public List<UUID> resolveFilterLocations(
@@ -122,7 +126,7 @@ public class BillingReportingService {
             BillingReportQuery query) {
         BillingReportQuery q = query == null ? BillingReportQuery.of(null, null, null, null) : query;
         validateStatusOrThrow(slug, q.status());
-        return switch (slug) {
+        Map<String, Object> result = switch (slug) {
             case BillingReportSlugs.BILL_RUN_SUMMARY -> billRunSummary(from, to, appId, levelId, includeChildren, limit, offset, q);
             case BillingReportSlugs.BILL_RUN_STATUS -> billRunStatus(from, to, appId, levelId, includeChildren, limit, offset, q);
             case BillingReportSlugs.BILLING_EXCEPTIONS -> billingExceptions(from, to, appId, levelId, includeChildren, limit, offset, q);
@@ -141,6 +145,102 @@ public class BillingReportingService {
             case BillingReportSlugs.SUBSCRIPTION_ACTIVITY -> subscriptionActivityReport(from, to, appId, levelId, includeChildren, limit, offset, q);
             default -> throw new IllegalStateException("Unhandled report slug: " + slug);
         };
+        if (q.hasCurrencyCode()) {
+            filterReportRowsByCurrency(result, q.currencyCode());
+            clearMisleadingMoneyKpis(result, q.currencyCode());
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void filterReportRowsByCurrency(Map<String, Object> data, String currencyCode) {
+        if (data == null || currencyCode == null || currencyCode.isBlank()) {
+            return;
+        }
+        String want = currencyCode.trim().toUpperCase();
+        Object raw = data.get("rows");
+        if (!(raw instanceof List<?> candidate) || candidate.isEmpty()) {
+            raw = data.get("data");
+        }
+        if (!(raw instanceof List<?> list) || list.isEmpty()) {
+            return;
+        }
+        boolean anyCurrencyField = false;
+        List<Map<String, Object>> filtered = new ArrayList<>();
+        for (Object o : list) {
+            if (!(o instanceof Map<?, ?> m)) {
+                continue;
+            }
+            Object ccy = m.get("currency_code");
+            if (ccy == null) {
+                ccy = m.get("currencyCode");
+            }
+            if (ccy == null) {
+                continue;
+            }
+            anyCurrencyField = true;
+            if (want.equalsIgnoreCase(String.valueOf(ccy).trim())) {
+                filtered.add((Map<String, Object>) m);
+            }
+        }
+        if (!anyCurrencyField) {
+            return;
+        }
+        data.put("rows", filtered);
+        data.put("data", filtered);
+        long total = filtered.size();
+        data.put("total", total);
+        data.put("rowCount", total);
+        data.put("count", total);
+    }
+
+    /**
+     * When a transactional currency filter is active, org-wide money KPIs are misleading.
+     * Clear money KPI values (keep count-style KPIs) and stamp the active currency.
+     */
+    @SuppressWarnings("unchecked")
+    private void clearMisleadingMoneyKpis(Map<String, Object> data, String currencyCode) {
+        if (data == null || currencyCode == null || currencyCode.isBlank()) {
+            return;
+        }
+        String want = currencyCode.trim().toUpperCase();
+        data.put("currencyCode", want);
+        data.put("currencyFilterApplied", true);
+        Object raw = data.get("kpis");
+        if (!(raw instanceof List<?> list) || list.isEmpty()) {
+            return;
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Object o : list) {
+            if (!(o instanceof Map<?, ?> m)) {
+                continue;
+            }
+            Map<String, Object> kpi = new LinkedHashMap<>((Map<String, Object>) m);
+            boolean isMoney = kpi.containsKey("amount")
+                    || kpi.containsKey("amountReporting")
+                    || kpi.containsKey("reportingCurrencyCode");
+            String label = String.valueOf(kpi.getOrDefault("label", "")).toLowerCase(Locale.ROOT);
+            if (!isMoney) {
+                isMoney = label.contains("billed")
+                        || label.contains("collected")
+                        || label.contains("revenue")
+                        || label.contains("outstanding")
+                        || label.contains("payment")
+                        || label.contains("amount")
+                        || label.contains("avg ");
+            }
+            if (isMoney) {
+                kpi.put("value", "—");
+                kpi.put("amount", null);
+                kpi.put("amountReporting", null);
+                String hint = String.valueOf(kpi.getOrDefault("hint", ""));
+                String note = "Hidden while currency filter " + want + " is active (KPI was org-wide / reporting).";
+                kpi.put("hint", hint.isBlank() ? note : hint + " — " + note);
+                kpi.put("currencyFilterCleared", true);
+            }
+            out.add(kpi);
+        }
+        data.put("kpis", out);
     }
 
     public Map<String, Object> getExecutiveSummary(LocalDate from, LocalDate to, UUID singleLocation) {
@@ -171,7 +271,9 @@ public class BillingReportingService {
                 readExecutors.supplyAsync(() -> reportingRepository.billRunKpiTotals(from, to, locs));
         CompletableFuture.allOf(pageF, kpiF).join();
         PagedRows page = pageF.join();
-        List<Map<String, Object>> kpis = buildBillRunKpis(kpiF.join());
+        Map<String, Object> kpiRaw = kpiF.join();
+        kpiRaw.put("reportingCurrencyCode", tenantSettingsService.getReportingCurrencyCode());
+        List<Map<String, Object>> kpis = buildBillRunKpis(kpiRaw);
         List<Map<String, Object>> rows = page.rows().stream().map(this::shapeBillRunRow).toList();
         return table(BillingReportSlugs.BILL_RUN_SUMMARY, "billing_run_id", rows, page.total(), kpis);
     }
@@ -239,12 +341,48 @@ public class BillingReportingService {
         String successPct = totalInvoices == 0
                 ? "0.00%"
                 : String.format(Locale.US, "%.2f%%", (successfulInvoices * 100.0) / totalInvoices);
-        return List.of(
-                kpi("Total Billed", formatNumber(k.get("total_billed")), "Total invoice-generation amount"),
-                kpi("Total Invoices", String.valueOf(totalInvoices), "Total invoices in selected runs"),
-                kpi("Total Voided", String.valueOf(toLong(k.get("total_voided"))), "Invoices in VOID/CANCELLED status"),
-                kpi("Total Collected", formatNumber(k.get("total_collected")), "Successfully captured amount (actual charge)"),
-                kpi("Success %", successPct, "Successful charged invoices / total invoices"));
+        String reporting = String.valueOf(k.getOrDefault("reportingCurrencyCode", ""));
+        if (reporting.isBlank() || "null".equalsIgnoreCase(reporting)) {
+            reporting = null;
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        out.add(moneyKpiStatic(
+                "Total Billed",
+                k.get("total_billed"),
+                "Total invoice-generation amount (reporting currency when FX locked)",
+                reporting));
+        out.add(kpi("Total Invoices", String.valueOf(totalInvoices), "Total invoices in selected runs"));
+        out.add(kpi("Total Voided", String.valueOf(toLong(k.get("total_voided"))), "Invoices in VOID/CANCELLED status"));
+        out.add(moneyKpiStatic(
+                "Total Collected",
+                k.get("total_collected"),
+                "Successfully captured amount (actual charge)",
+                reporting));
+        out.add(kpi("Success %", successPct, "Successful charged invoices / total invoices"));
+        return out;
+    }
+
+    private static Map<String, Object> moneyKpiStatic(
+            String label, Object amount, String hint, String reportingCurrencyCode) {
+        Map<String, Object> m = kpi(label, formatNumber(amount), hint);
+        BigDecimal bd;
+        if (amount instanceof BigDecimal b) {
+            bd = b;
+        } else if (amount instanceof Number n) {
+            bd = BigDecimal.valueOf(n.doubleValue());
+        } else {
+            try {
+                bd = amount == null ? BigDecimal.ZERO : new BigDecimal(String.valueOf(amount));
+            } catch (Exception e) {
+                bd = BigDecimal.ZERO;
+            }
+        }
+        m.put("amount", bd);
+        m.put("amountReporting", bd);
+        m.put("reportingCurrencyCode", reportingCurrencyCode);
+        m.put("currencyCode", reportingCurrencyCode);
+        m.put("fxAsOf", null);
+        return m;
     }
 
     private static List<Map<String, Object>> buildBillRunStatusKpis(Map<String, Object> k) {
@@ -1357,7 +1495,7 @@ public class BillingReportingService {
      * <p>Includes {@code rowCount} and {@code count} (same as {@code total}) for clients that
      * follow the billing reports spec; Flutter’s fixed-layout catalog may ignore {@code kpis}.</p>
      */
-    private static Map<String, Object> table(
+    private Map<String, Object> table(
             String feReportSlug,
             String primary,
             List<Map<String, Object>> rows,
@@ -1372,6 +1510,9 @@ public class BillingReportingService {
         m.put("total", total);
         m.put("rowCount", total);
         m.put("count", total);
+        String reporting = tenantSettingsService.getReportingCurrencyCode();
+        m.put("reportingCurrencyCode", reporting);
+        m.put("reporting_currency_code", reporting);
         if (kpis != null && !kpis.isEmpty()) {
             m.put("kpis", kpis);
         }

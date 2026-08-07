@@ -730,7 +730,7 @@ public class BillingReportingRepository {
     public Map<String, Object> billRunKpiTotals(LocalDate from, LocalDate to, List<UUID> locationIds) {
         String sql =
                 "SELECT "
-                        + "COALESCE(SUM(COALESCE(NULLIF((SELECT COALESCE(SUM(i2.total_amount),0) "
+                        + "COALESCE(SUM(COALESCE(NULLIF((SELECT COALESCE(SUM(i2.amount_reporting),0) "
                         + "              FROM transactions.invoice i2 "
                         + "              WHERE i2.billing_run_id = br.billing_run_id), 0), "
                         + "              CASE WHEN UPPER(COALESCE(bsc_cur.stage_code, '')) IN ('DUE_PREVIEW', 'MOCK_CHARGE') "
@@ -747,9 +747,10 @@ public class BillingReportingRepository {
                         + "              LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i4.invoice_status_id "
                         + "              WHERE i4.billing_run_id = br.billing_run_id "
                         + "                AND UPPER(COALESCE(invs.status_name, '')) IN ('VOID', 'CANCELLED'))), 0) AS total_voided, "
-                        + "COALESCE(SUM((SELECT COALESCE(SUM(CASE WHEN bs2.is_success = true THEN sbh2.invoice_total_amount ELSE 0 END),0) "
+                        + "COALESCE(SUM((SELECT COALESCE(SUM(CASE WHEN bs2.is_success = true THEN COALESCE(i_pay.amount_reporting, 0) ELSE 0 END),0) "
                         + "              FROM client_subscription_billing.subscription_billing_history sbh2 "
                         + "              JOIN billing_config.billing_status bs2 ON bs2.billing_status_id = sbh2.billing_status_id "
+                        + "              LEFT JOIN transactions.invoice i_pay ON i_pay.invoice_id = sbh2.invoice_id "
                         + "              WHERE sbh2.billing_run_id = br.billing_run_id "
                         + "                AND COALESCE(sbh2.is_mock, false) = false)), 0) AS total_collected, "
                         + "COALESCE(SUM((SELECT COUNT(DISTINCT CASE WHEN bs3.is_success = true THEN sbh3.invoice_id END) "

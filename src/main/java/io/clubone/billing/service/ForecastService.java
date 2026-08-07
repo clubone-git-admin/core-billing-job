@@ -27,16 +27,25 @@ public class ForecastService {
         this.locationLevelRepository = locationLevelRepository;
     }
 
+    private static String normalizeCurrency(String currencyCode) {
+        if (currencyCode == null || currencyCode.isBlank()) {
+            return null;
+        }
+        return currencyCode.trim().toUpperCase();
+    }
+
     public List<Map<String, Object>> getForecastAggregated(
             LocalDate from,
             LocalDate to,
             String groupBy,
             UUID locationLevelId,
-            Boolean includeChildLocations) {
+            Boolean includeChildLocations,
+            String currencyCode) {
         List<UUID> locationIds = resolveLocationIds(locationLevelId, includeChildLocations);
+        String ccy = normalizeCurrency(currencyCode);
         List<Map<String, Object>> items =
-                forecastRepository.getForecastAggregated(from, to, groupBy, locationIds);
-        
+                forecastRepository.getForecastAggregated(from, to, groupBy, locationIds, ccy);
+
         return items.stream()
                 .map(item -> Map.of(
                         "payment_due_date", item.get("payment_due_date"),
@@ -47,11 +56,16 @@ public class ForecastService {
     }
 
     public PageResponse<ForecastItemDto> getForecast(
-            LocalDate from, LocalDate to, UUID locationLevelId, Boolean includeChildLocations) {
+            LocalDate from,
+            LocalDate to,
+            UUID locationLevelId,
+            Boolean includeChildLocations,
+            String currencyCode) {
         List<UUID> locationIds = resolveLocationIds(locationLevelId, includeChildLocations);
+        String ccy = normalizeCurrency(currencyCode);
         List<Map<String, Object>> items =
-                forecastRepository.getForecastItems(from, to, 100, 0, locationIds);
-        Integer total = forecastRepository.countForecastItems(from, to, locationIds);
+                forecastRepository.getForecastItems(from, to, 100, 0, locationIds, ccy);
+        Integer total = forecastRepository.countForecastItems(from, to, locationIds, ccy);
 
         List<ForecastItemDto> forecastItems = items.stream()
                 .map(this::mapToForecastItemDto)
@@ -60,9 +74,10 @@ public class ForecastService {
         return PageResponse.of(forecastItems, total, 100, 0);
     }
 
-    public Map<String, Object> getForecastSummary(LocalDate date) {
-        Map<String, Object> summary = forecastRepository.getForecastSummary(date);
-        
+    public Map<String, Object> getForecastSummary(LocalDate date, String currencyCode) {
+        String ccy = normalizeCurrency(currencyCode);
+        Map<String, Object> summary = forecastRepository.getForecastSummary(date, ccy);
+
         return Map.of(
                 "payment_due_date", date,
                 "total_invoices", summary.get("total_invoices"),
@@ -82,17 +97,16 @@ public class ForecastService {
 
     public PageResponse<ForecastItemDto> getForecastInvoices(
             LocalDate date, String search, UUID locationId, Boolean hasWarnings,
-            Integer limit, Integer offset) {
-        
+            Integer limit, Integer offset, String currencyCode) {
+        String ccy = normalizeCurrency(currencyCode);
         List<Map<String, Object>> items = forecastRepository.getForecastInvoices(
-                date, search, locationId, hasWarnings, limit, offset);
-        
+                date, search, locationId, hasWarnings, limit, offset, ccy);
+
         List<ForecastItemDto> forecastItems = items.stream()
                 .map(this::mapToForecastItemDto)
                 .collect(Collectors.toList());
 
-        // Count total (simplified - in production, should count with same filters)
-        Integer total = forecastRepository.countForecastItems(date, date, null);
+        Integer total = forecastRepository.countForecastItems(date, date, null, ccy);
 
         return PageResponse.of(forecastItems, total, limit, offset);
     }
@@ -100,7 +114,7 @@ public class ForecastService {
     public List<ForecastItemDto> getSubscriptionForecast(UUID subscriptionInstanceId, LocalDate from, LocalDate to) {
         List<Map<String, Object>> items = forecastRepository.getSubscriptionForecast(
                 subscriptionInstanceId, from, to);
-        
+
         return items.stream()
                 .map(item -> {
                     String scheduleStatus = (String) item.get("schedule_status");
@@ -135,13 +149,13 @@ public class ForecastService {
         StatusDto statusDto = new StatusDto(scheduleStatus, scheduleStatus, null);
 
         LocalDate paymentDueDate = (LocalDate) item.get("payment_due_date");
-        UUID subscriptionInstanceId = item.get("subscription_instance_id") != null ? 
+        UUID subscriptionInstanceId = item.get("subscription_instance_id") != null ?
                 (UUID) item.get("subscription_instance_id") : null;
-        UUID invoiceId = item.get("invoice_id") != null ? 
+        UUID invoiceId = item.get("invoice_id") != null ?
                 (UUID) item.get("invoice_id") : null;
-        Integer cycleNumber = item.get("cycle_number") != null ? 
+        Integer cycleNumber = item.get("cycle_number") != null ?
                 ((Number) item.get("cycle_number")).intValue() : 0;
-        Double totalAmount = item.get("total_amount") != null ? 
+        Double totalAmount = item.get("total_amount") != null ?
                 ((Number) item.get("total_amount")).doubleValue() : null;
 
         return new ForecastItemDto(
@@ -174,4 +188,3 @@ public class ForecastService {
                 .toList();
     }
 }
-

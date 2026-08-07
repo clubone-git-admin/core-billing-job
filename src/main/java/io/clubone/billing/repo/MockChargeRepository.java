@@ -162,6 +162,7 @@ public class MockChargeRepository {
                        i.tax_amount,
                        i.discount_amount,
                        i.total_amount,
+                       i.currency_code,
                        ie.subscription_instance_id
                 FROM transactions.invoice i
                 LEFT JOIN LATERAL (
@@ -190,7 +191,7 @@ public class MockChargeRepository {
                 rs.getBigDecimal("discount_amount"),
                 rs.getBigDecimal("total_amount"),
                 (UUID) rs.getObject("subscription_instance_id"),
-                null), billingRunId.toString(), requireAppIdStr(), safeLimit, safeOffset);
+                rs.getString("currency_code")), billingRunId.toString(), requireAppIdStr(), safeLimit, safeOffset);
     }
 
     /**
@@ -208,6 +209,7 @@ public class MockChargeRepository {
                        i.tax_amount,
                        i.discount_amount,
                        i.total_amount,
+                       i.currency_code,
                        ie.subscription_instance_id
                 FROM transactions.invoice i
                 LEFT JOIN LATERAL (
@@ -243,7 +245,7 @@ public class MockChargeRepository {
                 rs.getBigDecimal("discount_amount"),
                 rs.getBigDecimal("total_amount"),
                 (UUID) rs.getObject("subscription_instance_id"),
-                null), args.toArray());
+                rs.getString("currency_code")), args.toArray());
     }
 
     /**
@@ -443,7 +445,8 @@ public class MockChargeRepository {
             BigDecimal subTotal,
             BigDecimal tax,
             BigDecimal discount,
-            BigDecimal total) {
+            BigDecimal total,
+            String currencyCode) {
         if (failureReason != null && failureReason.isBlank()) {
             failureReason = null;
         }
@@ -458,6 +461,9 @@ public class MockChargeRepository {
                 detailsJson = "{\"error\":\"failed_to_serialize_details\"}";
             }
         }
+        String ccy = currencyCode != null && !currencyCode.isBlank()
+                ? currencyCode.trim().toUpperCase()
+                : null;
         jdbc.update(
                 """
                 INSERT INTO client_subscription_billing.subscription_billing_history (
@@ -475,6 +481,7 @@ public class MockChargeRepository {
                     invoice_tax_amount,
                     invoice_discount_amount,
                     invoice_total_amount,
+                    currency_code,
                     mock_charge_status,
                     mock_charge_failure_code,
                     mock_charge_details,
@@ -496,6 +503,7 @@ public class MockChargeRepository {
                     ?::numeric,
                     ?,
                     ?,
+                    ?,
                     ?::jsonb,
                     ?::uuid
                 )
@@ -510,10 +518,56 @@ public class MockChargeRepository {
                 tax,
                 discount,
                 total,
+                ccy,
                 mockChargeStatus,
                 mockChargeFailureCode,
                 detailsJson,
                 requireAppIdStr());
+    }
+
+    /** Backward-compatible overload — currency resolved from invoice when omitted. */
+    public void insertMockHistoryRow(
+            UUID subscriptionInstanceId,
+            UUID billingRunId,
+            UUID stageRunId,
+            UUID invoiceId,
+            UUID billingStatusId,
+            String failureReason,
+            String mockChargeStatus,
+            String mockChargeFailureCode,
+            Map<String, Object> mockChargeDetails,
+            BigDecimal subTotal,
+            BigDecimal tax,
+            BigDecimal discount,
+            BigDecimal total) {
+        String ccy = null;
+        try {
+            ccy = jdbc.query(
+                    """
+                    SELECT upper(trim(currency_code)) FROM transactions.invoice
+                    WHERE invoice_id = ?::uuid AND application_id = ?::uuid LIMIT 1
+                    """,
+                    rs -> rs.next() ? rs.getString(1) : null,
+                    invoiceId.toString(),
+                    requireAppIdStr());
+        } catch (DataAccessException ignore) {
+            // fall through
+        }
+        insertMockHistoryRow(
+                subscriptionInstanceId,
+                billingRunId,
+                stageRunId,
+                invoiceId,
+                billingStatusId,
+                failureReason,
+                mockChargeStatus,
+                mockChargeFailureCode,
+                mockChargeDetails,
+                subTotal,
+                tax,
+                discount,
+                total,
+                ccy);
     }
 
     public record MockInvoiceRow(

@@ -40,20 +40,23 @@ public class ForecastController {
             @RequestParam(required = false) UUID locationLevelId,
             @RequestParam(required = false, defaultValue = "true") Boolean includeChildLocations,
             @RequestParam(required = false, defaultValue = "true") Boolean aggregate,
-            @RequestParam(required = false, defaultValue = "day") String groupBy) {
-        
+            @RequestParam(required = false, defaultValue = "day") String groupBy,
+            @RequestParam(required = false) String currencyCode,
+            @RequestParam(required = false) String currency) {
+
+        String ccy = currencyCode != null && !currencyCode.isBlank() ? currencyCode : currency;
         log.debug(
-                "Getting forecast: from={}, to={}, locationLevelId={}, includeChildLocations={}, aggregate={}, groupBy={}",
-                from, to, locationLevelId, includeChildLocations, aggregate, groupBy);
-        
+                "Getting forecast: from={}, to={}, locationLevelId={}, includeChildLocations={}, aggregate={}, groupBy={}, currencyCode={}",
+                from, to, locationLevelId, includeChildLocations, aggregate, groupBy, ccy);
+
         if (aggregate) {
             List<Map<String, Object>> data =
                     forecastService.getForecastAggregated(
-                            from, to, groupBy, locationLevelId, includeChildLocations);
+                            from, to, groupBy, locationLevelId, includeChildLocations, ccy);
             return ResponseEntity.ok(Map.of("data", data));
         } else {
             PageResponse<ForecastItemDto> response =
-                    forecastService.getForecast(from, to, locationLevelId, includeChildLocations);
+                    forecastService.getForecast(from, to, locationLevelId, includeChildLocations, ccy);
             return ResponseEntity.ok(response);
         }
     }
@@ -64,11 +67,14 @@ public class ForecastController {
      */
     @GetMapping("/{date}/summary")
     public ResponseEntity<Map<String, Object>> getForecastSummary(
-            @PathVariable @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
-        
-        log.debug("Getting forecast summary: date={}", date);
-        
-        Map<String, Object> summary = forecastService.getForecastSummary(date);
+            @PathVariable @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false) String currencyCode,
+            @RequestParam(required = false) String currency) {
+
+        String ccy = currencyCode != null && !currencyCode.isBlank() ? currencyCode : currency;
+        log.debug("Getting forecast summary: date={}, currencyCode={}", date, ccy);
+
+        Map<String, Object> summary = forecastService.getForecastSummary(date, ccy);
         return ResponseEntity.ok(summary);
     }
 
@@ -82,14 +88,18 @@ public class ForecastController {
             @RequestParam(required = false) String search,
             @RequestParam(required = false) UUID locationId,
             @RequestParam(required = false) Boolean hasWarnings,
+            @RequestParam(required = false) String currencyCode,
+            @RequestParam(required = false) String currency,
             @RequestParam(defaultValue = "50") Integer limit,
             @RequestParam(defaultValue = "0") Integer offset) {
-        
-        log.debug("Getting forecast invoices: date={}, search={}, locationId={}", date, search, locationId);
-        
+
+        String ccy = currencyCode != null && !currencyCode.isBlank() ? currencyCode : currency;
+        log.debug("Getting forecast invoices: date={}, search={}, locationId={}, currencyCode={}",
+                date, search, locationId, ccy);
+
         PageResponse<ForecastItemDto> response = forecastService.getForecastInvoices(
-                date, search, locationId, hasWarnings, limit, offset);
-        
+                date, search, locationId, hasWarnings, limit, offset, ccy);
+
         return ResponseEntity.ok(response);
     }
 
@@ -102,13 +112,13 @@ public class ForecastController {
             @PathVariable UUID subscriptionInstanceId,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
-        
-        log.debug("Getting subscription forecast: subscriptionInstanceId={}, from={}, to={}", 
+
+        log.debug("Getting subscription forecast: subscriptionInstanceId={}, from={}, to={}",
                 subscriptionInstanceId, from, to);
-        
+
         List<ForecastItemDto> forecast = forecastService.getSubscriptionForecast(
                 subscriptionInstanceId, from, to);
-        
+
         return ResponseEntity.ok(forecast);
     }
 }
