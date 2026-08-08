@@ -1,0 +1,7 @@
+# Prod profile (SPRING_PROFILES_ACTIVE=prod)
+spring:
+  datasource:
+    clubone:
+      url: jdbc:postgresql://clubone-free-tier-db.cju8eqswasju.us-east-1.rds.amazonaws.com:5432/clubone_dev
+      username: clubone_dev_user
+      password: C1ub0ne@2024!

@@ -18,6 +18,8 @@ logging:
     io.clubone.billing.batch.payment.HttpPaymentService: WARN
 
 spring:
+  profiles:
+    active: prod
   application:
     name: clubone-billing-batch
   # Platform threads on tiny tasks — virtual threads + Tomcat amplify CPU throttling.
