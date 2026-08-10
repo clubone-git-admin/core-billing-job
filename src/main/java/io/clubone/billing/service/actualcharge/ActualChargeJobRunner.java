@@ -12,6 +12,7 @@ import io.clubone.billing.repo.ActualChargeRepository;
 import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.BillingRepository;
 import io.clubone.billing.repo.MockChargeRepository;
+import io.clubone.billing.repo.MockChargeRepository.MandateProbe;
 import io.clubone.billing.repo.MockChargeRepository.MockInvoiceRow;
 import io.clubone.billing.repo.StageRunRepository;
 import io.clubone.billing.service.currency.CurrencySummaryAccumulator;
@@ -25,6 +26,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -59,6 +61,8 @@ public class ActualChargeJobRunner {
     private final int pendingStuckThresholdMinutes;
     private final int invoicePageSize;
     private final long leaseHeartbeatSeconds;
+    private final boolean skipMandateMaxAmountCheck;
+    private final boolean skipMandateCurrencyCheck;
 
     public ActualChargeJobRunner(
             StageRunRepository stageRunRepository,
@@ -70,6 +74,8 @@ public class ActualChargeJobRunner {
             @Value("${clubone.billing.actual-charge.pending.stuck-threshold-minutes:30}") int pendingStuckThresholdMinutes,
             @Value("${clubone.billing.charge.invoice-page-size:200}") int invoicePageSize,
             @Value("${clubone.billing.scheduled-stage.lease-heartbeat-seconds:30}") long leaseHeartbeatSeconds,
+            @Value("${clubone.billing.actual-charge.skip-mandate-max-amount-check:false}") boolean skipMandateMaxAmountCheck,
+            @Value("${clubone.billing.actual-charge.skip-mandate-currency-check:false}") boolean skipMandateCurrencyCheck,
             PaymentServiceFactory paymentServiceFactory) {
         this.stageRunRepository = stageRunRepository;
         this.billingRunRepository = billingRunRepository;
@@ -80,6 +86,8 @@ public class ActualChargeJobRunner {
         this.pendingStuckThresholdMinutes = Math.max(1, pendingStuckThresholdMinutes);
         this.invoicePageSize = Math.max(50, Math.min(invoicePageSize, 2_000));
         this.leaseHeartbeatSeconds = Math.max(5, leaseHeartbeatSeconds);
+        this.skipMandateMaxAmountCheck = skipMandateMaxAmountCheck;
+        this.skipMandateCurrencyCheck = skipMandateCurrencyCheck;
         this.livePaymentService = paymentServiceFactory.get(RunMode.LIVE);
     }
 
@@ -293,6 +301,11 @@ public class ActualChargeJobRunner {
                     .toList();
             Map<UUID, UUID> paymentMethods =
                     actualChargeRepository.findClientPaymentMethodIdsForSubscriptionInstances(pageSubIds);
+            Map<UUID, UUID> planByInstance =
+                    mockChargeRepository.findSubscriptionPlanIdsForInstances(pageSubIds);
+            List<UUID> pagePlanIds = planByInstance.values().stream().filter(id -> id != null).distinct().toList();
+            Map<UUID, MandateProbe> mandateByPlan =
+                    mockChargeRepository.findActiveMandatesForSubscriptionPlans(pagePlanIds);
 
             // Process currency shards together within each keyset page (stable within invoice_id order).
             page = page.stream()
@@ -376,6 +389,24 @@ public class ActualChargeJobRunner {
                 }
                 currency = currency.trim().toUpperCase();
                 long amountMinor = amt.multiply(BigDecimal.valueOf(100)).setScale(0, RoundingMode.HALF_UP).longValue();
+
+                String mandateFailure = validatePlanMandate(row, planByInstance, mandateByPlan, amountMinor, currency);
+                if (mandateFailure != null) {
+                    failed++;
+                    failedAmount = failedAmount.add(amt);
+                    currencySummary.addCount(currency, "failed_count", 1);
+                    currencySummary.addAmount(currency, "failed_amount", amt);
+                    currencySummary.addCount(currency, "total_selected", 1);
+                    currencySummary.addAmount(currency, "total_amount_selected", amt);
+                    log.warn(
+                            "actual-charge invoice {}: FAIL (mandate) — {} invoiceId={} subscriptionInstanceId={}",
+                            idx,
+                            mandateFailure,
+                            row.invoiceId(),
+                            row.subscriptionInstanceId());
+                    insertFailureRow(stageRunId, billingRunId, row, statusErr, mandateFailure);
+                    continue;
+                }
 
                 try {
                     if (idx == 1 || idx % 25 == 0) {
@@ -650,6 +681,47 @@ public class ActualChargeJobRunner {
         return GatewayStatus.PENDING_CAPTURE.getCode().equalsIgnoreCase(reason)
                 || GatewayStatus.AUTHORIZED.getCode().equalsIgnoreCase(reason)
                 || GatewayStatus.CREATED.getCode().equalsIgnoreCase(reason);
+    }
+
+    /**
+     * Fail closed on missing / revoked / expired / over-max / currency-mismatched plan mandate
+     * (parity with mock charge). Returns a failure reason, or null when OK to charge.
+     */
+    private String validatePlanMandate(
+            MockInvoiceRow row,
+            Map<UUID, UUID> planByInstance,
+            Map<UUID, MandateProbe> mandateByPlan,
+            long amountMinor,
+            String invoiceCurrency) {
+        UUID planId = planByInstance != null ? planByInstance.get(row.subscriptionInstanceId()) : null;
+        if (planId == null) {
+            return "subscription plan not found for instance";
+        }
+        MandateProbe mp = mandateByPlan != null ? mandateByPlan.get(planId) : null;
+        if (mp == null) {
+            return "no active mandate for subscription plan";
+        }
+        String code = mp.mandateStatusCode();
+        boolean mandateActive = code != null && (code.equalsIgnoreCase("ACTIVE") || code.equalsIgnoreCase("APPROVED"));
+        if (!mandateActive) {
+            return "mandate status " + code;
+        }
+        if (mp.mandateEnd() != null && mp.mandateEnd().toInstant().isBefore(Instant.now())) {
+            return "mandate ended";
+        }
+        if (!skipMandateMaxAmountCheck && mp.mandateMaxAmountMinor() != null && amountMinor > mp.mandateMaxAmountMinor()) {
+            return "over mandate max";
+        }
+        if (!skipMandateCurrencyCheck) {
+            String manCur = mp.mandateCurrency();
+            if (invoiceCurrency == null || invoiceCurrency.isBlank() || manCur == null || manCur.isBlank()) {
+                return "currency mismatch (blank invoice or mandate currency)";
+            }
+            if (!invoiceCurrency.trim().equalsIgnoreCase(manCur.trim())) {
+                return "currency mismatch";
+            }
+        }
+        return null;
     }
 
     private void insertFailureRow(

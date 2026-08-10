@@ -21,7 +21,8 @@ import java.util.UUID;
 public class ActualChargePendingReconciliationService {
 
     private static final Logger log = LoggerFactory.getLogger(ActualChargePendingReconciliationService.class);
-    private static final Set<String> SUCCESS_GATEWAY_STATUSES = Set.of("CAPTURED", "SETTLED", "SUCCESS", "PAID");
+    private static final Set<String> SUCCESS_GATEWAY_STATUSES = Set.of(
+            "CAPTURED", "SETTLED", "SUCCESS", "PAID", "AUTHORISED", "AUTHORIZED");
     private static final Set<String> FAILED_GATEWAY_STATUSES = Set.of("FAILED", "EXPIRED", "REVERSED", "CANCELLED");
 
     private final ActualChargeRepository actualChargeRepository;

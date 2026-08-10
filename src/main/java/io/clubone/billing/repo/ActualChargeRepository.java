@@ -295,6 +295,35 @@ public class ActualChargeRepository {
         }
     }
 
+    /** Gateway display name for a CPM (e.g. RAZORPAY, ADYEN), tenant-scoped. */
+    public Optional<String> findGatewayNameForClientPaymentMethod(UUID clientPaymentMethodId) {
+        if (clientPaymentMethodId == null) {
+            return Optional.empty();
+        }
+        try {
+            String name = jdbc.query(
+                    """
+                    SELECT UPPER(pg.name)
+                    FROM client_payments.client_payment_method cpm
+                    JOIN payment_gateway.payment_gateway pg
+                      ON pg.payment_gateway_id = cpm.payment_gateway_id
+                    WHERE cpm.client_payment_method_id = ?::uuid
+                      AND cpm.application_id = ?::uuid
+                      AND COALESCE(cpm.is_active, true) = true
+                    LIMIT 1
+                    """,
+                    rs -> rs.next() ? rs.getString(1) : null,
+                    clientPaymentMethodId.toString(),
+                    requireAppIdStr());
+            if (name == null || name.isBlank()) {
+                return Optional.empty();
+            }
+            return Optional.of(name.trim().toUpperCase());
+        } catch (DataAccessException ex) {
+            return Optional.empty();
+        }
+    }
+
     public void insertLiveChargeHistoryRow(
             UUID subscriptionInstanceId,
             UUID billingRunId,

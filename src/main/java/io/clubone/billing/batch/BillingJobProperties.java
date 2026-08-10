@@ -109,6 +109,10 @@ public class BillingJobProperties {
 			private String validateMethodPath = "/payment/razorpay/billing/validate-method";
 			private String createIntentPath = "/payment/api/payment/razorpay/intents";
 			private String chargeAtWillPath = "/payment/razorpay/billing/charge-at-will";
+			/** API Gateway path to Adyen stored-method charge (core-payment-service). */
+			private String adyenRecurringChargePath = "/payment/api/adyen/recurring/charge";
+			private String adyenEnvironment = "TEST";
+			private String adyenPaymentTypeCode = "RECURRING";
 
 			private String txnBaseUrl = "https://develop-api.clubone.io"; // transaction service
 			private String finalizePath = "/transaction/api/transactions/v3/finalize";
@@ -174,6 +178,30 @@ public class BillingJobProperties {
 
 			public void setChargeAtWillPath(String chargeAtWillPath) {
 				this.chargeAtWillPath = chargeAtWillPath;
+			}
+
+			public String getAdyenRecurringChargePath() {
+				return adyenRecurringChargePath;
+			}
+
+			public void setAdyenRecurringChargePath(String adyenRecurringChargePath) {
+				this.adyenRecurringChargePath = adyenRecurringChargePath;
+			}
+
+			public String getAdyenEnvironment() {
+				return adyenEnvironment;
+			}
+
+			public void setAdyenEnvironment(String adyenEnvironment) {
+				this.adyenEnvironment = adyenEnvironment;
+			}
+
+			public String getAdyenPaymentTypeCode() {
+				return adyenPaymentTypeCode;
+			}
+
+			public void setAdyenPaymentTypeCode(String adyenPaymentTypeCode) {
+				this.adyenPaymentTypeCode = adyenPaymentTypeCode;
 			}
 
 			public String getTxnBaseUrl() {

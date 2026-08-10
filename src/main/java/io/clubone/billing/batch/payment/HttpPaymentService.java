@@ -4,6 +4,7 @@ import io.clubone.billing.batch.BillingJobProperties;
 import io.clubone.billing.batch.metrics.BillingMetrics;
 import io.clubone.billing.batch.model.GatewayStatus;
 import io.clubone.billing.batch.ratelimit.BillingRateLimiter;
+import io.clubone.billing.repo.ActualChargeRepository;
 import io.clubone.billing.service.currency.GatewayMidCurrencyService;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
@@ -22,6 +23,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.net.SocketTimeoutException;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -47,7 +49,8 @@ public class HttpPaymentService implements PaymentService {
 	private final BillingRateLimiter rateLimiter;
 	private final BillingMetrics metrics;
 	private final GatewayMidCurrencyService gatewayMidCurrencyService;
-	
+	private final ActualChargeRepository actualChargeRepository;
+
 	// ThreadLocal to track attempt counts per call for test mode
 	private final ThreadLocal<Map<String, AtomicInteger>> attemptCounters = ThreadLocal.withInitial(ConcurrentHashMap::new);
 
@@ -55,11 +58,13 @@ public class HttpPaymentService implements PaymentService {
 			BillingJobProperties props,
 			BillingRateLimiter rateLimiter,
 			BillingMetrics metrics,
-			GatewayMidCurrencyService gatewayMidCurrencyService) {
+			GatewayMidCurrencyService gatewayMidCurrencyService,
+			ActualChargeRepository actualChargeRepository) {
 		this.props = props;
 		this.rateLimiter = rateLimiter;
 		this.metrics = metrics;
 		this.gatewayMidCurrencyService = gatewayMidCurrencyService;
+		this.actualChargeRepository = actualChargeRepository;
 		this.rt = createRestTemplate();
 	}
 
@@ -78,145 +83,62 @@ public class HttpPaymentService implements PaymentService {
 			long amountMinor, String currencyCode) {
 		log.info("billInvoiceRecurring REQ: invoiceId={} clientRoleId={} clientPaymentMethodId={} amountMinor={} currencyCode={}",
 				invoiceId, clientRoleId, clientPaymentMethodId, amountMinor, currencyCode);
-		
-		// Get test mode configuration (cache to avoid repeated calls and help IDE resolution)
+
 		BillingJobProperties.Payment.Http.TestMode testMode = props.getPayment().getHttp().getTestMode();
-		
-		// Clear test mode counters at start of each invoice processing
-		// Note: Counters persist across Resilience4j Retry attempts, allowing us to test retry behavior
+
 		if (testMode.isEnabled()) {
-			// Only clear on first call (check if counters map is empty)
 			if (attemptCounters.get().isEmpty()) {
-				log.info("TEST MODE ENABLED: Will simulate {} failures per HTTP call with exception type: {}", 
+				log.info("TEST MODE ENABLED: Will simulate {} failures per HTTP call with exception type: {}",
 					testMode.getFailAttempts(),
 					testMode.getExceptionType());
 			}
 		}
-		
-		// Rate limiting
+
 		if (!rateLimiter.tryConsumePayment()) {
 			log.warn("Payment service rate limit exceeded: invoiceId={}", invoiceId);
 			clearAttemptCounters();
 			return PaymentResult.fail("RATE_LIMIT_EXCEEDED");
 		}
 
+		String gatewayName = actualChargeRepository
+				.findGatewayNameForClientPaymentMethod(clientPaymentMethodId)
+				.orElse("");
+		if (gatewayName.isBlank()) {
+			clearAttemptCounters();
+			return PaymentResult.fail("GATEWAY_UNKNOWN: no active gateway for clientPaymentMethodId");
+		}
+		log.info("billInvoiceRecurring resolved gateway={} for clientPaymentMethodId={}", gatewayName, clientPaymentMethodId);
+
 		var timer = metrics.startPaymentCallTimer();
 		try {
-			// 1) validate-method
-			String validateUrl = props.getPayment().getHttp().getBaseUrl() + props.getPayment().getHttp().getValidateMethodPath();
-			Map<String, Object> validateReq = Map.of("clientRoleId", clientRoleId.toString(), "clientPaymentMethodId", clientPaymentMethodId.toString());
-			Map<String, Object> validateResp = postJson("validate-method", validateUrl, validateReq);
-			log.debug("billInvoiceRecurring validate-method RESP: invoiceId={} response={}", invoiceId, validateResp);
-
-			Object validObj = validateResp.get("valid");
-			boolean valid = Boolean.TRUE.equals(validObj) || "true".equalsIgnoreCase(String.valueOf(validObj));
-			if (!valid) {
-				log.warn("billInvoiceRecurring validate-method failed (valid=false): invoiceId={} response={}", invoiceId, validateResp);
+			if ("ADYEN".equalsIgnoreCase(gatewayName)) {
+				PaymentResult result = billInvoiceRecurringAdyen(
+						invoiceId, clientRoleId, clientPaymentMethodId, amountMinor, currencyCode);
+				metrics.recordPaymentCallTime(timer);
+				if (!result.isSuccess() && result.getFailureReason() != null
+						&& !GatewayStatus.PENDING_CAPTURE.getCode().equalsIgnoreCase(result.getFailureReason())) {
+					metrics.recordPaymentFailure(result.getFailureReason());
+				}
 				clearAttemptCounters();
-				return PaymentResult.fail("VALIDATE_METHOD_INVALID: valid=false");
+				return result;
 			}
 
-			// 2) create intent
-			String createIntentUrl = props.getPayment().getHttp().getBaseUrl() + props.getPayment().getHttp().getCreateIntentPath();
-			Map<String, Object> createIntentReq = new HashMap<>();
-			createIntentReq.put("clientRoleId", clientRoleId.toString());
-			createIntentReq.put("invoiceId", invoiceId.toString());
-			createIntentReq.put("clientPaymentMethodId", clientPaymentMethodId.toString());
-			createIntentReq.put("amountMinor", amountMinor);
-			createIntentReq.put("currency", currencyCode);
-			createIntentReq.put("paymentTypeCode", props.getPayment().getHttp().getPaymentTypeCode());
-			gatewayMidCurrencyService
-					.resolveMidForPayment(clientPaymentMethodId, currencyCode, null, clientRoleId)
-					.ifPresent(mid -> {
-						createIntentReq.put("midCode", mid);
-						log.info("billInvoiceRecurring resolved MID for currency {}: midCode={}", currencyCode, mid);
-					});
-			Map<String, Object> intentResp = postJson("create-intent", createIntentUrl, createIntentReq);
-			log.debug("billInvoiceRecurring create-intent RESP: invoiceId={} response={}", invoiceId, intentResp);
-
-			Object intentIdObj = intentResp.get("intentId");
-			Object razorpayOrderIdObj = intentResp.get("razorpayOrderId");
-			if (intentIdObj == null || razorpayOrderIdObj == null) {
-				log.warn("billInvoiceRecurring create-intent failed (missing intentId/razorpayOrderId): invoiceId={} response={}", invoiceId, intentResp);
+			if (!"RAZORPAY".equalsIgnoreCase(gatewayName)) {
+				metrics.recordPaymentCallTime(timer);
 				clearAttemptCounters();
-				return PaymentResult.fail("CREATE_INTENT_FAILED: missing intentId or razorpayOrderId");
-			}
-			UUID intentId = UUID.fromString(String.valueOf(intentIdObj));
-			String razorpayOrderId = String.valueOf(razorpayOrderIdObj);
-
-			// 3) charge-at-will
-			String chargeUrl = props.getPayment().getHttp().getBaseUrl() + props.getPayment().getHttp().getChargeAtWillPath();
-			Map<String, Object> chargeReq = Map.of(
-					"intentId", intentId.toString(),
-					"invoiceId", invoiceId.toString(),
-					"clientRoleId", clientRoleId.toString(),
-					"clientPaymentMethodId", clientPaymentMethodId.toString(),
-					"paymentTypeCode", props.getPayment().getHttp().getPaymentTypeCode(),
-					"runMode", "LIVE",
-					"actorId", props.getPayment().getHttp().getActorId());
-			Map<String, Object> chargeResp = postJson("charge-at-will", chargeUrl, chargeReq);
-			log.debug("billInvoiceRecurring charge-at-will RESP: invoiceId={} response={}", invoiceId, chargeResp);
-
-			String status = String.valueOf(chargeResp.getOrDefault("status", "UNKNOWN"));
-			Object clientPaymentTxnIdObj = chargeResp.get("clientPaymentTransactionId");
-			if (clientPaymentTxnIdObj == null) {
-				log.warn("billInvoiceRecurring charge-at-will failed (missing clientPaymentTransactionId): invoiceId={} response={}", invoiceId, chargeResp);
-				clearAttemptCounters();
-				return new PaymentResult(false, null, "CHARGE_AT_WILL_FAILED: missing clientPaymentTransactionId", intentId, null, null);
-			}
-			
-			UUID clientPaymentTxnId = UUID.fromString(String.valueOf(chargeResp.get("clientPaymentTransactionId")));
-
-			// 3A) Failure
-			// status returned by charge-at-will is now: CAPTURED | PENDING_CAPTURE | FAILED
-			if (GatewayStatus.FAILED.getCode().equalsIgnoreCase(status)) {
-			    log.warn("billInvoiceRecurring charge-at-will FAILED: invoiceId={} status={} intentId={} txnId={}",
-			            invoiceId, status, intentId, clientPaymentTxnId);
-			    metrics.recordPaymentCallTime(timer);
-			    metrics.recordPaymentFailure("PAYMENT_FAILED");
-			    clearAttemptCounters();
-			    return new PaymentResult(false, null, "PAYMENT_FAILED", intentId, clientPaymentTxnId, null);
+				return PaymentResult.fail("GATEWAY_UNSUPPORTED: " + gatewayName);
 			}
 
-			if (GatewayStatus.PENDING_CAPTURE.getCode().equalsIgnoreCase(status)
-					|| GatewayStatus.AUTHORIZED.getCode().equalsIgnoreCase(status)
-					|| GatewayStatus.CREATED.getCode().equalsIgnoreCase(status)) {
-				log.info("billInvoiceRecurring charge-at-will PENDING: invoiceId={} status={} intentId={} txnId={}",
-						invoiceId, status, intentId, clientPaymentTxnId);
-				clearAttemptCounters();
-				return new PaymentResult(
-					false,
-					GatewayStatus.PENDING_CAPTURE.getCode(),
-					GatewayStatus.PENDING_CAPTURE.getCode(),
-					intentId,
-					clientPaymentTxnId,
-					null
-				);
-			}
-
-			if (!GatewayStatus.CAPTURED.getCode().equalsIgnoreCase(status)) {
-			    log.warn("billInvoiceRecurring charge-at-will unexpected status: invoiceId={} status={} intentId={} txnId={}",
-			            invoiceId, status, intentId, clientPaymentTxnId);
-			    metrics.recordPaymentCallTime(timer);
-			    metrics.recordPaymentFailure("UNSUPPORTED_STATUS:" + status);
-			    clearAttemptCounters();
-			    return new PaymentResult(false, null, "UNSUPPORTED_STATUS:" + status, intentId, clientPaymentTxnId, null);
-			}
-
-			log.info("billInvoiceRecurring RESP (success): invoiceId={} intentId={} clientPaymentTxnId={} transactionId={} razorpayOrderId={}",
-					invoiceId, intentId, clientPaymentTxnId, null, razorpayOrderId);
+			PaymentResult result = billInvoiceRecurringRazorpay(
+					invoiceId, clientRoleId, clientPaymentMethodId, amountMinor, currencyCode);
 			metrics.recordPaymentCallTime(timer);
 			clearAttemptCounters();
-			return new PaymentResult(true, "RZP_ORDER:" + razorpayOrderId, null, intentId, clientPaymentTxnId, null);
+			return result;
 
 		} catch (Exception e) {
-			// Log the error but let it propagate so Resilience4j Retry can handle retries
-			// Resilience4j Retry will catch RuntimeException and retry
-			// After retries exhausted, exception will propagate to Spring Batch
 			log.warn("billInvoiceRecurring exception (will be retried by Resilience4j): invoiceId={} error={}", invoiceId, e.getMessage());
 			metrics.recordPaymentCallTime(timer);
-			
-			// Convert checked exceptions to RuntimeException so Resilience4j Retry can handle them
+
 			if (e instanceof RuntimeException) {
 				throw (RuntimeException) e;
 			} else {
@@ -225,61 +147,211 @@ public class HttpPaymentService implements PaymentService {
 		}
 	}
 
+	private PaymentResult billInvoiceRecurringRazorpay(UUID invoiceId, UUID clientRoleId, UUID clientPaymentMethodId,
+			long amountMinor, String currencyCode) {
+		// 1) validate-method
+		String validateUrl = props.getPayment().getHttp().getBaseUrl() + props.getPayment().getHttp().getValidateMethodPath();
+		Map<String, Object> validateReq = Map.of(
+				"clientRoleId", clientRoleId.toString(),
+				"clientPaymentMethodId", clientPaymentMethodId.toString());
+		Map<String, Object> validateResp = postJson("validate-method", validateUrl, validateReq);
+		log.debug("billInvoiceRecurring validate-method RESP: invoiceId={} response={}", invoiceId, validateResp);
+
+		Object validObj = validateResp.get("valid");
+		boolean valid = Boolean.TRUE.equals(validObj) || "true".equalsIgnoreCase(String.valueOf(validObj));
+		if (!valid) {
+			log.warn("billInvoiceRecurring validate-method failed (valid=false): invoiceId={} response={}", invoiceId, validateResp);
+			return PaymentResult.fail("VALIDATE_METHOD_INVALID: valid=false");
+		}
+
+		// 2) create intent
+		String createIntentUrl = props.getPayment().getHttp().getBaseUrl() + props.getPayment().getHttp().getCreateIntentPath();
+		Map<String, Object> createIntentReq = new HashMap<>();
+		createIntentReq.put("clientRoleId", clientRoleId.toString());
+		createIntentReq.put("invoiceId", invoiceId.toString());
+		createIntentReq.put("clientPaymentMethodId", clientPaymentMethodId.toString());
+		createIntentReq.put("amountMinor", amountMinor);
+		createIntentReq.put("currency", currencyCode);
+		createIntentReq.put("paymentTypeCode", props.getPayment().getHttp().getPaymentTypeCode());
+		gatewayMidCurrencyService
+				.resolveMidForPayment(clientPaymentMethodId, currencyCode, null, clientRoleId)
+				.ifPresent(mid -> {
+					createIntentReq.put("midCode", mid);
+					log.info("billInvoiceRecurring resolved MID for currency {}: midCode={}", currencyCode, mid);
+				});
+		Map<String, Object> intentResp = postJson("create-intent", createIntentUrl, createIntentReq);
+		log.debug("billInvoiceRecurring create-intent RESP: invoiceId={} response={}", invoiceId, intentResp);
+
+		Object intentIdObj = intentResp.get("intentId");
+		Object razorpayOrderIdObj = intentResp.get("razorpayOrderId");
+		if (intentIdObj == null || razorpayOrderIdObj == null) {
+			log.warn("billInvoiceRecurring create-intent failed (missing intentId/razorpayOrderId): invoiceId={} response={}", invoiceId, intentResp);
+			return PaymentResult.fail("CREATE_INTENT_FAILED: missing intentId or razorpayOrderId");
+		}
+		UUID intentId = UUID.fromString(String.valueOf(intentIdObj));
+		String razorpayOrderId = String.valueOf(razorpayOrderIdObj);
+
+		// 3) charge-at-will
+		String chargeUrl = props.getPayment().getHttp().getBaseUrl() + props.getPayment().getHttp().getChargeAtWillPath();
+		Map<String, Object> chargeReq = Map.of(
+				"intentId", intentId.toString(),
+				"invoiceId", invoiceId.toString(),
+				"clientRoleId", clientRoleId.toString(),
+				"clientPaymentMethodId", clientPaymentMethodId.toString(),
+				"paymentTypeCode", props.getPayment().getHttp().getPaymentTypeCode(),
+				"runMode", "LIVE",
+				"actorId", props.getPayment().getHttp().getActorId());
+		Map<String, Object> chargeResp = postJson("charge-at-will", chargeUrl, chargeReq);
+		log.debug("billInvoiceRecurring charge-at-will RESP: invoiceId={} response={}", invoiceId, chargeResp);
+
+		String status = String.valueOf(chargeResp.getOrDefault("status", "UNKNOWN"));
+		Object clientPaymentTxnIdObj = chargeResp.get("clientPaymentTransactionId");
+		if (clientPaymentTxnIdObj == null) {
+			log.warn("billInvoiceRecurring charge-at-will failed (missing clientPaymentTransactionId): invoiceId={} response={}", invoiceId, chargeResp);
+			return new PaymentResult(false, null, "CHARGE_AT_WILL_FAILED: missing clientPaymentTransactionId", intentId, null, null);
+		}
+
+		UUID clientPaymentTxnId = UUID.fromString(String.valueOf(chargeResp.get("clientPaymentTransactionId")));
+
+		if (GatewayStatus.FAILED.getCode().equalsIgnoreCase(status)) {
+			log.warn("billInvoiceRecurring charge-at-will FAILED: invoiceId={} status={} intentId={} txnId={}",
+					invoiceId, status, intentId, clientPaymentTxnId);
+			metrics.recordPaymentFailure("PAYMENT_FAILED");
+			return new PaymentResult(false, null, "PAYMENT_FAILED", intentId, clientPaymentTxnId, null);
+		}
+
+		if (GatewayStatus.PENDING_CAPTURE.getCode().equalsIgnoreCase(status)
+				|| GatewayStatus.AUTHORIZED.getCode().equalsIgnoreCase(status)
+				|| GatewayStatus.CREATED.getCode().equalsIgnoreCase(status)) {
+			log.info("billInvoiceRecurring charge-at-will PENDING: invoiceId={} status={} intentId={} txnId={}",
+					invoiceId, status, intentId, clientPaymentTxnId);
+			return new PaymentResult(
+				false,
+				GatewayStatus.PENDING_CAPTURE.getCode(),
+				GatewayStatus.PENDING_CAPTURE.getCode(),
+				intentId,
+				clientPaymentTxnId,
+				null
+			);
+		}
+
+		if (!GatewayStatus.CAPTURED.getCode().equalsIgnoreCase(status)) {
+			log.warn("billInvoiceRecurring charge-at-will unexpected status: invoiceId={} status={} intentId={} txnId={}",
+					invoiceId, status, intentId, clientPaymentTxnId);
+			metrics.recordPaymentFailure("UNSUPPORTED_STATUS:" + status);
+			return new PaymentResult(false, null, "UNSUPPORTED_STATUS:" + status, intentId, clientPaymentTxnId, null);
+		}
+
+		log.info("billInvoiceRecurring RESP (success): invoiceId={} intentId={} clientPaymentTxnId={} razorpayOrderId={}",
+				invoiceId, intentId, clientPaymentTxnId, razorpayOrderId);
+		return new PaymentResult(true, "RZP_ORDER:" + razorpayOrderId, null, intentId, clientPaymentTxnId, null);
+	}
+
+	private PaymentResult billInvoiceRecurringAdyen(UUID invoiceId, UUID clientRoleId, UUID clientPaymentMethodId,
+			long amountMinor, String currencyCode) {
+		String chargeUrl = props.getPayment().getHttp().getBaseUrl()
+				+ props.getPayment().getHttp().getAdyenRecurringChargePath();
+
+		Map<String, Object> chargeReq = new HashMap<>();
+		chargeReq.put("clientRoleId", clientRoleId.toString());
+		chargeReq.put("invoiceId", invoiceId.toString());
+		chargeReq.put("clientPaymentMethodId", clientPaymentMethodId.toString());
+		chargeReq.put("amountMinor", amountMinor);
+		chargeReq.put("currencyCode", currencyCode);
+		chargeReq.put("paymentTypeCode", props.getPayment().getHttp().getAdyenPaymentTypeCode());
+		chargeReq.put("methodTypeCode", "CARD");
+		chargeReq.put("environment", props.getPayment().getHttp().getAdyenEnvironment());
+
+		Map<String, Object> chargeResp = postJson("adyen-recurring-charge", chargeUrl, chargeReq);
+		log.debug("billInvoiceRecurring Adyen RESP: invoiceId={} response={}", invoiceId, chargeResp);
+
+		Object intentIdObj = firstNonNull(chargeResp.get("paymentIntentId"), chargeResp.get("intentId"));
+		Object txnIdObj = firstNonNull(chargeResp.get("transactionId"), chargeResp.get("clientPaymentTransactionId"));
+		String status = String.valueOf(chargeResp.getOrDefault("status", "UNKNOWN"));
+		String resultCode = String.valueOf(chargeResp.getOrDefault("resultCode", ""));
+
+		if (intentIdObj == null || txnIdObj == null) {
+			log.warn("billInvoiceRecurring Adyen failed (missing paymentIntentId/transactionId): invoiceId={} response={}",
+					invoiceId, chargeResp);
+			return PaymentResult.fail("ADYEN_CHARGE_FAILED: missing paymentIntentId or transactionId");
+		}
+
+		UUID intentId = UUID.fromString(String.valueOf(intentIdObj));
+		UUID clientPaymentTxnId = UUID.fromString(String.valueOf(txnIdObj));
+		String normalized = status.trim().toUpperCase(Locale.ROOT);
+		String resultNorm = resultCode.trim().toUpperCase(Locale.ROOT);
+
+		if ("FAILED".equals(normalized) || "REFUSED".equals(normalized) || "ERROR".equals(normalized)
+				|| "CANCELLED".equals(normalized) || "CANCELED".equals(normalized)
+				|| "REFUSED".equals(resultNorm) || "ERROR".equals(resultNorm) || "CANCELLED".equals(resultNorm)) {
+			log.warn("billInvoiceRecurring Adyen FAILED: invoiceId={} status={} resultCode={} intentId={} txnId={}",
+					invoiceId, status, resultCode, intentId, clientPaymentTxnId);
+			return new PaymentResult(false, null, "PAYMENT_FAILED:" + status, intentId, clientPaymentTxnId, null);
+		}
+
+		if ("PENDING".equals(normalized) || "RECEIVED".equals(normalized)
+				|| "PENDING".equals(resultNorm) || "RECEIVED".equals(resultNorm)) {
+			log.info("billInvoiceRecurring Adyen PENDING: invoiceId={} status={} resultCode={} intentId={} txnId={}",
+					invoiceId, status, resultCode, intentId, clientPaymentTxnId);
+			return new PaymentResult(
+					false,
+					GatewayStatus.PENDING_CAPTURE.getCode(),
+					GatewayStatus.PENDING_CAPTURE.getCode(),
+					intentId,
+					clientPaymentTxnId,
+					null);
+		}
+
+		// Adyen ContAuth often returns AUTHORISED (auto-capture or capture pending).
+		if ("CAPTURED".equals(normalized) || "SETTLED".equals(normalized) || "SUCCESS".equals(normalized)
+				|| "PAID".equals(normalized) || "AUTHORISED".equals(normalized) || "AUTHORIZED".equals(normalized)
+				|| "AUTHORISED".equals(resultNorm) || "AUTHORIZED".equals(resultNorm)) {
+			log.info("billInvoiceRecurring Adyen SUCCESS: invoiceId={} status={} resultCode={} intentId={} txnId={}",
+					invoiceId, status, resultCode, intentId, clientPaymentTxnId);
+			return new PaymentResult(true, "ADYEN_PSP:" + chargeResp.getOrDefault("pspReference", ""), null, intentId,
+					clientPaymentTxnId, null);
+		}
+
+		log.warn("billInvoiceRecurring Adyen unexpected status: invoiceId={} status={} resultCode={} intentId={} txnId={}",
+				invoiceId, status, resultCode, intentId, clientPaymentTxnId);
+		return new PaymentResult(false, null, "UNSUPPORTED_STATUS:" + status, intentId, clientPaymentTxnId, null);
+	}
+
+	private static Object firstNonNull(Object a, Object b) {
+		return a != null ? a : b;
+	}
+
 	private void clearAttemptCounters() {
 		attemptCounters.remove();
 	}
 
 	/**
 	 * Fallback method for circuit breaker.
-	 * Called when circuit breaker is open or when an exception occurs.
-	 * 
-	 * @param invoiceId Invoice ID
-	 * @param clientRoleId Client role ID
-	 * @param clientPaymentMethodId Payment method ID
-	 * @param amountMinor Amount in minor currency units
-	 * @param currencyCode Currency code
-	 * @param throwable The exception that triggered the fallback
-	 * @return PaymentResult indicating failure
 	 */
 	public PaymentResult paymentFallback(UUID invoiceId, UUID clientRoleId, UUID clientPaymentMethodId,
 			long amountMinor, String currencyCode, Throwable throwable) {
-		log.warn("Circuit breaker fallback triggered: invoiceId={} error={}", invoiceId, 
+		log.warn("Circuit breaker fallback triggered: invoiceId={} error={}", invoiceId,
 			throwable != null ? throwable.getMessage() : "Unknown error");
 		clearAttemptCounters();
-		return PaymentResult.fail("CIRCUIT_BREAKER_OPEN: " + 
+		return PaymentResult.fail("CIRCUIT_BREAKER_OPEN: " +
 			(throwable != null ? throwable.getMessage() : "Service unavailable"));
 	}
 
-	/**
-	 * Makes HTTP POST request to payment service.
-	 * Note: Retries are handled at the method level by Resilience4j Retry on billInvoiceRecurring().
-	 * Spring Retry doesn't work on self-invocations (private methods called from same class).
-	 * 
-	 * @param callName Name of the call for logging
-	 * @param url URL to call
-	 * @param body Request body
-	 * @return Response body as Map
-	 * @throws RuntimeException if request fails (will be retried by Resilience4j Retry)
-	 */
 	private Map<String, Object> postJson(String callName, String url, Map<String, Object> body) {
-		// Get test mode configuration (cache to avoid repeated calls and help IDE resolution)
 		BillingJobProperties.Payment.Http.TestMode testMode = props.getPayment().getHttp().getTestMode();
-		
-		// Test mode: Simulate failures for testing retry mechanism
+
 		if (testMode.isEnabled()) {
 			Map<String, AtomicInteger> counters = attemptCounters.get();
 			int attempt = counters.computeIfAbsent(callName, k -> new AtomicInteger(0)).incrementAndGet();
 			int failAttempts = testMode.getFailAttempts();
-			
+
 			if (attempt <= failAttempts) {
 				String exceptionType = testMode.getExceptionType();
-				log.warn("TEST MODE: Simulating failure for {} (attempt {}/{}) with exception type: {}", 
+				log.warn("TEST MODE: Simulating failure for {} (attempt {}/{}) with exception type: {}",
 					callName, attempt, failAttempts, exceptionType);
-				
-				// Throw exception based on configured type
+
 				switch (exceptionType.toUpperCase()) {
 					case "SOCKET_TIMEOUT":
-						// Use unchecked wrapper that Spring Retry can catch
 						throw new TestSocketTimeoutException("TEST MODE: Simulated socket timeout on attempt " + attempt);
 					case "ILLEGAL_STATE":
 						throw new IllegalStateException("TEST MODE: Simulated illegal state error on attempt " + attempt);
@@ -290,11 +362,10 @@ public class HttpPaymentService implements PaymentService {
 				}
 			} else {
 				log.info("TEST MODE: Allowing success for {} after {} failed attempts", callName, failAttempts);
-				// Reset counter for this call after successful attempt
 				counters.remove(callName);
 			}
 		}
-		
+
 		log.debug("HttpPaymentService {} REQ: url={} body={}", callName, url, body);
 
 		HttpHeaders headers = new HttpHeaders();
@@ -307,13 +378,11 @@ public class HttpPaymentService implements PaymentService {
 		Map<String, Object> respBody = resp.getBody();
 
 		log.debug("HttpPaymentService {} RESP: url={} statusCode={} body={}", callName, url, statusCode, respBody);
-		
-		// Clear test mode counter on success
+
 		if (testMode.isEnabled()) {
 			attemptCounters.get().remove(callName);
 		}
-		
-		// Retry on 5xx server errors (transient failures)
+
 		if (statusCode >= 500 && statusCode < 600) {
 			log.warn("HttpPaymentService {} received 5xx error, will retry: url={} statusCode={}", callName, url, statusCode);
 			throw new IllegalStateException("Server error " + statusCode + " url=" + url);
