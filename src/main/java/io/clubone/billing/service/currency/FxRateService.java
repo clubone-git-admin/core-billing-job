@@ -102,9 +102,7 @@ public class FxRateService {
         }
         assertPeriodOpen(row.asOf());
         UUID actor = AccessContext.actorUserId();
-        if (actor != null && row.submittedBy() != null && actor.equals(row.submittedBy())) {
-            throw new ForbiddenException("Dual-control: submitter cannot approve their own FX rate");
-        }
+        // Single approval is enough; submitter may approve/reject their own rate.
         fxRateRepository.approve(fxRateId, actor);
         return fxRateRepository.findById(fxRateId)
                 .map(this::toDto)
@@ -120,9 +118,7 @@ public class FxRateService {
         }
         assertPeriodOpen(row.asOf());
         UUID actor = AccessContext.actorUserId();
-        if (actor != null && row.submittedBy() != null && actor.equals(row.submittedBy())) {
-            throw new ForbiddenException("Dual-control: submitter cannot reject their own FX rate");
-        }
+        // Single approval is enough; submitter may approve/reject their own rate.
         fxRateRepository.reject(fxRateId, actor, reason);
         return fxRateRepository.findById(fxRateId)
                 .map(this::toDto)

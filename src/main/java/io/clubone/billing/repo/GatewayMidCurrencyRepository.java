@@ -127,6 +127,27 @@ public class GatewayMidCurrencyRepository {
         }
     }
 
+    /** Home club location for the client role (used for location-scoped Gateway MID). */
+    public Optional<UUID> findLocationIdForClientRole(UUID clientRoleId) {
+        if (clientRoleId == null) {
+            return Optional.empty();
+        }
+        try {
+            UUID locationId = jdbc.query(
+                    """
+                    SELECT location_id
+                    FROM clients.client_role
+                    WHERE client_role_id = ?::uuid
+                    LIMIT 1
+                    """,
+                    rs -> rs.next() ? (UUID) rs.getObject("location_id") : null,
+                    clientRoleId.toString());
+            return Optional.ofNullable(locationId);
+        } catch (DataAccessException ex) {
+            return Optional.empty();
+        }
+    }
+
     public UUID upsert(
             String gatewayCode,
             String currencyCode,

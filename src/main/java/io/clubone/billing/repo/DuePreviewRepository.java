@@ -87,6 +87,10 @@ public class DuePreviewRepository {
         lcas.name AS client_agreement_status,
         a.agreement_name,
         COALESCE(loc_purchased.name, loc.name) AS location_name,
+        COALESCE(
+            upper(trim(ccy_home.currency_code)),
+            upper(trim(ccy_purchased.currency_code))
+        ) AS currency_code,
         pt.method_type_name AS payment_method_name,
         pt.method_type_name AS payment_type_name,
         cpm.card_last4,
@@ -126,6 +130,8 @@ public class DuePreviewRepository {
         ON loc_purchased.location_id = pl_purchased.reference_entity_id
         AND loc_purchased.application_id = pl_purchased.application_id
     LEFT JOIN locations.location loc ON loc.location_id = cr.location_id
+    LEFT JOIN locations.lu_currency ccy_home ON ccy_home.currency_id = loc.currency_id
+    LEFT JOIN locations.lu_currency ccy_purchased ON ccy_purchased.currency_id = loc_purchased.currency_id
     LEFT JOIN client_payments.client_payment_method cpm ON cpm.client_payment_method_id = sp.client_payment_method_id
     LEFT JOIN payment_gateway.payment_gateway_supported_method pgsm
         ON pgsm.payment_gateway_supported_method_id = cpm.payment_gateway_method_type_id
@@ -233,6 +239,10 @@ public class DuePreviewRepository {
         lcas.name AS client_agreement_status,
         a.agreement_name,
         COALESCE(loc_purchased.name, loc.name) AS location_name,
+        COALESCE(
+            upper(trim(ccy_home.currency_code)),
+            upper(trim(ccy_purchased.currency_code))
+        ) AS currency_code,
         pt.method_type_name AS payment_method_name,
         pt.method_type_name AS payment_type_name,
         cpm.card_last4,
@@ -272,6 +282,8 @@ public class DuePreviewRepository {
         ON loc_purchased.location_id = pl_purchased.reference_entity_id
         AND loc_purchased.application_id = pl_purchased.application_id
     LEFT JOIN locations.location loc ON loc.location_id = cr.location_id
+    LEFT JOIN locations.lu_currency ccy_home ON ccy_home.currency_id = loc.currency_id
+    LEFT JOIN locations.lu_currency ccy_purchased ON ccy_purchased.currency_id = loc_purchased.currency_id
     LEFT JOIN client_payments.client_payment_method cpm ON cpm.client_payment_method_id = sp.client_payment_method_id
     LEFT JOIN payment_gateway.payment_gateway_supported_method pgsm
         ON pgsm.payment_gateway_supported_method_id = cpm.payment_gateway_method_type_id
@@ -400,6 +412,7 @@ public class DuePreviewRepository {
         row.put("client_agreement_status", rs.getString("client_agreement_status"));
         row.put("agreement_name", rs.getString("agreement_name"));
         row.put("location_name", rs.getString("location_name"));
+        row.put("currency_code", rs.getString("currency_code"));
         row.put("payment_method_name", rs.getString("payment_method_name"));
         row.put("payment_type_name", rs.getString("payment_type_name"));
         row.put("card_last4", rs.getString("card_last4"));
@@ -512,7 +525,10 @@ public class DuePreviewRepository {
                        NULLIF(substring(bsr.summary_json->>'s3_path' from '[^/]+$'), '')
                    ) AS filename,
                    (bsr.summary_json->>'total_instances')::int AS invoices,
-                   (bsr.summary_json->>'total_amount')::numeric AS total_amount,
+                   CASE
+                     WHEN COALESCE((bsr.summary_json->>'mixed_currency')::boolean, false) THEN NULL
+                     ELSE (bsr.summary_json->>'total_amount')::numeric
+                   END AS total_amount,
                    (ap.status_code = 'APPROVED') AS is_mark_ready
             FROM client_subscription_billing.billing_stage_run bsr
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id

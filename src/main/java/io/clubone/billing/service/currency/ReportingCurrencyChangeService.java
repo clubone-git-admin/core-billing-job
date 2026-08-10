@@ -7,7 +7,6 @@ import io.clubone.billing.repo.BillingTenantSettingsRepository;
 import io.clubone.billing.repo.ReportingCurrencyChangeRepository;
 import io.clubone.billing.repo.ReportingCurrencyChangeRepository.ChangeRow;
 import io.clubone.billing.security.AccessContext;
-import io.clubone.billing.security.ForbiddenException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -65,9 +64,7 @@ public class ReportingCurrencyChangeService {
             throw new IllegalArgumentException("Only PENDING changes can be approved");
         }
         UUID actor = AccessContext.actorUserId();
-        if (actor != null && row.submittedBy() != null && actor.equals(row.submittedBy())) {
-            throw new ForbiddenException("Dual-control: submitter cannot approve their own reporting currency change");
-        }
+        // Single approval is enough; submitter may approve/reject their own change.
         changeRepository.markApproved(changeId, actor);
         var current = tenantSettingsRepository.getOrCreate();
         tenantSettingsRepository.updateReportingCurrency(
@@ -85,9 +82,7 @@ public class ReportingCurrencyChangeService {
             throw new IllegalArgumentException("Only PENDING changes can be rejected");
         }
         UUID actor = AccessContext.actorUserId();
-        if (actor != null && row.submittedBy() != null && actor.equals(row.submittedBy())) {
-            throw new ForbiddenException("Dual-control: submitter cannot reject their own reporting currency change");
-        }
+        // Single approval is enough; submitter may approve/reject their own change.
         String reason = request != null ? request.reason() : null;
         changeRepository.markRejected(changeId, actor, reason);
         return changeRepository.findById(changeId)

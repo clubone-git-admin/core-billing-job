@@ -18,7 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 import java.util.UUID;
 
-@Tag(name = "Billing FX rates", description = "FX rates with dual-control approval for reporting conversion")
+@Tag(name = "Billing FX rates", description = "FX rates with single-step approval for reporting conversion")
 @RestController
 @RequestMapping("/api/v1/billing/fx-rates")
 public class BillingFxRateController {
@@ -36,19 +36,19 @@ public class BillingFxRateController {
         return ResponseEntity.ok(fxRateService.list(limit));
     }
 
-    @Operation(summary = "Submit an FX rate for dual-control approval (PENDING)")
+    @Operation(summary = "Submit an FX rate for approval (PENDING until approved)")
     @PostMapping
     public ResponseEntity<FxRateDto> submit(@RequestBody UpsertFxRateRequest request) {
         return ResponseEntity.ok(fxRateService.submit(request));
     }
 
-    @Operation(summary = "Approve a PENDING FX rate (approver must differ from submitter)")
+    @Operation(summary = "Approve a PENDING FX rate (submitter may approve)")
     @PostMapping("/{fxRateId}/approve")
     public ResponseEntity<FxRateDto> approve(@PathVariable UUID fxRateId) {
         return ResponseEntity.ok(fxRateService.approve(fxRateId));
     }
 
-    @Operation(summary = "Reject a PENDING FX rate (approver must differ from submitter)")
+    @Operation(summary = "Reject a PENDING FX rate (submitter may reject)")
     @PostMapping("/{fxRateId}/reject")
     public ResponseEntity<FxRateDto> reject(
             @PathVariable UUID fxRateId,

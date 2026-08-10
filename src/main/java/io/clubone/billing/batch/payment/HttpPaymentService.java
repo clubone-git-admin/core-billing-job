@@ -126,7 +126,7 @@ public class HttpPaymentService implements PaymentService {
 			createIntentReq.put("currency", currencyCode);
 			createIntentReq.put("paymentTypeCode", props.getPayment().getHttp().getPaymentTypeCode());
 			gatewayMidCurrencyService
-					.resolveMidForPayment(clientPaymentMethodId, currencyCode, null)
+					.resolveMidForPayment(clientPaymentMethodId, currencyCode, null, clientRoleId)
 					.ifPresent(mid -> {
 						createIntentReq.put("midCode", mid);
 						log.info("billInvoiceRecurring resolved MID for currency {}: midCode={}", currencyCode, mid);

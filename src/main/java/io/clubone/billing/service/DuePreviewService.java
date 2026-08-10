@@ -271,6 +271,7 @@ public class DuePreviewService {
 
         BigDecimal totalTaxFromRows = sumNumericColumn(invoices, "tax_amount");
         BigDecimal totalDiscountFromRows = sumNumericColumn(invoices, "discount_amount");
+        boolean mixedCurrency = Boolean.TRUE.equals(summaryJson.get("mixed_currency"));
 
         // Build run object for response
         Object totalAmountObj = summaryJson.get("total_amount");
@@ -282,8 +283,14 @@ public class DuePreviewService {
         if (summaryJson.get("failure_count") == null) {
             summaryJson.put("failure_count", 0);
         }
-        summaryJson.put("total_tax", totalTaxFromRows);
-        summaryJson.put("total_discount", totalDiscountFromRows);
+        if (mixedCurrency) {
+            summaryJson.put("total_tax", null);
+            summaryJson.put("total_discount", null);
+            summaryJson.put("total_tax_note", "Use by_currency — mixed currencies cannot be summed");
+        } else {
+            summaryJson.put("total_tax", totalTaxFromRows);
+            summaryJson.put("total_discount", totalDiscountFromRows);
+        }
 
         Map<String, Object> run = new LinkedHashMap<>();
         run.put("run_id", stageRun.stageRunId());
@@ -293,9 +300,9 @@ public class DuePreviewService {
         run.put("status_display_name", stageRun.statusDisplayName());
         run.put("filename", summaryJson.get("file_name"));
         run.put("invoices", invoicesCount);
-        run.put("totalAmount", totalAmount != null ? totalAmount : BigDecimal.ZERO);
-        run.put("totalTax", totalTaxFromRows);
-        run.put("totalDiscount", totalDiscountFromRows);
+        run.put("totalAmount", mixedCurrency ? null : (totalAmount != null ? totalAmount : BigDecimal.ZERO));
+        run.put("totalTax", mixedCurrency ? null : totalTaxFromRows);
+        run.put("totalDiscount", mixedCurrency ? null : totalDiscountFromRows);
         run.put("summary_json", summaryJson);
         putStageRunCreator(run, stageRun.stageRunId(), summaryJson);
 
@@ -505,7 +512,7 @@ public class DuePreviewService {
 
     /** Keys for invoice attributes that should always be present in get run details response. */
     private static final String[] INVOICE_ATTRIBUTE_KEYS = {
-            "role_id", "client_agreement_status", "agreement_name", "location_name",
+            "role_id", "client_agreement_status", "agreement_name", "location_name", "currency_code",
             "payment_method_name", "payment_type_name", "card_last4", "subscription_id"
     };
 
@@ -800,7 +807,9 @@ public class DuePreviewService {
         run.put("status_display_name", stageRun.statusDisplayName());
         run.put("filename", summaryJson.get("file_name"));
         run.put("invoices", summaryJson.getOrDefault("total_instances", 0));
-        run.put("totalAmount", summaryJson.getOrDefault("total_amount", BigDecimal.ZERO));
+        run.put("totalAmount", Boolean.TRUE.equals(summaryJson.get("mixed_currency"))
+                ? null
+                : summaryJson.getOrDefault("total_amount", BigDecimal.ZERO));
         run.put("totalTax", BigDecimal.ZERO);
         run.put("totalDiscount", BigDecimal.ZERO);
         run.put("summary_json", summaryJson);
@@ -846,8 +855,12 @@ public class DuePreviewService {
         run.put("invoices", summaryJson.getOrDefault("total_instances", 0));
         run.put("eligible_count", summaryJson.get("eligible_count"));
         run.put("not_eligible_count", summaryJson.get("not_eligible_count"));
-        run.put("totalAmount", summaryJson.getOrDefault("total_amount", BigDecimal.ZERO));
-        run.put("eligible_total_amount", summaryJson.get("eligible_total_amount"));
+        run.put("totalAmount", Boolean.TRUE.equals(summaryJson.get("mixed_currency"))
+                ? null
+                : summaryJson.getOrDefault("total_amount", BigDecimal.ZERO));
+        run.put("eligible_total_amount", Boolean.TRUE.equals(summaryJson.get("mixed_currency"))
+                ? null
+                : summaryJson.get("eligible_total_amount"));
         run.put("summary_json", summaryJson);
         run.put("phase", summaryJson.getOrDefault("phase", "COMPLETED"));
         run.put("progress_percent", summaryJson.getOrDefault("progress_percent", 100));
@@ -914,7 +927,7 @@ public class DuePreviewService {
                 .append("payment_due_date,start_date,last_billed_on,")
                 .append("client_role_id,role_id,client_first_name,client_last_name,client_email,")
                 .append("client_agreement_id,client_agreement_status,agreement_name,")
-                .append("location_name,")
+                .append("location_name,currency_code,")
                 .append("client_payment_method_id,payment_method_name,payment_type_name,card_last4,")
                 .append("contract_start_date,contract_end_date,")
                 .append("unit_price,effective_unit_price,price_cycle_start,price_cycle_end,")
@@ -941,6 +954,7 @@ public class DuePreviewService {
             csv.append(formatCSVValue(instance.get("client_agreement_status"))).append(",");
             csv.append(formatCSVValue(instance.get("agreement_name"))).append(",");
             csv.append(formatCSVValue(instance.get("location_name"))).append(",");
+            csv.append(formatCSVValue(instance.get("currency_code"))).append(",");
             csv.append(formatCSVValue(instance.get("client_payment_method_id"))).append(",");
             csv.append(formatCSVValue(instance.get("payment_method_name"))).append(",");
             csv.append(formatCSVValue(instance.get("payment_type_name"))).append(",");

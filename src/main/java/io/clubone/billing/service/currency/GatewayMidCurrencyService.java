@@ -70,6 +70,18 @@ public class GatewayMidCurrencyService {
         return repository.resolveMid(gw.get(), currencyCode, locationId);
     }
 
+    /**
+     * Resolve MID preferring location-scoped config for the client's home club, then currency-only.
+     */
+    public Optional<String> resolveMidForPayment(UUID clientPaymentMethodId, String currencyCode, UUID locationIdHint,
+            UUID clientRoleId) {
+        UUID locationId = locationIdHint;
+        if (locationId == null && clientRoleId != null) {
+            locationId = repository.findLocationIdForClientRole(clientRoleId).orElse(null);
+        }
+        return resolveMidForPayment(clientPaymentMethodId, currencyCode, locationId);
+    }
+
     private GatewayMidCurrencyDto toDto(GatewayMidRow row) {
         return new GatewayMidCurrencyDto(
                 row.gatewayMidCurrencyId(),

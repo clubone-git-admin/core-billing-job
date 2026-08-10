@@ -7,6 +7,7 @@ import io.clubone.billing.repo.DuePreviewRepository;
 import io.clubone.billing.repo.SnapshotRepository;
 import io.clubone.billing.repo.StageRunRepository;
 import io.clubone.billing.service.S3Service;
+import io.clubone.billing.service.currency.CurrencySummaryAccumulator;
 import io.clubone.billing.service.schedule.StageRunLeaseHeartbeat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -152,6 +153,7 @@ public class DuePreviewJobRunner {
             int pageIndex = 0;
             BigDecimal totalAmount = BigDecimal.ZERO;
             BigDecimal eligibleTotalAmount = BigDecimal.ZERO;
+            CurrencySummaryAccumulator currencySummary = new CurrencySummaryAccumulator();
             UUID afterBillingScheduleId = null;
 
             try (BufferedWriter writer = Files.newBufferedWriter(tempCsv, StandardCharsets.UTF_8)) {
@@ -185,14 +187,23 @@ public class DuePreviewJobRunner {
 
                         UUID subscriptionInstanceId = row.get("subscription_instance_id") instanceof UUID u ? u : null;
                         BigDecimal rowTotal = row.get("total_amount") instanceof BigDecimal bd ? bd : BigDecimal.ZERO;
+                        String currencyCode = row.get("currency_code") != null
+                                ? row.get("currency_code").toString()
+                                : null;
                         totalAmount = totalAmount.add(rowTotal);
+                        currencySummary.addAmount(currencyCode, "total_amount", rowTotal);
+                        currencySummary.addCount(currencyCode, "total_count", 1);
 
                         boolean eligible = subscriptionInstanceId != null && pageEligibleIds.contains(subscriptionInstanceId);
                         if (eligible) {
                             eligibleCount++;
                             eligibleTotalAmount = eligibleTotalAmount.add(rowTotal);
+                            currencySummary.addAmount(currencyCode, "eligible_total_amount", rowTotal);
+                            currencySummary.addCount(currencyCode, "eligible_count", 1);
                         } else {
                             notEligibleCount++;
+                            currencySummary.addAmount(currencyCode, "not_eligible_total_amount", rowTotal);
+                            currencySummary.addCount(currencyCode, "not_eligible_count", 1);
                         }
 
                         writeCsvRow(writer, row, eligible);
@@ -243,6 +254,12 @@ public class DuePreviewJobRunner {
             summaryJson.put("not_eligible_count", notEligibleCount);
             summaryJson.put("total_amount", totalAmount);
             summaryJson.put("eligible_total_amount", eligibleTotalAmount);
+            currencySummary.mergeInto(summaryJson);
+            if (Boolean.TRUE.equals(summaryJson.get("mixed_currency"))) {
+                summaryJson.put("total_amount", null);
+                summaryJson.put("eligible_total_amount", null);
+                summaryJson.put("total_amount_note", "Use by_currency — mixed currencies cannot be summed");
+            }
             summaryJson.put("generated_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
             summaryJson.put("phase", "COMPLETED");
             summaryJson.put("progress_percent", 100);
@@ -317,7 +334,7 @@ public class DuePreviewJobRunner {
         writer.write("payment_due_date,start_date,last_billed_on,");
         writer.write("client_role_id,role_id,client_first_name,client_last_name,client_email,");
         writer.write("client_agreement_id,client_agreement_status,agreement_name,");
-        writer.write("location_name,");
+        writer.write("location_name,currency_code,");
         writer.write("client_payment_method_id,payment_method_name,payment_type_name,card_last4,");
         writer.write("contract_start_date,contract_end_date,");
         writer.write("unit_price,effective_unit_price,price_cycle_start,price_cycle_end,");
@@ -362,6 +379,8 @@ public class DuePreviewJobRunner {
         writer.write(csv(instance.get("agreement_name")));
         writer.write(',');
         writer.write(csv(instance.get("location_name")));
+        writer.write(',');
+        writer.write(csv(instance.get("currency_code")));
         writer.write(',');
         writer.write(csv(instance.get("client_payment_method_id")));
         writer.write(',');

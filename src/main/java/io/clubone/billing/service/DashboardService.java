@@ -7,12 +7,15 @@ import io.clubone.billing.dashboard.DashboardApiConstants;
 import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.CrmDashboardRepository;
 import io.clubone.billing.repo.DashboardRepository;
+import io.clubone.billing.repo.FxRateRepository;
 import io.clubone.billing.repo.LocationLevelRepository;
 import io.clubone.billing.security.AccessContext;
 import io.clubone.billing.service.currency.BillingTenantSettingsService;
 import io.clubone.billing.util.BillingReadExecutors;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -37,6 +40,8 @@ public class DashboardService {
     private final CrmDashboardRepository crmDashboardRepository;
     private final BillingReadExecutors readExecutors;
     private final BillingTenantSettingsService tenantSettingsService;
+    private final FxRateRepository fxRateRepository;
+    private final JdbcTemplate jdbc;
     private static final Set<String> ALLOWED_SEGMENTS = Set.of("7D", "30D", "MTD", "YTD");
 
     /** Short TTL — overview is analytical; repeat loads within 60s hit memory. */
@@ -52,13 +57,17 @@ public class DashboardService {
             BillingRunRepository billingRunRepository,
             CrmDashboardRepository crmDashboardRepository,
             BillingReadExecutors readExecutors,
-            BillingTenantSettingsService tenantSettingsService) {
+            BillingTenantSettingsService tenantSettingsService,
+            FxRateRepository fxRateRepository,
+            @Qualifier("cluboneJdbcTemplate") JdbcTemplate jdbc) {
         this.dashboardRepository = dashboardRepository;
         this.locationLevelRepository = locationLevelRepository;
         this.billingRunRepository = billingRunRepository;
         this.crmDashboardRepository = crmDashboardRepository;
         this.readExecutors = readExecutors;
         this.tenantSettingsService = tenantSettingsService;
+        this.fxRateRepository = fxRateRepository;
+        this.jdbc = jdbc;
     }
 
     public DashboardKPIDto getKPIs(UUID locationId, String dateRange) {
@@ -489,7 +498,122 @@ public class DashboardService {
         out.put("recent_runs", recentRuns);
         stampReportingCurrency(out);
         stampReportingCurrency(summary);
+        stampFxCoverageValidation(summary);
+        out.put("fx_validation", summary.get("fx_validation"));
         return out;
+    }
+
+    /**
+     * Location currencies that match reporting need no FX. Any other currency without an
+     * approved rate to/from reporting is surfaced so the UI can fail closed.
+     */
+    private void stampFxCoverageValidation(Map<String, Object> summary) {
+        if (summary == null) {
+            return;
+        }
+        String reporting = tenantSettingsService.getReportingCurrencyCode();
+        List<Map<String, Object>> locationRows = listActiveLocationsWithCurrency();
+        LinkedHashSet<String> present = new LinkedHashSet<>();
+        Map<String, List<String>> locationsByCurrency = new LinkedHashMap<>();
+        for (Map<String, Object> row : locationRows) {
+            String ccy = String.valueOf(row.getOrDefault("currency_code", "")).trim().toUpperCase(Locale.ROOT);
+            String name = String.valueOf(row.getOrDefault("location_name", "")).trim();
+            if (ccy.length() != 3) {
+                continue;
+            }
+            present.add(ccy);
+            locationsByCurrency
+                    .computeIfAbsent(ccy, k -> new ArrayList<>())
+                    .add(name.isEmpty() ? "(unnamed location)" : name);
+        }
+
+        List<String> missing = new ArrayList<>();
+        Map<String, List<String>> missingLocations = new LinkedHashMap<>();
+        Instant asOf = Instant.now();
+        if (reporting != null && !reporting.isBlank()) {
+            String rep = reporting.trim().toUpperCase(Locale.ROOT);
+            for (String ccy : present) {
+                if (ccy.equals(rep)) {
+                    continue;
+                }
+                boolean hasDirect = fxRateRepository.findActiveAsOf(ccy, rep, asOf).isPresent();
+                boolean hasInverse = !hasDirect
+                        && fxRateRepository.findActiveAsOf(rep, ccy, asOf).isPresent();
+                if (!hasDirect && !hasInverse) {
+                    missing.add(ccy);
+                    missingLocations.put(ccy, locationsByCurrency.getOrDefault(ccy, List.of()));
+                }
+            }
+        }
+
+        String message = null;
+        if (!missing.isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("Cannot consolidate billing amounts to reporting ")
+                    .append(reporting)
+                    .append(": missing approved FX for ");
+            for (int i = 0; i < missing.size(); i++) {
+                String ccy = missing.get(i);
+                List<String> names = missingLocations.getOrDefault(ccy, List.of());
+                if (i > 0) {
+                    sb.append("; ");
+                }
+                sb.append(ccy).append(" (");
+                if (names.isEmpty()) {
+                    sb.append("unknown locations");
+                } else if (names.size() <= 4) {
+                    sb.append(String.join(", ", names));
+                } else {
+                    sb.append(String.join(", ", names.subList(0, 4)))
+                            .append(" +")
+                            .append(names.size() - 4)
+                            .append(" more");
+                }
+                sb.append(')');
+            }
+            sb.append(". Same-currency (e.g. USD→USD) needs no rate — add and approve FX under Billing Settings → Multi-currency → FX rates.");
+            message = sb.toString();
+        }
+
+        Map<String, Object> fx = new LinkedHashMap<>();
+        fx.put("reportingCurrencyCode", reporting);
+        fx.put("locationCurrencies", new ArrayList<>(present));
+        fx.put("missingFxCurrencies", missing);
+        fx.put("missingFxLocationsByCurrency", missingLocations);
+        fx.put("ok", missing.isEmpty() && reporting != null && !reporting.isBlank());
+        if (message != null) {
+            fx.put("message", message);
+        }
+        summary.put("currencies", new ArrayList<>(present));
+        summary.put("mixed_currency", present.size() > 1);
+        summary.put("fx_validation", fx);
+        summary.put("fx_missing_currencies", missing);
+    }
+
+    private List<Map<String, Object>> listActiveLocationsWithCurrency() {
+        try {
+            return jdbc.query(
+                    """
+                    SELECT
+                      upper(trim(c.currency_code)) AS currency_code,
+                      coalesce(nullif(trim(loc.display_name), ''), loc.location_id::text) AS location_name
+                    FROM locations.location loc
+                    JOIN locations.lu_currency c ON c.currency_id = loc.currency_id
+                    WHERE loc.application_id = ?::uuid
+                      AND c.currency_code IS NOT NULL
+                      AND length(trim(c.currency_code)) = 3
+                    ORDER BY currency_code, location_name
+                    """,
+                    (rs, rn) -> {
+                        Map<String, Object> m = new LinkedHashMap<>();
+                        m.put("currency_code", rs.getString("currency_code"));
+                        m.put("location_name", rs.getString("location_name"));
+                        return m;
+                    },
+                    AccessContext.applicationId().toString());
+        } catch (Exception ex) {
+            return List.of();
+        }
     }
 
     private Map<String, Object> buildCharts(

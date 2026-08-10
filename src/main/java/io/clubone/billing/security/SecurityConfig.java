@@ -100,6 +100,9 @@ public class SecurityConfig {
         "http://127.0.0.1:*",
         "http://[::1]:*",
         "https://ops.clubone.io",
+        "https://uat.ops.clubone.io",
+        "https://uat.scheduling.clubone.io",
+        "https://uat.join.clubone.io",
         "https://*.clubone.io"));
     cfg.setAllowCredentials(true);
     cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
