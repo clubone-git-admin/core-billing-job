@@ -13,7 +13,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.core.ParameterizedTypeReference;
@@ -368,12 +367,24 @@ public class HttpPaymentService implements PaymentService {
 
 		log.debug("HttpPaymentService {} REQ: url={} body={}", callName, url, body);
 
-		HttpHeaders headers = new HttpHeaders();
-		headers.setContentType(MediaType.APPLICATION_JSON);
+		HttpHeaders headers = paymentTenantHeaders();
 		HttpEntity<Map<String, Object>> req = new HttpEntity<>(body, headers);
 
-		ResponseEntity<Map<String, Object>> resp = rt.exchange(url, HttpMethod.POST, req,
-				new ParameterizedTypeReference<Map<String, Object>>() {});
+		ResponseEntity<Map<String, Object>> resp;
+		try {
+			resp = rt.exchange(url, HttpMethod.POST, req,
+					new ParameterizedTypeReference<Map<String, Object>>() {});
+		} catch (org.springframework.web.client.HttpStatusCodeException httpEx) {
+			// Surface payment-service body (e.g. missing X-Actor-Id) instead of opaque status only.
+			String respText = httpEx.getResponseBodyAsString();
+			log.error("HttpPaymentService {} failed: url={} statusCode={} body={}",
+					callName, url, httpEx.getStatusCode().value(), respText);
+			throw new IllegalStateException(
+					httpEx.getStatusCode().value() + " : " + (respText == null || respText.isBlank()
+							? httpEx.getMessage()
+							: respText),
+					httpEx);
+		}
 		int statusCode = resp.getStatusCode().value();
 		Map<String, Object> respBody = resp.getBody();
 
@@ -393,5 +404,42 @@ public class HttpPaymentService implements PaymentService {
 			throw new IllegalStateException("POST failed " + resp.getStatusCode() + " url=" + url);
 		}
 		return respBody;
+	}
+
+	/**
+	 * Payment-service requires X-Actor-Id / X-Location-Id / application-id.
+	 * Prefer the request/job {@link io.clubone.billing.security.TenantContext}; fall back to configured actorId.
+	 */
+	private HttpHeaders paymentTenantHeaders() {
+		io.clubone.billing.security.TenantContext ctx = io.clubone.billing.security.TenantContext.get();
+		if (ctx != null
+				&& ctx.applicationUserId() != null
+				&& !io.clubone.billing.security.ExternalAuth.SYNTHETIC_NIL.equals(ctx.applicationUserId())
+				&& ctx.workingLocation() != null
+				&& ctx.applicationId() != null) {
+			return io.clubone.billing.security.TenantHttpHeaders.fromContext();
+		}
+
+		UUID actorId;
+		try {
+			actorId = UUID.fromString(props.getPayment().getHttp().getActorId());
+		} catch (Exception e) {
+			actorId = io.clubone.billing.security.ExternalAuth.SYNTHETIC_NIL;
+		}
+		UUID locationId = ctx != null && ctx.workingLocation() != null
+				? ctx.workingLocation()
+				: io.clubone.billing.security.ExternalAuth.SYNTHETIC_NIL;
+		UUID applicationId = ctx != null && ctx.applicationId() != null
+				? ctx.applicationId()
+				: io.clubone.billing.security.ExternalAuth.SYNTHETIC_NIL;
+
+		if (io.clubone.billing.security.ExternalAuth.SYNTHETIC_NIL.equals(actorId)
+				|| io.clubone.billing.security.ExternalAuth.SYNTHETIC_NIL.equals(locationId)
+				|| io.clubone.billing.security.ExternalAuth.SYNTHETIC_NIL.equals(applicationId)) {
+			log.warn(
+					"Payment outbound headers incomplete actor={} location={} applicationId={} — payment-service may reject",
+					actorId, locationId, applicationId);
+		}
+		return io.clubone.billing.security.TenantHttpHeaders.from(actorId, locationId, applicationId);
 	}
 }

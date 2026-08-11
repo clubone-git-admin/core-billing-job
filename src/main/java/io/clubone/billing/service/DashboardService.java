@@ -571,7 +571,9 @@ public class DashboardService {
                 }
                 sb.append(')');
             }
-            sb.append(". Same-currency (e.g. USD→USD) needs no rate — add and approve FX under Billing Settings → Multi-currency → FX rates.");
+            // ASCII separators only — avoid UTF-8 mojibake (e.g. em-dash -> "â")
+            // when proxies/gateways mis-declare response charset.
+            sb.append(". Same-currency (e.g. USD->USD) needs no rate - add and approve FX under Billing Settings > Multi-currency > FX rates.");
             message = sb.toString();
         }
 

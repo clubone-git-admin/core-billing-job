@@ -36,6 +36,7 @@ public class StageRunRepository {
     /**
      * Auth-free lookup for async/batch workers: resolve application + location from the stage run row
      * (no {@link AccessContext} / request ThreadLocal required).
+     * Prefers a real {@code access_application_user} so outbound payment calls can send {@code X-Actor-Id}.
      *
      * @return background {@link io.clubone.billing.security.TenantContext}, or null if stage run missing
      */
@@ -45,16 +46,31 @@ public class StageRunRepository {
         }
         List<TenantContext> rows = jdbc.query(
                 """
-                SELECT bsr.application_id, br.location_id
+                SELECT bsr.application_id,
+                       br.location_id,
+                       (
+                         SELECT aau.application_user_id
+                         FROM access.access_application_user aau
+                         WHERE aau.application_id = bsr.application_id
+                           AND COALESCE(aau.is_active, true) = true
+                         ORDER BY aau.application_user_id
+                         LIMIT 1
+                       ) AS system_actor_id
                 FROM client_subscription_billing.billing_stage_run bsr
                 JOIN client_subscription_billing.billing_run br
                   ON br.billing_run_id = bsr.billing_run_id
                 WHERE bsr.stage_run_id = ?::uuid
                 LIMIT 1
                 """,
-                (rs, i) -> TenantContexts.forBackgroundJob(
-                        (UUID) rs.getObject("application_id"),
-                        (UUID) rs.getObject("location_id")),
+                (rs, i) -> {
+                    UUID applicationId = (UUID) rs.getObject("application_id");
+                    UUID locationId = (UUID) rs.getObject("location_id");
+                    UUID systemActorId = (UUID) rs.getObject("system_actor_id");
+                    if (systemActorId != null) {
+                        return TenantContexts.forBackgroundJob(applicationId, locationId, systemActorId);
+                    }
+                    return TenantContexts.forBackgroundJob(applicationId, locationId);
+                },
                 stageRunId.toString());
         return rows.isEmpty() ? null : rows.get(0);
     }

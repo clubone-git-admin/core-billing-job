@@ -5,3 +5,13 @@ spring:
       url: jdbc:postgresql://clubone-free-tier-db.cju8eqswasju.us-east-1.rds.amazonaws.com:5432/clubone_uat
       username: clubone_dev_user
       password: C1ub0ne@2024!
+
+# UAT API host (parallel to develop-api.clubone.io).
+clubone:
+  billing:
+    payment:
+      http:
+        base-url: https://uat.api.clubone.io
+        txn-base-url: https://uat.api.clubone.io
+  notification:
+    base-url: https://uat.api.clubone.io

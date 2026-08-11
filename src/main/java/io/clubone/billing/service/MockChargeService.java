@@ -658,10 +658,26 @@ public class MockChargeService {
         if (eligibleAmt == null) {
             eligibleAmt = BigDecimal.ZERO;
         }
+        boolean mixedCurrency = Boolean.TRUE.equals(sj.get("mixed_currency"))
+                || Boolean.TRUE.equals(sj.get("mixedCurrency"));
+        // Mixed-currency runs intentionally omit a single eligible_amount (null → 0).
+        // Confirm counts only; do not require FE to echo a cross-currency sum.
+        boolean amountMatches = mixedCurrency
+                || request.confirmEligibleAmount()
+                        .setScale(2, java.math.RoundingMode.HALF_UP)
+                        .compareTo(eligibleAmt.setScale(2, java.math.RoundingMode.HALF_UP)) == 0;
         if (request.confirmEligibleCount() != eligible
                 || request.confirmBlockedCount() != blocked
-                || request.confirmEligibleAmount().compareTo(eligibleAmt) != 0) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Confirmation counts do not match latest mock charge summary");
+                || !amountMatches) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Confirmation counts do not match latest mock charge summary"
+                            + " (expected eligibleCount=" + eligible
+                            + ", blockedCount=" + blocked
+                            + ", eligibleAmount=" + (mixedCurrency ? "n/a (mixed currency)" : eligibleAmt.toPlainString())
+                            + "; got eligibleCount=" + request.confirmEligibleCount()
+                            + ", blockedCount=" + request.confirmBlockedCount()
+                            + ", eligibleAmount=" + request.confirmEligibleAmount().toPlainString() + ")");
         }
         closeOtherOpenMockChargeRunsExcept(billingRunId, stage.stageRunId(), request.requestedBy(), true);
         Map<String, Object> m = new HashMap<>(sj);

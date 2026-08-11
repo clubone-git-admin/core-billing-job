@@ -84,7 +84,7 @@ public class ScheduledStageDispatchService {
             }
             if ("ACTUAL_CHARGE".equals(code)) {
                 applicationEventPublisher.publishEvent(
-                        new ActualChargeQueuedEvent(stage.stageRunId(), stage.billingRunId()));
+                        new ActualChargeQueuedEvent(stage.stageRunId(), stage.billingRunId(), ctx));
                 return;
             }
             log.warn("scheduled-stage dispatch: unexpected stage_code={} stageRunId={}",

@@ -126,7 +126,11 @@ public class ActualChargeJobRunner {
                 s.billingRunId(),
                 st,
                 s.summaryJson() != null ? s.summaryJson().keySet() : null);
-        if ("COMPLETED".equals(st) || "FAILED".equals(st) || "CANCELLED".equals(st)) {
+        if ("COMPLETED".equals(st)
+                || "COMPLETED_WITH_ERRORS".equals(st)
+                || "PARTIALLY_COMPLETED".equals(st)
+                || "FAILED".equals(st)
+                || "CANCELLED".equals(st)) {
             log.info("actual-charge job: skipped (terminal) stageRunId={} status={}", stageRunId, st);
             return;
         }
@@ -589,7 +593,21 @@ public class ActualChargeJobRunner {
                     pendingKpi.pendingAgeP95Seconds());
         }
         stageRunRepository.mergeStageRunSummaryJson(stageRunId, merged, false);
-        stageRunRepository.completeStageRun(stageRunId, merged);
+        String terminalStatus = failed > 0 ? "COMPLETED_WITH_ERRORS" : "COMPLETED";
+        if (!stageRunRepository.tryFinishStageRun(stageRunId, terminalStatus, merged)) {
+            log.warn(
+                    "actual-charge job: status_code={} missing from billing_config.stage_run_status; falling back to COMPLETED stageRunId={}",
+                    terminalStatus,
+                    stageRunId);
+            stageRunRepository.completeStageRun(stageRunId, merged);
+        } else {
+            log.info(
+                    "actual-charge job: finished with statusCode={} stageRunId={} billingRunId={} failedCount={}",
+                    terminalStatus,
+                    stageRunId,
+                    billingRunId,
+                    failed);
+        }
         advancePipelineAfterActualCharge(billingRunId);
 
         log.info(

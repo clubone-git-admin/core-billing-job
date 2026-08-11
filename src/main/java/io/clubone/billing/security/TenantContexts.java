@@ -15,17 +15,24 @@ public final class TenantContexts {
 
   /**
    * Minimal tenant for background work scoped by {@code applicationId} + location.
-   * Does not represent a real actor — sufficient for {@link AccessContext#applicationId()}.
+   * Uses a synthetic actor unless {@link #forBackgroundJob(UUID, UUID, UUID)} provides a real one.
    */
   public static TenantContext forBackgroundJob(UUID applicationId, UUID workingLocation) {
+    return forBackgroundJob(applicationId, workingLocation, ExternalAuth.SYNTHETIC_NIL);
+  }
+
+  /**
+   * Background tenant with an explicit actor (e.g. first active app user) for outbound service headers.
+   */
+  public static TenantContext forBackgroundJob(UUID applicationId, UUID workingLocation, UUID applicationUserId) {
     UUID app = require(applicationId, "applicationId");
     UUID loc = workingLocation != null ? workingLocation : ExternalAuth.SYNTHETIC_NIL;
-    UUID system = ExternalAuth.SYNTHETIC_NIL;
+    UUID actor = applicationUserId != null ? applicationUserId : ExternalAuth.SYNTHETIC_NIL;
     return new TenantContext(
-        system,
-        system,
+        actor,
+        actor,
         app,
-        system,
+        actor,
         true,
         true,
         List.of("SYSTEM"),

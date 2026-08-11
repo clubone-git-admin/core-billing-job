@@ -1,5 +1,7 @@
 package io.clubone.billing.repo;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.clubone.billing.api.dto.DuePreviewRunHistoryDto;
 import io.clubone.billing.security.AccessContext;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -16,6 +18,10 @@ import java.util.*;
  */
 @Repository
 public class DuePreviewRepository {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
+    private static final TypeReference<Map<String, Object>> OBJECT_MAP = new TypeReference<>() {};
 
     private final JdbcTemplate jdbc;
 
@@ -529,6 +535,9 @@ public class DuePreviewRepository {
                      WHEN COALESCE((bsr.summary_json->>'mixed_currency')::boolean, false) THEN NULL
                      ELSE (bsr.summary_json->>'total_amount')::numeric
                    END AS total_amount,
+                   COALESCE((bsr.summary_json->>'mixed_currency')::boolean, false) AS mixed_currency,
+                   (bsr.summary_json->'currencies')::text AS currencies_json,
+                   (bsr.summary_json->'by_currency')::text AS by_currency_json,
                    (ap.status_code = 'APPROVED') AS is_mark_ready
             FROM client_subscription_billing.billing_stage_run bsr
             JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = bsr.stage_code_id
@@ -562,8 +571,35 @@ public class DuePreviewRepository {
             if (rs.wasNull()) {
                 isMarkReady = null;
             }
-            return new DuePreviewRunHistoryDto(runId, runCode, generatedAt, status, filename, invoices, totalAmount, isMarkReady);
+            boolean mixedCurrency = rs.getBoolean("mixed_currency");
+            List<String> currencies = parseStringList(rs.getString("currencies_json"));
+            Map<String, Object> byCurrency = parseObjectMap(rs.getString("by_currency_json"));
+            return new DuePreviewRunHistoryDto(
+                    runId, runCode, generatedAt, status, filename, invoices, totalAmount, isMarkReady,
+                    mixedCurrency, currencies, byCurrency);
         }, args.toArray());
+    }
+
+    private static List<String> parseStringList(String json) {
+        if (json == null || json.isBlank() || "null".equalsIgnoreCase(json.trim())) {
+            return null;
+        }
+        try {
+            return JSON.readValue(json, STRING_LIST);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static Map<String, Object> parseObjectMap(String json) {
+        if (json == null || json.isBlank() || "null".equalsIgnoreCase(json.trim())) {
+            return null;
+        }
+        try {
+            return JSON.readValue(json, OBJECT_MAP);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**

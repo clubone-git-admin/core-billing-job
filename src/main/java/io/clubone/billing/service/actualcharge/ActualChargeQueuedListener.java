@@ -50,10 +50,10 @@ public class ActualChargeQueuedListener {
                     thread,
                     billingRunId,
                     stageRunId);
-            // Reclaim path (StaleStageRunReclaimService) runs on a scheduler thread — the async task decorator
-            // captures TenantContext at submit time, but fall back to a DB-resolved background tenant if it's
-            // missing (e.g. direct invocation without a request/reclaim TenantContext already set).
-            TenantContext ctx = TenantContext.get();
+            TenantContext ctx = event.tenantContext();
+            if (ctx == null) {
+                ctx = TenantContext.get();
+            }
             if (ctx == null) {
                 ctx = stageRunRepository.resolveBackgroundTenant(stageRunId);
             }

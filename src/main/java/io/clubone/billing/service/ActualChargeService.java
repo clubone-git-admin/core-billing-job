@@ -118,6 +118,7 @@ public class ActualChargeService {
         String status = target.statusCode();
 
         if (("COMPLETED".equals(status)
+                        || "COMPLETED_WITH_ERRORS".equals(status)
                         || "PARTIALLY_COMPLETED".equals(status)
                         || "PARTIAL".equals(status))
                 && !regenerateAll
@@ -146,7 +147,7 @@ public class ActualChargeService {
             if (idempotencyKey != null && !idempotencyKey.isBlank()) {
                 stageRunRepository.updateIdempotencyKey(target.stageRunId(), idempotencyKey.trim());
             }
-            applicationEventPublisher.publishEvent(new ActualChargeQueuedEvent(target.stageRunId(), billingRunId));
+            applicationEventPublisher.publishEvent(ActualChargeQueuedEvent.of(target.stageRunId(), billingRunId));
             return new ActualChargeCommandResult(
                     toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
                     ActualChargeStartHttpStatus.OK_200);
@@ -161,7 +162,7 @@ public class ActualChargeService {
             if (idempotencyKey != null && !idempotencyKey.isBlank()) {
                 stageRunRepository.updateIdempotencyKey(target.stageRunId(), idempotencyKey.trim());
             }
-            applicationEventPublisher.publishEvent(new ActualChargeQueuedEvent(target.stageRunId(), billingRunId));
+            applicationEventPublisher.publishEvent(ActualChargeQueuedEvent.of(target.stageRunId(), billingRunId));
             return new ActualChargeCommandResult(
                     toRunResponse(stageRunRepository.findById(target.stageRunId()), billingRun),
                     ActualChargeStartHttpStatus.OK_200);
@@ -169,7 +170,7 @@ public class ActualChargeService {
         if ("COMPLETED".equals(status) && regenerateAll) {
             return startNewExecution(billingRunId, request, idempotencyKey, billingRun);
         }
-        if ("FAILED".equals(status) || "CANCELLED".equals(status)) {
+        if ("FAILED".equals(status) || "CANCELLED".equals(status) || "COMPLETED_WITH_ERRORS".equals(status)) {
             return startNewExecution(billingRunId, request, idempotencyKey, billingRun);
         }
         if ("IDLE".equals(status) && regenerateAll) {
@@ -243,7 +244,7 @@ public class ActualChargeService {
                 queued,
                 pending,
                 stageRunId);
-        applicationEventPublisher.publishEvent(new ActualChargeQueuedEvent(stageRunId, billingRun.billingRunId()));
+        applicationEventPublisher.publishEvent(ActualChargeQueuedEvent.of(stageRunId, billingRun.billingRunId()));
         auditLogRepository.insertAuditLog(
                 "ACTUAL_CHARGE",
                 "BILLING_RUN",
@@ -744,9 +745,10 @@ public class ActualChargeService {
                         "Cannot schedule while actual charge is " + st);
             }
             if ("IDLE".equals(st) || "PENDING".equals(st) || "SCHEDULED".equals(st)
-                    || "FAILED".equals(st) || "CANCELLED".equals(st) || "WAITING".equals(st)) {
+                    || "FAILED".equals(st) || "CANCELLED".equals(st) || "WAITING".equals(st)
+                    || "COMPLETED_WITH_ERRORS".equals(st)) {
                 stageRunId = existing.stageRunId();
-                if ("FAILED".equals(st) || "CANCELLED".equals(st)) {
+                if ("FAILED".equals(st) || "CANCELLED".equals(st) || "COMPLETED_WITH_ERRORS".equals(st)) {
                     stageRunRepository.prepareStageRunForReschedule(stageRunId, when);
                 } else {
                     stageRunRepository.updateScheduledFor(stageRunId, when);
