@@ -1626,21 +1626,44 @@ public class BillingReportingRepository {
                         buildSbhParamsNoPaging(from, to, locationIds).toArray());
             }
             if ("revenue".equalsIgnoreCase(metric) || metric == null) {
+                String money =
+                        BillingReportSql.reportingMoney(
+                                "la.amount_reporting",
+                                "la.invoice_total_amount",
+                                "COALESCE(la.inv_currency_code::text, la.currency_code::text)",
+                                "(SELECT brx.application_id FROM client_subscription_billing.billing_run brx WHERE brx.billing_run_id = la.billing_run_id)",
+                                "COALESCE(la.fx_as_of, la.billing_attempt_on, NOW())");
                 return jdbc.queryForList(
-                        "SELECT loc.name AS group_label, loc.location_id, "
-                                + "COALESCE(SUM(sbh.invoice_total_amount),0) AS value "
-                                + "FROM client_subscription_billing.subscription_billing_history sbh "
-                                + "JOIN client_subscription_billing.billing_run br "
-                                + "  ON br.billing_run_id = sbh.billing_run_id "
-                                + "LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id "
-                                + "LEFT JOIN client_agreements.client_agreement ca "
-                                + "  ON ca.client_agreement_id = i.client_agreement_id AND COALESCE(ca.is_active, true) = true "
-                                + "LEFT JOIN clients.client_role cr "
-                                + "  ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
-                                + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
-                                + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
+                        "WITH latest_attempt AS ( "
+                                + "  SELECT * FROM ( "
+                                + "    SELECT sbh.billing_run_id, sbh.invoice_id, sbh.invoice_total_amount, "
+                                + "      sbh.currency_code, sbh.billing_attempt_on, "
+                                + "      i.amount_reporting, i.currency_code AS inv_currency_code, i.fx_as_of, "
+                                + "      cr.location_id AS role_location_id, "
+                                + "      ROW_NUMBER() OVER ( "
+                                + "        PARTITION BY COALESCE(CAST(sbh.invoice_id AS TEXT), CAST(sbh.subscription_instance_id AS TEXT)) "
+                                + "        ORDER BY sbh.billing_attempt_on DESC NULLS LAST, sbh.created_on DESC NULLS LAST, "
+                                + "                 sbh.subscription_billing_history_id DESC) AS rn "
+                                + "    FROM client_subscription_billing.subscription_billing_history sbh "
+                                + "    JOIN client_subscription_billing.billing_run br ON br.billing_run_id = sbh.billing_run_id "
+                                + "    LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id "
+                                + "    LEFT JOIN client_agreements.client_agreement ca "
+                                + "      ON ca.client_agreement_id = i.client_agreement_id AND COALESCE(ca.is_active, true) = true "
+                                + "    LEFT JOIN clients.client_role cr "
+                                + "      ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
+                                + "    LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
+                                + "    WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
                                 + whereTenantAndLocation("sbh", "loc", locationIds)
-                                + " GROUP BY loc.name, loc.location_id ORDER BY 1",
+                                + "      AND COALESCE(sbh.is_mock, false) = false "
+                                + "  ) t WHERE rn = 1 "
+                                + ") "
+                                + "SELECT loc.name AS group_label, loc.location_id, "
+                                + "COALESCE(SUM("
+                                + money
+                                + "),0) AS value "
+                                + "FROM latest_attempt la "
+                                + "LEFT JOIN locations.location loc ON loc.location_id = la.role_location_id "
+                                + "GROUP BY loc.name, loc.location_id ORDER BY 1",
                         buildSbhParamsNoPaging(from, to, locationIds).toArray());
             }
         }
@@ -1669,26 +1692,11 @@ public class BillingReportingRepository {
             if (success) {
                 // Dual series: value = billed, value2 = collected (for _DualLineChart)
                 return jdbc.queryForList(
-                        "SELECT date_trunc(?, br.due_date::timestamp) AS period_start, "
-                                + "COALESCE(SUM(sbh.invoice_total_amount),0) AS value, "
-                                + "COALESCE(SUM(CASE WHEN s.is_success = true THEN sbh.invoice_total_amount ELSE 0 END),0) AS value2 "
-                                + "FROM client_subscription_billing.billing_run br "
-                                + "JOIN client_subscription_billing.subscription_billing_history sbh "
-                                + "  ON sbh.billing_run_id = br.billing_run_id "
-                                + "JOIN billing_config.billing_status s ON s.billing_status_id = sbh.billing_status_id "
-                                + "LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id "
-                                + "LEFT JOIN client_agreements.client_agreement ca "
-                                + "  ON ca.client_agreement_id = i.client_agreement_id AND COALESCE(ca.is_active, true) = true "
-                                + "LEFT JOIN clients.client_role cr "
-                                + "  ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
-                                + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
-                                + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                                + whereTenantAndLocation("sbh", "loc", locationIds)
-                                + " GROUP BY 1 ORDER BY 1",
-                        buildMetricParams(tr, from, to, locationIds).toArray());
+                        revenueSeriesSql(tr, locationIds),
+                        buildRevenueSeriesParams(tr, from, to, locationIds).toArray());
             }
             return jdbc.queryForList(
-                    "SELECT date_trunc(?, br.due_date::timestamp) AS period_start, "
+                    "SELECT date_trunc(?, (br.due_date::timestamp AT TIME ZONE 'UTC')) AS period_start, "
                             + "100.0 * COALESCE("
                             + "SUM(CASE WHEN s.is_failure = true THEN 1.0 END) / NULLIF("
                             + "COUNT(sbh.subscription_billing_history_id),0),0) AS value "
@@ -1711,7 +1719,7 @@ public class BillingReportingRepository {
             if ("outstanding".equalsIgnoreCase(metric)) {
                 return jdbc.queryForList(
                         "SELECT date_trunc(?, i.created_on) AS period_start, "
-                                + "COALESCE(SUM(i.total_amount),0) AS value "
+                                + "COALESCE(SUM(COALESCE(i.amount_reporting, i.total_amount, 0)),0) AS value "
                                 + "FROM transactions.invoice i "
                                 + "JOIN client_subscription_billing.billing_run br ON br.billing_run_id = i.billing_run_id "
                                 + "LEFT JOIN transactions.lu_invoice_status invs "
@@ -1729,23 +1737,67 @@ public class BillingReportingRepository {
             }
         }
         return jdbc.queryForList(
-                "SELECT date_trunc(?, br.due_date::timestamp) AS period_start, "
-                        + "COALESCE(SUM(sbh.invoice_total_amount),0) AS value, "
-                        + "COALESCE(SUM(CASE WHEN s.is_success = true THEN sbh.invoice_total_amount ELSE 0 END),0) AS value2 "
-                        + "FROM client_subscription_billing.billing_run br "
-                        + "LEFT JOIN client_subscription_billing.subscription_billing_history sbh "
-                        + "  ON sbh.billing_run_id = br.billing_run_id "
-                        + "LEFT JOIN billing_config.billing_status s ON s.billing_status_id = sbh.billing_status_id "
-                        + "LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id "
-                        + "LEFT JOIN client_agreements.client_agreement ca "
-                        + "  ON ca.client_agreement_id = i.client_agreement_id AND COALESCE(ca.is_active, true) = true "
-                        + "LEFT JOIN clients.client_role cr "
-                        + "  ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
-                        + "LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
-                        + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
-                        + whereTenantAndLocation("sbh", "loc", locationIds)
-                        + " GROUP BY 1 ORDER BY 1",
-                buildMetricParams(tr, from, to, locationIds).toArray());
+                revenueSeriesSql(tr, locationIds),
+                buildRevenueSeriesParams(tr, from, to, locationIds).toArray());
+    }
+
+    /**
+     * Billed/collected time series: latest non-mock attempt per invoice, reporting currency when set.
+     * Uses UTC trunc on calendar due_date so day buckets match due_date (not session TZ).
+     */
+    private String revenueSeriesSql(String tr, List<UUID> locationIds) {
+        String money =
+                BillingReportSql.reportingMoney(
+                        "la.amount_reporting",
+                        "la.invoice_total_amount",
+                        "COALESCE(la.inv_currency_code::text, la.currency_code::text)",
+                        "br.application_id",
+                        "COALESCE(la.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)");
+        return "WITH latest_attempt AS ( "
+                + "  SELECT * FROM ( "
+                + "    SELECT sbh.billing_run_id, sbh.invoice_total_amount, sbh.billing_status_id, "
+                + "      sbh.currency_code, sbh.billing_attempt_on, "
+                + "      i.amount_reporting, i.currency_code AS inv_currency_code, i.fx_as_of, "
+                + "      ROW_NUMBER() OVER ( "
+                + "        PARTITION BY COALESCE(CAST(sbh.invoice_id AS TEXT), CAST(sbh.subscription_instance_id AS TEXT)) "
+                + "        ORDER BY sbh.billing_attempt_on DESC NULLS LAST, sbh.created_on DESC NULLS LAST, "
+                + "                 sbh.subscription_billing_history_id DESC) AS rn "
+                + "    FROM client_subscription_billing.subscription_billing_history sbh "
+                + "    JOIN client_subscription_billing.billing_run br0 ON br0.billing_run_id = sbh.billing_run_id "
+                + "    LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id "
+                + "    LEFT JOIN client_agreements.client_agreement ca "
+                + "      ON ca.client_agreement_id = i.client_agreement_id AND COALESCE(ca.is_active, true) = true "
+                + "    LEFT JOIN clients.client_role cr "
+                + "      ON cr.client_role_id = COALESCE(ca.client_role_id, i.client_role_id) "
+                + "    LEFT JOIN locations.location loc ON loc.location_id = cr.location_id "
+                + "    WHERE br0.due_date >= ?::date AND br0.due_date <= ?::date "
+                + whereTenantAndLocation("sbh", "loc", locationIds)
+                + "      AND COALESCE(sbh.is_mock, false) = false "
+                + "  ) t WHERE rn = 1 "
+                + ") "
+                + "SELECT date_trunc(?, (br.due_date::timestamp AT TIME ZONE 'UTC')) AS period_start, "
+                + "COALESCE(SUM("
+                + money
+                + "),0) AS value, "
+                + "COALESCE(SUM(CASE WHEN s.is_success = true THEN "
+                + money
+                + " ELSE 0 END),0) AS value2 "
+                + "FROM client_subscription_billing.billing_run br "
+                + "JOIN latest_attempt la ON la.billing_run_id = br.billing_run_id "
+                + "JOIN billing_config.billing_status s ON s.billing_status_id = la.billing_status_id "
+                + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
+                + " AND br.application_id = ?::uuid "
+                + "GROUP BY 1 ORDER BY 1";
+    }
+
+    private List<Object> buildRevenueSeriesParams(String tr, LocalDate from, LocalDate to, List<UUID> locationIds) {
+        List<Object> p = new ArrayList<>();
+        p.addAll(buildSbhParamsNoPaging(from, to, locationIds));
+        p.add(tr);
+        p.add(from);
+        p.add(to);
+        p.add(requireAppIdStr());
+        return p;
     }
 
     private List<Object> buildMetricParams(String tr, LocalDate from, LocalDate to, List<UUID> locationIds) {

@@ -292,10 +292,12 @@ public class DashboardRepository {
                         + "), latest_attempt AS ( "
                         + "  SELECT * FROM ( "
                         + "    SELECT sbh.invoice_id, sbh.subscription_instance_id, sbh.billing_run_id, sbh.billing_status_id, "
-                        + "      sbh.invoice_total_amount, sbh.is_mock, "
+                        + "      sbh.invoice_total_amount, sbh.is_mock, sbh.currency_code, sbh.billing_attempt_on, "
+                        + "      i.amount_reporting, i.currency_code AS inv_currency_code, i.fx_as_of, "
                         + "      ROW_NUMBER() OVER (PARTITION BY COALESCE(CAST(sbh.invoice_id AS TEXT), CAST(sbh.subscription_instance_id AS TEXT)) "
                         + "      ORDER BY sbh.billing_attempt_on DESC NULLS LAST, sbh.created_on DESC NULLS LAST, sbh.subscription_billing_history_id DESC) AS rn "
                         + "    FROM client_subscription_billing.subscription_billing_history sbh "
+                        + "    LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id "
                         + "    WHERE sbh.billing_run_id IN (SELECT billing_run_id FROM filtered_runs) "
                         + "  ) t WHERE rn = 1 "
                         + "), unresolved_dlq AS ( "
@@ -306,10 +308,38 @@ public class DashboardRepository {
                         + "), per_run AS ( "
                         + "  SELECT br.billing_run_id, UPPER(brs.status_code) AS status_code, br.summary_json, "
                         + "         COALESCE(COUNT(DISTINCT la.invoice_id) FILTER (WHERE la.invoice_id IS NOT NULL AND COALESCE(la.is_mock, false) = false), 0) AS la_invoice_count, "
-                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false THEN COALESCE(la.invoice_total_amount,0) ELSE 0 END),0) AS la_total_amount, "
-                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false AND bs.is_success = true THEN COALESCE(la.invoice_total_amount,0) ELSE 0 END),0) AS la_collected_amount, "
-                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false AND bs.is_success IS NULL THEN COALESCE(la.invoice_total_amount,0) ELSE 0 END),0) AS la_in_flight_amount, "
-                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false AND bs.is_failure = true THEN COALESCE(la.invoice_total_amount,0) ELSE 0 END),0) AS la_at_risk_amount, "
+                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false THEN "
+                        + BillingReportSql.reportingMoney(
+                                "la.amount_reporting",
+                                "la.invoice_total_amount",
+                                "COALESCE(la.inv_currency_code::text, la.currency_code::text)",
+                                "br.application_id",
+                                "COALESCE(la.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + " ELSE 0 END),0) AS la_total_amount, "
+                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false AND bs.is_success = true THEN "
+                        + BillingReportSql.reportingMoney(
+                                "la.amount_reporting",
+                                "la.invoice_total_amount",
+                                "COALESCE(la.inv_currency_code::text, la.currency_code::text)",
+                                "br.application_id",
+                                "COALESCE(la.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + " ELSE 0 END),0) AS la_collected_amount, "
+                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false AND bs.is_success IS NULL THEN "
+                        + BillingReportSql.reportingMoney(
+                                "la.amount_reporting",
+                                "la.invoice_total_amount",
+                                "COALESCE(la.inv_currency_code::text, la.currency_code::text)",
+                                "br.application_id",
+                                "COALESCE(la.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + " ELSE 0 END),0) AS la_in_flight_amount, "
+                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false AND bs.is_failure = true THEN "
+                        + BillingReportSql.reportingMoney(
+                                "la.amount_reporting",
+                                "la.invoice_total_amount",
+                                "COALESCE(la.inv_currency_code::text, la.currency_code::text)",
+                                "br.application_id",
+                                "COALESCE(la.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + " ELSE 0 END),0) AS la_at_risk_amount, "
                         + "         COUNT(1) FILTER (WHERE COALESCE(la.is_mock, false) = false AND bs.is_failure = true) AS la_failure_count, "
                         + "         stg.stg_json, "
                         + "         due_prev.due_json "
@@ -384,6 +414,7 @@ public class DashboardRepository {
                 "SELECT stages.stage_code, br.billing_run_id, br.billing_run_code, brs.status_code, br.due_date, "
                         + "COALESCE("
                         + "  NULLIF(agg.distinct_invoices, 0), "
+                        + "  CASE WHEN stages.stage_code = 'INVOICE_GENERATION' THEN NULLIF(inv_sum.invoice_count, 0) ELSE NULL END, "
                         + "  NULLIF(TRIM(br.summary_json->>'invoices_count'), '')::int, "
                         + "  NULLIF(TRIM(ls.stg_json->>'invoices_count'), '')::int, "
                         + "  NULLIF(TRIM(ls.stg_json->>'invoicesCreated'), '')::int, "
@@ -412,6 +443,7 @@ public class DashboardRepository {
                         + "  0) AS success_count, "
                         + "COALESCE("
                         + "  NULLIF(agg.total_amount, 0), "
+                        + "  CASE WHEN stages.stage_code = 'INVOICE_GENERATION' THEN NULLIF(inv_sum.invoice_amount, 0) ELSE NULL END, "
                         + "  NULLIF(TRIM(br.summary_json->>'total_amount'), '')::numeric, "
                         + "  NULLIF(TRIM(br.summary_json->>'eligible_total_amount'), '')::numeric, "
                         + "  NULLIF(TRIM(ls.stg_json->>'total_amount'), '')::numeric, "
@@ -449,14 +481,40 @@ public class DashboardRepository {
                         + "  LIMIT 1 "
                         + ") due_prev ON true "
                         + "LEFT JOIN LATERAL ( "
-                        + "  SELECT COUNT(DISTINCT sbh.invoice_id) FILTER (WHERE sbh.invoice_id IS NOT NULL) AS distinct_invoices, "
-                        + "         COALESCE(SUM(COALESCE(sbh.invoice_total_amount, 0)), 0) AS total_amount, "
+                        // Latest non-mock attempt per invoice — avoid mock+live double count.
+                        + "  SELECT COUNT(DISTINCT la.invoice_id) FILTER (WHERE la.invoice_id IS NOT NULL) AS distinct_invoices, "
+                        + "         COALESCE(SUM("
+                        + BillingReportSql.sbhReportingMoney(
+                                "la",
+                                "i",
+                                "br.application_id",
+                                "COALESCE(i.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + "), 0) AS total_amount, "
                         + "         COUNT(*) FILTER (WHERE bs.is_success = true) AS success_count, "
                         + "         COUNT(*) FILTER (WHERE bs.is_failure = true) AS failure_count "
-                        + "  FROM client_subscription_billing.subscription_billing_history sbh "
-                        + "  LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id "
-                        + "  WHERE sbh.billing_run_id = br.billing_run_id "
-                        + ") agg ON true ";
+                        + "  FROM ( "
+                        + "    SELECT * FROM ( "
+                        + "      SELECT sbh.*, ROW_NUMBER() OVER ( "
+                        + "        PARTITION BY COALESCE(CAST(sbh.invoice_id AS TEXT), CAST(sbh.subscription_instance_id AS TEXT)) "
+                        + "        ORDER BY sbh.billing_attempt_on DESC NULLS LAST, sbh.created_on DESC NULLS LAST, "
+                        + "                 sbh.subscription_billing_history_id DESC) AS rn "
+                        + "      FROM client_subscription_billing.subscription_billing_history sbh "
+                        + "      WHERE sbh.billing_run_id = br.billing_run_id "
+                        + "        AND COALESCE(sbh.is_mock, false) = false "
+                        + "    ) t WHERE rn = 1 "
+                        + "  ) la "
+                        + "  LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = la.billing_status_id "
+                        + "  LEFT JOIN transactions.invoice i ON i.invoice_id = la.invoice_id "
+                        + ") agg ON true "
+                        + "LEFT JOIN LATERAL ( "
+                        + "  SELECT COUNT(*)::int AS invoice_count, "
+                        + "         COALESCE(SUM("
+                        + BillingReportSql.invoiceReportingMoney("i")
+                        + "), 0) AS invoice_amount "
+                        + "  FROM transactions.invoice i "
+                        + "  WHERE i.billing_run_id = br.billing_run_id "
+                        + "    AND COALESCE(i.is_active, true) = true "
+                        + ") inv_sum ON true ";
         return jdbc.queryForList(sql, p.toArray());
     }
 
@@ -529,38 +587,64 @@ public class DashboardRepository {
      * (agreement/role location tree), or global when {@code locationIds} is null or empty.
      */
     public Map<String, Object> getForecastDataForLocations(List<UUID> locationIds) {
+        String scheduleMoney =
+                "CASE WHEN i.invoice_id IS NOT NULL THEN "
+                        + BillingReportSql.invoiceReportingMoney("i")
+                        + " ELSE "
+                        + BillingReportSql.reportingMoney(
+                                "NULL",
+                                "sbs.final_amount",
+                                "COALESCE(loc_ccy.currency_code::text, '')",
+                                "sbs.application_id",
+                                "sbs.billing_date::timestamptz")
+                        + " END";
         String sql =
-                """
-                SELECT
-                    COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN sbs.billing_schedule_id END) AS due_7_days_count,
-                    COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN COALESCE(i.total_amount, sbs.final_amount, 0) END), 0) AS due_7_days_amount,
-                    COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN sbs.billing_schedule_id END) AS due_30_days_count,
-                    COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN COALESCE(i.total_amount, sbs.final_amount, 0) END), 0) AS due_30_days_amount,
-                    COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' THEN sbs.billing_schedule_id END) AS due_90_days_count,
-                    COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' THEN COALESCE(i.total_amount, sbs.final_amount, 0) END), 0) AS due_90_days_amount
-                FROM client_subscription_billing.subscription_billing_schedule sbs
-                JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
-                LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id
-                JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id
-                WHERE sbs.application_id = ?::uuid
-                  AND bss.status_code IN """
-                    + SCHEDULE_STATUS_OPEN_SQL
-                    + """
-                """;
+                "SELECT "
+                        + "COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' "
+                        + "  THEN sbs.billing_schedule_id END) AS due_7_days_count, "
+                        + "COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' "
+                        + "  THEN "
+                        + scheduleMoney
+                        + " END), 0) AS due_7_days_amount, "
+                        + "COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' "
+                        + "  THEN sbs.billing_schedule_id END) AS due_30_days_count, "
+                        + "COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' "
+                        + "  THEN "
+                        + scheduleMoney
+                        + " END), 0) AS due_30_days_amount, "
+                        + "COUNT(DISTINCT CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' "
+                        + "  THEN sbs.billing_schedule_id END) AS due_90_days_count, "
+                        + "COALESCE(SUM(CASE WHEN sbs.billing_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days' "
+                        + "  THEN "
+                        + scheduleMoney
+                        + " END), 0) AS due_90_days_amount "
+                        + "FROM client_subscription_billing.subscription_billing_schedule sbs "
+                        + "JOIN billing_config.billing_schedule_status bss ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id "
+                        + "LEFT JOIN transactions.invoice i ON i.invoice_id = sbs.invoice_id "
+                        + "JOIN client_subscription_billing.subscription_instance si ON si.subscription_instance_id = sbs.subscription_instance_id "
+                        + "LEFT JOIN client_subscription_billing.subscription_plan sp0 ON sp0.subscription_plan_id = si.subscription_plan_id "
+                        + "LEFT JOIN client_agreements.client_agreement ca0 ON ca0.client_agreement_id = sp0.client_agreement_id "
+                        + "LEFT JOIN agreements.agreement_location al0 ON al0.agreement_location_id = ca0.agreement_location_id "
+                        + "LEFT JOIN locations.levels lv0 ON lv0.level_id = al0.level_id "
+                        + "LEFT JOIN locations.location loc0 ON loc0.location_id = lv0.reference_entity_id "
+                        + "LEFT JOIN locations.lu_currency loc_ccy ON loc_ccy.currency_id = loc0.currency_id "
+                        + "WHERE sbs.application_id = ?::uuid "
+                        + "AND bss.status_code IN "
+                        + SCHEDULE_STATUS_OPEN_SQL
+                        + " ";
 
         List<Object> params = new ArrayList<>();
         params.add(requireAppIdStr());
         if (locationIds != null && !locationIds.isEmpty()) {
             String in = inClausePlaceholders(locationIds.size());
             sql +=
-                    """
-                     AND EXISTS (
-                        SELECT 1 FROM client_subscription_billing.subscription_plan sp
-                        JOIN client_agreements.client_agreement ca ON ca.client_agreement_id = sp.client_agreement_id
-                        JOIN agreements.agreement_location al ON al.agreement_location_id = ca.agreement_location_id
-                        WHERE sp.subscription_plan_id = si.subscription_plan_id
-                          AND al.level_id IN (
-                              SELECT level_id FROM locations.levels WHERE reference_entity_id IN ("""
+                    " AND EXISTS ( "
+                            + "SELECT 1 FROM client_subscription_billing.subscription_plan sp "
+                            + "JOIN client_agreements.client_agreement ca ON ca.client_agreement_id = sp.client_agreement_id "
+                            + "JOIN agreements.agreement_location al ON al.agreement_location_id = ca.agreement_location_id "
+                            + "WHERE sp.subscription_plan_id = si.subscription_plan_id "
+                            + "AND al.level_id IN ( "
+                            + "SELECT level_id FROM locations.levels WHERE reference_entity_id IN ("
                             + in
                             + "))) ";
             for (UUID u : locationIds) {
@@ -636,7 +720,13 @@ public class DashboardRepository {
                         + "  SELECT br.billing_run_id, "
                         + "         COALESCE(br.location_id::text, 'UNKNOWN') AS primary_location_id, "
                         + "         COALESCE(br_loc.name, 'Unknown') AS primary_location_name, "
-                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false THEN COALESCE(la.invoice_total_amount,0) ELSE 0 END),0) AS run_actual_amount, "
+                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false THEN "
+                        + BillingReportSql.sbhReportingMoney(
+                                "la",
+                                "i",
+                                "br.application_id",
+                                "COALESCE(i.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + " ELSE 0 END),0) AS run_actual_amount, "
                         + "         COALESCE("
                         + "           NULLIF(TRIM(stg.stg_json->>'total_amount'), '')::numeric, "
                         + "           NULLIF(TRIM(stg.stg_json->>'totalAmount'), '')::numeric, "
@@ -658,6 +748,7 @@ public class DashboardRepository {
                         + "  LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
                         + "  LEFT JOIN locations.location br_loc ON br_loc.location_id = br.location_id "
                         + "  LEFT JOIN latest_attempt la ON la.billing_run_id = br.billing_run_id "
+                        + "  LEFT JOIN transactions.invoice i ON i.invoice_id = la.invoice_id "
                         + "  LEFT JOIN LATERAL ( "
                         + "    SELECT bsr.summary_json AS stg_json "
                         + "    FROM client_subscription_billing.billing_stage_run bsr "
@@ -682,7 +773,13 @@ public class DashboardRepository {
                         + "  SELECT br.billing_run_id, "
                         + "         COALESCE(loc.location_id::text, br.location_id::text, 'UNKNOWN') AS location_id, "
                         + "         COALESCE(loc.name, br_loc.name, 'Unknown') AS location_name, "
-                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false THEN COALESCE(la.invoice_total_amount,0) ELSE 0 END),0) AS amount, "
+                        + "         COALESCE(SUM(CASE WHEN COALESCE(la.is_mock, false) = false THEN "
+                        + BillingReportSql.sbhReportingMoney(
+                                "la",
+                                "i",
+                                "br.application_id",
+                                "COALESCE(i.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + " ELSE 0 END),0) AS amount, "
                         + "         COUNT(DISTINCT la.invoice_id) FILTER (WHERE la.invoice_id IS NOT NULL AND COALESCE(la.is_mock, false) = false) AS invoices "
                         + "  FROM client_subscription_billing.billing_run br "
                         + "  JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
@@ -1394,19 +1491,36 @@ public class DashboardRepository {
                         + "), latest_attempt AS ( "
                         + "  SELECT * FROM ( "
                         + "    SELECT sbh.billing_run_id, sbh.invoice_total_amount, sbh.billing_status_id, sbh.is_mock, "
+                        + "      sbh.currency_code, sbh.billing_attempt_on, "
+                        + "      i.amount_reporting, i.currency_code AS inv_currency_code, i.fx_as_of, i.total_amount AS inv_total_amount, "
                         + "      ROW_NUMBER() OVER ( "
                         + "        PARTITION BY sbh.billing_run_id, "
                         + "                     COALESCE(CAST(sbh.invoice_id AS TEXT), CAST(sbh.subscription_instance_id AS TEXT)) "
                         + "        ORDER BY sbh.billing_attempt_on DESC NULLS LAST, sbh.created_on DESC NULLS LAST, "
                         + "                 sbh.subscription_billing_history_id DESC) AS rn "
                         + "    FROM client_subscription_billing.subscription_billing_history sbh "
+                        + "    LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id "
                         + "    WHERE sbh.billing_run_id IN (SELECT billing_run_id FROM filtered_runs) "
                         + "      AND COALESCE(sbh.is_mock, false) = false "
                         + "  ) t WHERE rn = 1 "
                         + "), sbh_by_run AS ( "
                         + "  SELECT fr.billing_run_id, fr.due_date, fr.summary_json, fr.run_status, "
-                        + "         COALESCE(SUM(la.invoice_total_amount), 0) AS from_la_billed, "
-                        + "         COALESCE(SUM(CASE WHEN bs.is_success = true THEN la.invoice_total_amount ELSE 0 END), 0) AS from_la_collected, "
+                        + "         COALESCE(SUM("
+                        + BillingReportSql.reportingMoney(
+                                "la.amount_reporting",
+                                "COALESCE(la.invoice_total_amount, la.inv_total_amount)",
+                                "COALESCE(la.inv_currency_code::text, la.currency_code::text)",
+                                "(SELECT brx.application_id FROM client_subscription_billing.billing_run brx WHERE brx.billing_run_id = fr.billing_run_id)",
+                                "COALESCE(la.fx_as_of, la.billing_attempt_on, fr.due_date::timestamptz)")
+                        + "), 0) AS from_la_billed, "
+                        + "         COALESCE(SUM(CASE WHEN bs.is_success = true THEN "
+                        + BillingReportSql.reportingMoney(
+                                "la.amount_reporting",
+                                "COALESCE(la.invoice_total_amount, la.inv_total_amount)",
+                                "COALESCE(la.inv_currency_code::text, la.currency_code::text)",
+                                "(SELECT brx.application_id FROM client_subscription_billing.billing_run brx WHERE brx.billing_run_id = fr.billing_run_id)",
+                                "COALESCE(la.fx_as_of, la.billing_attempt_on, fr.due_date::timestamptz)")
+                        + " ELSE 0 END), 0) AS from_la_collected, "
                         + "         COALESCE("
                         + "           NULLIF(TRIM(stg.stg_json->>'total_amount'), '')::numeric, "
                         + "           NULLIF(TRIM(stg.stg_json->>'totalAmount'), '')::numeric, "
@@ -1464,64 +1578,40 @@ public class DashboardRepository {
         String dim = BillingReportSql.SBH_TO_PAYMENT_DIMENSIONS.replace("sbh.", "la.");
         List<Object> p = new ArrayList<>();
         String where = buildRunWhere("br", dueDateFrom, dueDateTo, asOfFrom, asOfTo, locationIds, status, currentStage, p);
-        // Prefer subscription_billing_history amounts; fall back to invoices generated for the run
-        // (common before actual/mock charge writes history rows).
-        String invDim =
-                "LEFT JOIN LATERAL ("
-                        + "SELECT ie0.subscription_instance_id::uuid AS subscription_instance_id "
-                        + "FROM transactions.invoice_entity ie0 "
-                        + "WHERE ie0.invoice_id = i.invoice_id "
-                        + "  AND ie0.subscription_instance_id IS NOT NULL "
-                        + "  AND COALESCE(ie0.is_active, true) = true "
-                        + "ORDER BY ie0.created_on ASC NULLS LAST LIMIT 1"
-                        + ") sub_res ON true "
-                        + "LEFT JOIN client_subscription_billing.subscription_instance si "
-                        + "  ON si.subscription_instance_id = sub_res.subscription_instance_id "
-                        + "LEFT JOIN client_subscription_billing.subscription_plan sp "
-                        + "  ON sp.subscription_plan_id = si.subscription_plan_id AND COALESCE(sp.is_active, true) = true "
-                        + "LEFT JOIN client_payments.client_payment_method cpm "
-                        + "  ON cpm.client_payment_method_id = sp.client_payment_method_id AND COALESCE(cpm.is_active, true) = true "
-                        + "LEFT JOIN payment_gateway.payment_gateway_supported_method pgsm "
-                        + "  ON pgsm.payment_gateway_supported_method_id = cpm.payment_gateway_method_type_id "
-                        + "LEFT JOIN payment_gateway.payment_gateway pgw ON pgw.payment_gateway_id = pgsm.payment_gateway_id "
-                        + "LEFT JOIN payment_gateway.lu_payment_gateway_method_type pt "
-                        + "  ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id";
+        // Collection-only: successful non-mock charge history. Never fall back to invoice totals
+        // (that wrongly showed "Total Collected" after invoice generation alone).
+        // Prefer invoice.amount_reporting (tenant reporting currency) over native totals.
         String sql =
                 LATEST_ATTEMPT_CTE
-                        + ", hist AS ( "
-                        + "  SELECT COALESCE(NULLIF(TRIM(pt.method_type_name), ''), NULLIF(TRIM(pgw.name), ''), 'Unknown') AS label, "
-                        + "         COALESCE(SUM(la.invoice_total_amount), 0) AS amount "
-                        + "  FROM client_subscription_billing.billing_run br "
-                        + "  JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
-                        + "  LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
-                        + "  JOIN latest_attempt la ON la.billing_run_id = br.billing_run_id "
-                        + "  LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = la.billing_status_id "
+                        + "SELECT COALESCE(NULLIF(TRIM(pt.method_type_name), ''), NULLIF(TRIM(pgw.name), ''), 'Unknown') AS label, "
+                        + "       COALESCE(SUM("
+                        + BillingReportSql.sbhReportingMoney(
+                                "la",
+                                "i",
+                                "br.application_id",
+                                "COALESCE(i.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + "), 0) AS amount "
+                        + "FROM client_subscription_billing.billing_run br "
+                        + "JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
+                        + "LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
+                        + "JOIN latest_attempt la ON la.billing_run_id = br.billing_run_id "
+                        + "JOIN billing_config.billing_status bs ON bs.billing_status_id = la.billing_status_id "
+                        + "LEFT JOIN transactions.invoice i ON i.invoice_id = la.invoice_id "
                         + dim
                         + " "
                         + where
                         + " AND COALESCE(la.is_mock, false) = false "
-                        + "  GROUP BY COALESCE(NULLIF(TRIM(pt.method_type_name), ''), NULLIF(TRIM(pgw.name), ''), 'Unknown') "
-                        + "), inv AS ( "
-                        + "  SELECT COALESCE(NULLIF(TRIM(pt.method_type_name), ''), NULLIF(TRIM(pgw.name), ''), 'Unknown') AS label, "
-                        + "         COALESCE(SUM(COALESCE(i.total_amount, 0)), 0) AS amount "
-                        + "  FROM client_subscription_billing.billing_run br "
-                        + "  JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
-                        + "  LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
-                        + "  JOIN transactions.invoice i ON i.billing_run_id = br.billing_run_id "
-                        + invDim
-                        + " "
-                        + where
-                        + "  GROUP BY COALESCE(NULLIF(TRIM(pt.method_type_name), ''), NULLIF(TRIM(pgw.name), ''), 'Unknown') "
-                        + ") "
-                        + "SELECT label, SUM(amount) AS amount FROM ( "
-                        + "  SELECT * FROM hist WHERE amount > 0 "
-                        + "  UNION ALL "
-                        + "  SELECT i.* FROM inv i WHERE amount > 0 AND NOT EXISTS (SELECT 1 FROM hist h WHERE h.amount > 0) "
-                        + ") u GROUP BY label ORDER BY amount DESC NULLS LAST";
-        List<Object> params = new ArrayList<>();
-        params.addAll(p);
-        params.addAll(p);
-        return jdbc.queryForList(sql, params.toArray());
+                        + " AND bs.is_success = true "
+                        + "GROUP BY COALESCE(NULLIF(TRIM(pt.method_type_name), ''), NULLIF(TRIM(pgw.name), ''), 'Unknown') "
+                        + "HAVING COALESCE(SUM("
+                        + BillingReportSql.sbhReportingMoney(
+                                "la",
+                                "i",
+                                "br.application_id",
+                                "COALESCE(i.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + "), 0) > 0 "
+                        + "ORDER BY amount DESC NULLS LAST";
+        return jdbc.queryForList(sql, p.toArray());
     }
 
     public List<Map<String, Object>> getOverviewGatewaySegments(
@@ -1535,60 +1625,37 @@ public class DashboardRepository {
         String dim = BillingReportSql.SBH_TO_PAYMENT_DIMENSIONS.replace("sbh.", "la.");
         List<Object> p = new ArrayList<>();
         String where = buildRunWhere("br", dueDateFrom, dueDateTo, asOfFrom, asOfTo, locationIds, status, currentStage, p);
-        String invDim =
-                "LEFT JOIN LATERAL ("
-                        + "SELECT ie0.subscription_instance_id::uuid AS subscription_instance_id "
-                        + "FROM transactions.invoice_entity ie0 "
-                        + "WHERE ie0.invoice_id = i.invoice_id "
-                        + "  AND ie0.subscription_instance_id IS NOT NULL "
-                        + "  AND COALESCE(ie0.is_active, true) = true "
-                        + "ORDER BY ie0.created_on ASC NULLS LAST LIMIT 1"
-                        + ") sub_res ON true "
-                        + "LEFT JOIN client_subscription_billing.subscription_instance si "
-                        + "  ON si.subscription_instance_id = sub_res.subscription_instance_id "
-                        + "LEFT JOIN client_subscription_billing.subscription_plan sp "
-                        + "  ON sp.subscription_plan_id = si.subscription_plan_id AND COALESCE(sp.is_active, true) = true "
-                        + "LEFT JOIN client_payments.client_payment_method cpm "
-                        + "  ON cpm.client_payment_method_id = sp.client_payment_method_id AND COALESCE(cpm.is_active, true) = true "
-                        + "LEFT JOIN payment_gateway.payment_gateway_supported_method pgsm "
-                        + "  ON pgsm.payment_gateway_supported_method_id = cpm.payment_gateway_method_type_id "
-                        + "LEFT JOIN payment_gateway.payment_gateway pgw ON pgw.payment_gateway_id = pgsm.payment_gateway_id";
         String sql =
                 LATEST_ATTEMPT_CTE
-                        + ", hist AS ( "
-                        + "  SELECT COALESCE(NULLIF(TRIM(pgw.name), ''), 'Unknown') AS label, "
-                        + "         COALESCE(SUM(la.invoice_total_amount), 0) AS amount "
-                        + "  FROM client_subscription_billing.billing_run br "
-                        + "  JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
-                        + "  LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
-                        + "  JOIN latest_attempt la ON la.billing_run_id = br.billing_run_id "
-                        + "  LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = la.billing_status_id "
+                        + "SELECT COALESCE(NULLIF(TRIM(pgw.name), ''), 'Unknown') AS label, "
+                        + "       COALESCE(SUM("
+                        + BillingReportSql.sbhReportingMoney(
+                                "la",
+                                "i",
+                                "br.application_id",
+                                "COALESCE(i.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + "), 0) AS amount "
+                        + "FROM client_subscription_billing.billing_run br "
+                        + "JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
+                        + "LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
+                        + "JOIN latest_attempt la ON la.billing_run_id = br.billing_run_id "
+                        + "JOIN billing_config.billing_status bs ON bs.billing_status_id = la.billing_status_id "
+                        + "LEFT JOIN transactions.invoice i ON i.invoice_id = la.invoice_id "
                         + dim
                         + " "
                         + where
                         + " AND COALESCE(la.is_mock, false) = false "
-                        + "  GROUP BY COALESCE(NULLIF(TRIM(pgw.name), ''), 'Unknown') "
-                        + "), inv AS ( "
-                        + "  SELECT COALESCE(NULLIF(TRIM(pgw.name), ''), 'Unknown') AS label, "
-                        + "         COALESCE(SUM(COALESCE(i.total_amount, 0)), 0) AS amount "
-                        + "  FROM client_subscription_billing.billing_run br "
-                        + "  JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
-                        + "  LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
-                        + "  JOIN transactions.invoice i ON i.billing_run_id = br.billing_run_id "
-                        + invDim
-                        + " "
-                        + where
-                        + "  GROUP BY COALESCE(NULLIF(TRIM(pgw.name), ''), 'Unknown') "
-                        + ") "
-                        + "SELECT label, SUM(amount) AS amount FROM ( "
-                        + "  SELECT * FROM hist WHERE amount > 0 "
-                        + "  UNION ALL "
-                        + "  SELECT i.* FROM inv i WHERE amount > 0 AND NOT EXISTS (SELECT 1 FROM hist h WHERE h.amount > 0) "
-                        + ") u GROUP BY label ORDER BY amount DESC NULLS LAST";
-        List<Object> params = new ArrayList<>();
-        params.addAll(p);
-        params.addAll(p);
-        return jdbc.queryForList(sql, params.toArray());
+                        + " AND bs.is_success = true "
+                        + "GROUP BY COALESCE(NULLIF(TRIM(pgw.name), ''), 'Unknown') "
+                        + "HAVING COALESCE(SUM("
+                        + BillingReportSql.sbhReportingMoney(
+                                "la",
+                                "i",
+                                "br.application_id",
+                                "COALESCE(i.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + "), 0) > 0 "
+                        + "ORDER BY amount DESC NULLS LAST";
+        return jdbc.queryForList(sql, p.toArray());
     }
 
     public Map<String, Object> getOverviewFunnelAggregate(
@@ -1609,8 +1676,16 @@ public class DashboardRepository {
                         + "  NULLIF(TRIM(due_prev.due_json->>'eligible_total_amount'), '')::numeric, "
                         + "  NULLIF(TRIM(due_prev.due_json->>'eligible_amount'), '')::numeric, "
                         + "  0)),0) AS billing_preview_amount, "
-                        + "COALESCE(SUM(COALESCE(NULLIF(TRIM(inv_gen.ig_json->>'invoices_count'), '')::int, NULLIF(TRIM(inv_gen.ig_json->>'invoicesCreated'), '')::int, NULLIF(TRIM(inv_gen.ig_json->>'candidateRows'), '')::int, NULLIF(TRIM(inv_gen.ig_json->>'totalSelected'), '')::int, 0)),0) AS invoice_generated_count, "
                         + "COALESCE(SUM(COALESCE("
+                        + "  NULLIF(TRIM(inv_gen.ig_json->>'invoices_count'), '')::int, "
+                        + "  NULLIF(TRIM(inv_gen.ig_json->>'invoicesCreated'), '')::int, "
+                        + "  NULLIF(TRIM(inv_gen.ig_json->>'candidateRows'), '')::int, "
+                        + "  NULLIF(TRIM(inv_gen.ig_json->>'totalSelected'), '')::int, "
+                        + "  NULLIF(inv_sum.invoice_count, 0), "
+                        + "  0)),0) AS invoice_generated_count, "
+                        + "COALESCE(SUM(COALESCE("
+                        // Prefer invoice.amount_reporting (FX) over stage JSON native totals.
+                        + "  NULLIF(inv_sum.invoice_amount, 0), "
                         + "  NULLIF(TRIM(inv_gen.ig_json->>'total_amount'), '')::numeric, "
                         + "  NULLIF(TRIM(inv_gen.ig_json->>'totalAmount'), '')::numeric, "
                         + "  NULLIF(TRIM(inv_gen.ig_json->>'eligible_total_amount'), '')::numeric, "
@@ -1638,13 +1713,45 @@ public class DashboardRepository {
                         + "  ORDER BY COALESCE(bsr.ended_on, bsr.started_on, bsr.created_on) DESC NULLS LAST, bsr.stage_run_id DESC LIMIT 1 "
                         + ") inv_gen ON true "
                         + "LEFT JOIN LATERAL ( "
-                        + "  SELECT COUNT(DISTINCT sbh.invoice_id) FILTER (WHERE sbh.invoice_id IS NOT NULL AND COALESCE(sbh.is_mock,false)=false) AS attempted_count, "
-                        + "         COALESCE(SUM(COALESCE(sbh.invoice_total_amount, 0)) FILTER (WHERE sbh.invoice_id IS NOT NULL AND COALESCE(sbh.is_mock,false)=false), 0) AS attempted_amount, "
-                        + "         COUNT(DISTINCT sbh.invoice_id) FILTER (WHERE sbh.invoice_id IS NOT NULL AND COALESCE(sbh.is_mock,false)=false AND bs.is_success = true) AS success_count, "
-                        + "         COALESCE(SUM(COALESCE(sbh.invoice_total_amount, 0)) FILTER (WHERE sbh.invoice_id IS NOT NULL AND COALESCE(sbh.is_mock,false)=false AND bs.is_success = true), 0) AS success_amount "
-                        + "  FROM client_subscription_billing.subscription_billing_history sbh "
-                        + "  LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id "
-                        + "  WHERE sbh.billing_run_id = br.billing_run_id "
+                        + "  SELECT COUNT(*)::int AS invoice_count, "
+                        + "         COALESCE(SUM("
+                        + BillingReportSql.invoiceReportingMoney("i")
+                        + "), 0) AS invoice_amount "
+                        + "  FROM transactions.invoice i "
+                        + "  WHERE i.billing_run_id = br.billing_run_id "
+                        + "    AND COALESCE(i.is_active, true) = true "
+                        + ") inv_sum ON true "
+                        + "LEFT JOIN LATERAL ( "
+                        // Latest non-mock attempt per invoice (reporting currency when available).
+                        + "  SELECT COUNT(DISTINCT la.invoice_id) FILTER (WHERE la.invoice_id IS NOT NULL) AS attempted_count, "
+                        + "         COALESCE(SUM("
+                        + BillingReportSql.sbhReportingMoney(
+                                "la",
+                                "i",
+                                "br.application_id",
+                                "COALESCE(i.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + ") FILTER (WHERE la.invoice_id IS NOT NULL), 0) AS attempted_amount, "
+                        + "         COUNT(DISTINCT la.invoice_id) FILTER (WHERE la.invoice_id IS NOT NULL AND bs.is_success = true) AS success_count, "
+                        + "         COALESCE(SUM("
+                        + BillingReportSql.sbhReportingMoney(
+                                "la",
+                                "i",
+                                "br.application_id",
+                                "COALESCE(i.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + ") FILTER (WHERE la.invoice_id IS NOT NULL AND bs.is_success = true), 0) AS success_amount "
+                        + "  FROM ( "
+                        + "    SELECT * FROM ( "
+                        + "      SELECT sbh.*, ROW_NUMBER() OVER ( "
+                        + "        PARTITION BY COALESCE(CAST(sbh.invoice_id AS TEXT), CAST(sbh.subscription_instance_id AS TEXT)) "
+                        + "        ORDER BY sbh.billing_attempt_on DESC NULLS LAST, sbh.created_on DESC NULLS LAST, "
+                        + "                 sbh.subscription_billing_history_id DESC) AS rn "
+                        + "      FROM client_subscription_billing.subscription_billing_history sbh "
+                        + "      WHERE sbh.billing_run_id = br.billing_run_id "
+                        + "        AND COALESCE(sbh.is_mock, false) = false "
+                        + "    ) t WHERE rn = 1 "
+                        + "  ) la "
+                        + "  LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = la.billing_status_id "
+                        + "  LEFT JOIN transactions.invoice i ON i.invoice_id = la.invoice_id "
                         + ") ac_agg ON true "
                         + where;
         return jdbc.queryForMap(sql, p.toArray());
@@ -1660,20 +1767,49 @@ public class DashboardRepository {
             String currentStage) {
         List<Object> p = new ArrayList<>();
         String where = buildRunWhere("br", dueDateFrom, dueDateTo, asOfFrom, asOfTo, locationIds, status, currentStage, p);
+        // Prefer charge-history status amounts; if none (IG-only), use invoices on filtered runs.
         String sql =
                 LATEST_ATTEMPT_CTE
-                        + "SELECT COALESCE(NULLIF(TRIM(invs.status_name), ''), 'Unknown') AS label, "
-                        + "COALESCE(SUM(COALESCE(la.invoice_total_amount, 0)), 0) AS amount "
-                        + "FROM client_subscription_billing.billing_run br "
-                        + "JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
-                        + "LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
-                        + "JOIN latest_attempt la ON la.billing_run_id = br.billing_run_id "
-                        + "LEFT JOIN transactions.invoice i ON i.invoice_id = la.invoice_id "
-                        + "LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id "
+                        + ", hist AS ( "
+                        + "  SELECT COALESCE(NULLIF(TRIM(invs.status_name), ''), 'Unknown') AS label, "
+                        + "         COALESCE(SUM("
+                        + BillingReportSql.sbhReportingMoney(
+                                "la",
+                                "i",
+                                "br.application_id",
+                                "COALESCE(i.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + "), 0) AS amount "
+                        + "  FROM client_subscription_billing.billing_run br "
+                        + "  JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
+                        + "  LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
+                        + "  JOIN latest_attempt la ON la.billing_run_id = br.billing_run_id "
+                        + "  LEFT JOIN transactions.invoice i ON i.invoice_id = la.invoice_id "
+                        + "  LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id "
                         + where
-                        + " GROUP BY COALESCE(NULLIF(TRIM(invs.status_name), ''), 'Unknown') "
-                        + "ORDER BY amount DESC NULLS LAST";
-        return jdbc.queryForList(sql, p.toArray());
+                        + "  GROUP BY COALESCE(NULLIF(TRIM(invs.status_name), ''), 'Unknown') "
+                        + "), inv AS ( "
+                        + "  SELECT COALESCE(NULLIF(TRIM(invs.status_name), ''), 'Unknown') AS label, "
+                        + "         COALESCE(SUM("
+                        + BillingReportSql.invoiceReportingMoney("i")
+                        + "), 0) AS amount "
+                        + "  FROM client_subscription_billing.billing_run br "
+                        + "  JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
+                        + "  LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "
+                        + "  JOIN transactions.invoice i ON i.billing_run_id = br.billing_run_id "
+                        + "  LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id "
+                        + where
+                        + "    AND COALESCE(i.is_active, true) = true "
+                        + "  GROUP BY COALESCE(NULLIF(TRIM(invs.status_name), ''), 'Unknown') "
+                        + ") "
+                        + "SELECT label, SUM(amount) AS amount FROM ( "
+                        + "  SELECT * FROM hist WHERE amount > 0 "
+                        + "  UNION ALL "
+                        + "  SELECT i.* FROM inv i WHERE amount > 0 AND NOT EXISTS (SELECT 1 FROM hist h WHERE h.amount > 0) "
+                        + ") u GROUP BY label ORDER BY amount DESC NULLS LAST";
+        List<Object> params = new ArrayList<>();
+        params.addAll(p);
+        params.addAll(p);
+        return jdbc.queryForList(sql, params.toArray());
     }
 
     public List<Map<String, Object>> getOverviewArAgingSegments(
@@ -1703,7 +1839,13 @@ public class DashboardRepository {
                         + ageDays
                         + " <= 90 THEN '61-90 days' "
                         + "  ELSE '90+ days' END AS label, "
-                        + "COALESCE(SUM(COALESCE(i.total_amount, la.invoice_total_amount, 0)), 0) AS amount "
+                        + "COALESCE(SUM("
+                        + BillingReportSql.sbhReportingMoney(
+                                "la",
+                                "i",
+                                "br.application_id",
+                                "COALESCE(i.fx_as_of, la.billing_attempt_on, br.due_date::timestamptz)")
+                        + "), 0) AS amount "
                         + "FROM client_subscription_billing.billing_run br "
                         + "JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
                         + "LEFT JOIN billing_config.billing_stage_code bsc ON bsc.billing_stage_code_id = br.current_stage_code_id "

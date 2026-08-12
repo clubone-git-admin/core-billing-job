@@ -19,7 +19,7 @@ logging:
 
 spring:
   profiles:
-    active: prod
+    active: uat
   application:
     name: clubone-billing-batch
   # Platform threads on tiny tasks — virtual threads + Tomcat amplify CPU throttling.

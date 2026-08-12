@@ -435,16 +435,18 @@ public class DashboardService {
 
         List<Map<String, Object>> runHealthRows = runHealthF.join();
         StageTotals invoicedTotals = resolveInvoicedTotals(runHealthRows);
-        if (invoicedTotals.amount() > 0) {
+        // Prefer SBH (deduped, FX) totals. Only fall back to stage/run-health when SBH has no money yet.
+        if (totalAmount <= 0 && invoicedTotals.amount() > 0) {
             summary.put("total_invoiced", invoicedTotals.amount());
-            // When billing history has no amounts yet (common after invoice-gen, before charge),
-            // align billed KPI with stage-derived invoice totals so tiles match the funnel.
-            if (totalAmount <= 0) {
-                totalAmount = invoicedTotals.amount();
-                summary.put("total_amount", totalAmount);
-                summary.put("total_billed_amount", totalAmount);
-            }
+            totalAmount = invoicedTotals.amount();
+            summary.put("total_amount", totalAmount);
+            summary.put("total_billed_amount", totalAmount);
+        } else if (invoicedTotals.amount() > 0
+                && Math.abs(invoicedTotals.amount() - totalAmount) < 0.005) {
+            // Keep aligned when both sources agree.
+            summary.put("total_invoiced", totalAmount);
         }
+        // else: keep total_invoiced = totalAmount already set from SBH
         if (invoiceCount <= 0 && invoicedTotals.count() > 0) {
             invoiceCount = invoicedTotals.count();
             summary.put("invoice_count", invoiceCount);

@@ -44,4 +44,124 @@ final class BillingReportSql {
                     + " "
                     + "LEFT JOIN payment_gateway.lu_payment_gateway_method_type pt"
                     + "  ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id";
+
+    /**
+     * Convert a transactional amount to the tenant reporting currency.
+     * <p>
+     * Order: locked {@code amount_reporting} → identity (same currency) → approved FX
+     * (direct, then inverse). Returns NULL when conversion is impossible so callers never
+     * paint CAD/GBP/etc. as USD by falling back to the native total.
+     *
+     * @param amountReportingExpr nullable locked reporting amount (usually {@code i.amount_reporting})
+     * @param nativeAmountExpr    transactional amount
+     * @param currencyExpr        ISO currency (text/char)
+     * @param applicationIdExpr   tenant uuid expression (e.g. {@code br.application_id})
+     * @param asOfExpr            timestamptz / timestamp for rate as-of
+     */
+    static String toReportingAmount(
+            String amountReportingExpr,
+            String nativeAmountExpr,
+            String currencyExpr,
+            String applicationIdExpr,
+            String asOfExpr) {
+        String ccy = "UPPER(TRIM(COALESCE(" + currencyExpr + ", '')))";
+        String rep =
+                "(SELECT UPPER(TRIM(bts.reporting_currency_code)) "
+                        + "FROM billing_config.billing_tenant_settings bts "
+                        + "WHERE bts.application_id = "
+                        + applicationIdExpr
+                        + " LIMIT 1)";
+        String amt = "COALESCE((" + nativeAmountExpr + ")::numeric, 0)";
+        String asOf = "COALESCE((" + asOfExpr + ")::timestamptz, NOW())";
+        return "CASE "
+                + "WHEN ("
+                + amountReportingExpr
+                + ") IS NOT NULL THEN ("
+                + amountReportingExpr
+                + ")::numeric "
+                + "WHEN "
+                + ccy
+                + " = '' OR "
+                + rep
+                + " IS NULL THEN NULL "
+                + "WHEN "
+                + ccy
+                + " = "
+                + rep
+                + " THEN "
+                + amt
+                + " "
+                + "ELSE "
+                + amt
+                + " * COALESCE( "
+                + "  (SELECT fx.rate FROM billing_config.fx_rate fx "
+                + "   WHERE fx.application_id = "
+                + applicationIdExpr
+                + "     AND fx.from_currency = "
+                + ccy
+                + "     AND fx.to_currency = "
+                + rep
+                + "     AND fx.is_active = true AND fx.approval_status = 'APPROVED' "
+                + "     AND fx.as_of <= "
+                + asOf
+                + "   ORDER BY fx.as_of DESC LIMIT 1), "
+                + "  (SELECT CASE WHEN fx.rate = 0 THEN NULL ELSE 1.0 / fx.rate END "
+                + "   FROM billing_config.fx_rate fx "
+                + "   WHERE fx.application_id = "
+                + applicationIdExpr
+                + "     AND fx.from_currency = "
+                + rep
+                + "     AND fx.to_currency = "
+                + ccy
+                + "     AND fx.is_active = true AND fx.approval_status = 'APPROVED' "
+                + "     AND fx.as_of <= "
+                + asOf
+                + "   ORDER BY fx.as_of DESC LIMIT 1)"
+                + ") END";
+    }
+
+    /** Same as {@link #toReportingAmount} wrapped with {@code COALESCE(..., 0)} for SUM-friendly use. */
+    static String reportingMoney(
+            String amountReportingExpr,
+            String nativeAmountExpr,
+            String currencyExpr,
+            String applicationIdExpr,
+            String asOfExpr) {
+        return "COALESCE("
+                + toReportingAmount(
+                        amountReportingExpr, nativeAmountExpr, currencyExpr, applicationIdExpr, asOfExpr)
+                + ", 0)";
+    }
+
+    /** Invoice row → reporting money (uses invoice application_id / fx_as_of). */
+    static String invoiceReportingMoney(String invoiceAlias) {
+        String a = invoiceAlias;
+        return reportingMoney(
+                a + ".amount_reporting",
+                a + ".total_amount",
+                a + ".currency_code::text",
+                a + ".application_id",
+                "COALESCE(" + a + ".fx_as_of, " + a + ".created_on)");
+    }
+
+    /**
+     * SBH/invoice pair → reporting money. Prefer invoice locked amount; convert SBH native via FX.
+     *
+     * @param sbhAlias history alias (needs {@code invoice_total_amount}, optional {@code currency_code})
+     * @param invAlias invoice alias (may be null-safe LEFT JOIN)
+     * @param appIdExpr tenant application id
+     * @param asOfExpr rate as-of
+     */
+    static String sbhReportingMoney(String sbhAlias, String invAlias, String appIdExpr, String asOfExpr) {
+        return reportingMoney(
+                invAlias + ".amount_reporting",
+                "COALESCE(" + sbhAlias + ".invoice_total_amount, " + invAlias + ".total_amount)",
+                "COALESCE("
+                        + invAlias
+                        + ".currency_code::text, "
+                        + sbhAlias
+                        + ".currency_code::text)",
+                appIdExpr,
+                asOfExpr);
+    }
 }
