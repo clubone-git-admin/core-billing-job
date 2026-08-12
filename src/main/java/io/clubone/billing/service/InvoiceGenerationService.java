@@ -73,6 +73,9 @@ public class InvoiceGenerationService {
     private void auditInvoiceGenerationStage(String action, UUID stageRunId, String userId, Map<String, Object> details) {
         String actor = (userId != null && !userId.isBlank()) ? userId : "system";
         Map<String, Object> payload = details != null ? new LinkedHashMap<>(details) : new LinkedHashMap<>();
+        if (stageRunId != null) {
+            payload.putIfAbsent("stage_run_id", stageRunId.toString());
+        }
         auditLogRepository.insertAuditLog("INVOICE_GENERATION", "STAGE_RUN", stageRunId, action, actor, payload);
     }
 

@@ -402,6 +402,10 @@ public class ActualChargeService {
         patch.put("pendingCaptureRowCount", pendingKpi.pendingCount());
         patch.put("failed_count", failed);
         patch.put("failureCount", failed);
+        // Explicitly clear stale skip counters from prior FAILED_ONLY retries that used to
+        // count already-finalized invoices as "skipped".
+        patch.put("skipped_count", 0);
+        patch.put("skippedCount", 0);
         patch.put("no_live_history_count", noLiveHistory);
         patch.put("noLiveHistoryCount", noLiveHistory);
         patch.put("total_amount_selected", totalSelectedAmount);

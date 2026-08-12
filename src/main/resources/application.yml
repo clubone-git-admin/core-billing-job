@@ -172,7 +172,7 @@ clubone:
       http:
         base-url: https://develop-api.clubone.io
         create-and-capture-path: /api/payments/capture-invoice
-        timeout-ms: 8000
+        timeout-ms: 45000
         adyen-recurring-charge-path: /payment/api/adyen/recurring/charge
         adyen-environment: TEST
         adyen-payment-type-code: RECURRING

@@ -3,7 +3,9 @@ package io.clubone.billing.service.actualcharge;
 import io.clubone.billing.api.dto.BillingRunDto;
 import io.clubone.billing.api.dto.StageRunDto;
 import io.clubone.billing.batch.RunMode;
+import io.clubone.billing.batch.dlq.DeadLetterQueueService;
 import io.clubone.billing.batch.model.BillingStatus;
+import io.clubone.billing.batch.model.BillingWorkItem;
 import io.clubone.billing.batch.model.GatewayStatus;
 import io.clubone.billing.batch.payment.PaymentResult;
 import io.clubone.billing.batch.payment.PaymentService;
@@ -27,9 +29,11 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -55,6 +59,7 @@ public class ActualChargeJobRunner {
     private final MockChargeRepository mockChargeRepository;
     private final ActualChargeRepository actualChargeRepository;
     private final BillingRepository billingRepository;
+    private final DeadLetterQueueService dlqService;
     /** Resolved LIVE implementation (same selection as Spring Batch for {@link RunMode#LIVE}). */
     private final PaymentService livePaymentService;
     private final int pendingRetryGraceMinutes;
@@ -70,6 +75,7 @@ public class ActualChargeJobRunner {
             MockChargeRepository mockChargeRepository,
             ActualChargeRepository actualChargeRepository,
             BillingRepository billingRepository,
+            DeadLetterQueueService dlqService,
             @Value("${clubone.billing.actual-charge.pending.retry-grace-minutes:30}") int pendingRetryGraceMinutes,
             @Value("${clubone.billing.actual-charge.pending.stuck-threshold-minutes:30}") int pendingStuckThresholdMinutes,
             @Value("${clubone.billing.charge.invoice-page-size:200}") int invoicePageSize,
@@ -82,6 +88,7 @@ public class ActualChargeJobRunner {
         this.mockChargeRepository = mockChargeRepository;
         this.actualChargeRepository = actualChargeRepository;
         this.billingRepository = billingRepository;
+        this.dlqService = dlqService;
         this.pendingRetryGraceMinutes = Math.max(1, pendingRetryGraceMinutes);
         this.pendingStuckThresholdMinutes = Math.max(1, pendingStuckThresholdMinutes);
         this.invoicePageSize = Math.max(50, Math.min(invoicePageSize, 2_000));
@@ -208,12 +215,14 @@ public class ActualChargeJobRunner {
         int pending = 0;
         int failed = 0;
         int skipped = 0;
+        int idempotentAlreadySuccess = 0;
         int processedCount = 0;
         BigDecimal totalSelectedAmount = BigDecimal.ZERO;
         BigDecimal chargedAmount = BigDecimal.ZERO;
         BigDecimal pendingAmount = BigDecimal.ZERO;
         BigDecimal failedAmount = BigDecimal.ZERO;
         CurrencySummaryAccumulator currencySummary = new CurrencySummaryAccumulator();
+        List<Map<String, Object>> skippedRows = new ArrayList<>();
 
         UUID afterInvoiceId = null;
         if (s.summaryJson() != null) {
@@ -231,6 +240,8 @@ public class ActualChargeJobRunner {
                 pending = intFromJson(s.summaryJson().get("pending_count"));
                 failed = intFromJson(s.summaryJson().get("failed_count"));
                 skipped = intFromJson(s.summaryJson().get("skipped_count"));
+                idempotentAlreadySuccess =
+                        intFromJson(s.summaryJson().get("idempotent_already_success_count"));
                 totalSelectedAmount = bigDecimalFromJson(s.summaryJson().get("total_amount_selected"));
                 chargedAmount = bigDecimalFromJson(s.summaryJson().get("charged_amount"));
                 pendingAmount = bigDecimalFromJson(s.summaryJson().get("pending_amount"));
@@ -332,9 +343,20 @@ public class ActualChargeJobRunner {
                 LoggingUtils.setInvoiceId(row.invoiceId());
 
                 if (alreadySuccess.contains(row.invoiceId())) {
-                    skipped++;
+                    // Already charged on a prior pass/retry — count as success, not "skipped".
+                    // Treating these as skipped inflated terminal KPIs (e.g. 3/2 after FAILED_ONLY retry).
+                    success++;
+                    idempotentAlreadySuccess++;
+                    chargedAmount = chargedAmount.add(amt);
+                    String currency = normalizeCurrency(row.invoiceCurrencyCode());
+                    if (currency != null) {
+                        currencySummary.addCount(currency, "success_count", 1);
+                        currencySummary.addAmount(currency, "charged_amount", amt);
+                        currencySummary.addCount(currency, "total_selected", 1);
+                        currencySummary.addAmount(currency, "total_amount_selected", amt);
+                    }
                     log.debug(
-                            "actual-charge invoice {}: SKIP (idempotency) invoiceId={} billingRunId={} amount={}",
+                            "actual-charge invoice {}: SUCCESS (idempotent already-finalized) invoiceId={} billingRunId={} amount={}",
                             idx,
                             row.invoiceId(),
                             billingRunId,
@@ -342,9 +364,17 @@ public class ActualChargeJobRunner {
                     continue;
                 }
                 if (freshPending.contains(row.invoiceId())) {
-                    skipped++;
+                    pending++;
+                    pendingAmount = pendingAmount.add(amt);
+                    String currency = normalizeCurrency(row.invoiceCurrencyCode());
+                    if (currency != null) {
+                        currencySummary.addCount(currency, "pending_count", 1);
+                        currencySummary.addAmount(currency, "pending_amount", amt);
+                        currencySummary.addCount(currency, "total_selected", 1);
+                        currencySummary.addAmount(currency, "total_amount_selected", amt);
+                    }
                     log.debug(
-                            "actual-charge invoice {}: SKIP (pending-idempotency) grace={}m invoiceId={} amount={}",
+                            "actual-charge invoice {}: PENDING (idempotent fresh PENDING_CAPTURE) grace={}m invoiceId={} amount={}",
                             idx,
                             pendingRetryGraceMinutes,
                             row.invoiceId(),
@@ -353,6 +383,11 @@ public class ActualChargeJobRunner {
                 }
                 if (row.subscriptionInstanceId() == null || row.clientRoleId() == null) {
                     skipped++;
+                    recordSkippedRow(
+                            skippedRows,
+                            row,
+                            "MISSING_SUBSCRIPTION_OR_CLIENT_ROLE",
+                            "missing subscription_instance_id or client_role_id");
                     log.warn(
                             "actual-charge invoice {}: SKIP — missing subscription_instance_id or client_role_id invoiceId={}",
                             idx,
@@ -383,15 +418,19 @@ public class ActualChargeJobRunner {
                     continue;
                 }
 
-                String currency = row.invoiceCurrencyCode();
-                if (currency == null || currency.isBlank()) {
+                String currency = normalizeCurrency(row.invoiceCurrencyCode());
+                if (currency == null) {
                     skipped++;
+                    recordSkippedRow(
+                            skippedRows,
+                            row,
+                            "MISSING_CURRENCY",
+                            "missing invoice.currency_code (fail closed)");
                     log.warn(
                             "actual-charge skip invoice {}: missing invoice.currency_code (fail closed)",
                             row.invoiceId());
                     continue;
                 }
-                currency = currency.trim().toUpperCase();
                 long amountMinor = amt.multiply(BigDecimal.valueOf(100)).setScale(0, RoundingMode.HALF_UP).longValue();
 
                 String mandateFailure = validatePlanMandate(row, planByInstance, mandateByPlan, amountMinor, currency);
@@ -524,6 +563,63 @@ public class ActualChargeJobRunner {
         if (s.summaryJson() != null) {
             merged.putAll(s.summaryJson());
         }
+
+        // Authoritative KPIs from latest live history per invoice (fixes retry double-count /
+        // "skipped already-success" inflation that previously produced Throughput 3/2).
+        List<MockInvoiceRow> allInvoices = mockChargeRepository.findInvoicesForBillingRun(billingRunId);
+        if (subscriptionFilter != null) {
+            Set<String> filter = subscriptionFilter;
+            allInvoices = allInvoices.stream()
+                    .filter(r -> r.subscriptionInstanceId() != null
+                            && filter.contains(r.subscriptionInstanceId().toString()))
+                    .toList();
+        }
+        Map<UUID, ActualChargeRepository.LatestLiveChargeRow> latestByInvoice =
+                actualChargeRepository.findLatestLiveChargePerInvoice(billingRunId);
+        int recomputedSuccess = 0;
+        int recomputedPending = 0;
+        int recomputedFailed = 0;
+        int recomputedNoHistory = 0;
+        BigDecimal recomputedSelected = BigDecimal.ZERO;
+        BigDecimal recomputedCharged = BigDecimal.ZERO;
+        BigDecimal recomputedPendingAmt = BigDecimal.ZERO;
+        BigDecimal recomputedFailedAmt = BigDecimal.ZERO;
+        for (MockInvoiceRow row : allInvoices) {
+            BigDecimal amt = row.totalAmount() != null ? row.totalAmount() : BigDecimal.ZERO;
+            recomputedSelected = recomputedSelected.add(amt);
+            ActualChargeRepository.LatestLiveChargeRow latest = latestByInvoice.get(row.invoiceId());
+            if (latest == null) {
+                recomputedNoHistory++;
+                continue;
+            }
+            String code = latest.statusCode() != null ? latest.statusCode().trim() : "";
+            if ("LIVE_FINALIZED".equals(code) || "LIVE_SUCCESS".equals(code)) {
+                recomputedSuccess++;
+                recomputedCharged = recomputedCharged.add(amt);
+            } else if ("PENDING_CAPTURE".equals(code)) {
+                recomputedPending++;
+                recomputedPendingAmt = recomputedPendingAmt.add(amt);
+            } else {
+                recomputedFailed++;
+                recomputedFailedAmt = recomputedFailedAmt.add(amt);
+            }
+        }
+        // True skips (missing data/currency) stay in skipped*; do not fold idempotent already-success into skipped.
+        int trueSkipped = skipped;
+        if (trueSkipped == 0 && recomputedNoHistory > 0 && !skippedRows.isEmpty()) {
+            trueSkipped = skippedRows.size();
+        }
+
+        processedCount = allInvoices.size();
+        success = recomputedSuccess;
+        pending = recomputedPending;
+        failed = recomputedFailed;
+        skipped = trueSkipped;
+        totalSelectedAmount = recomputedSelected;
+        chargedAmount = recomputedCharged;
+        pendingAmount = recomputedPendingAmt;
+        failedAmount = recomputedFailedAmt;
+
         merged.put("total_selected", processedCount);
         merged.put("totalSelected", processedCount);
         merged.put("success_count", success);
@@ -534,6 +630,10 @@ public class ActualChargeJobRunner {
         merged.put("failureCount", failed);
         merged.put("skipped_count", skipped);
         merged.put("skippedCount", skipped);
+        merged.put("idempotent_already_success_count", idempotentAlreadySuccess);
+        merged.put("idempotentAlreadySuccessCount", idempotentAlreadySuccess);
+        merged.put("no_live_history_count", recomputedNoHistory);
+        merged.put("noLiveHistoryCount", recomputedNoHistory);
         merged.put("total_amount_selected", totalSelectedAmount);
         merged.put("selectedAmount", totalSelectedAmount);
         merged.put("charged_amount", chargedAmount);
@@ -542,6 +642,11 @@ public class ActualChargeJobRunner {
         merged.put("pendingAmount", pendingAmount);
         merged.put("failed_amount", failedAmount);
         merged.put("failureAmount", failedAmount);
+        if (!skippedRows.isEmpty()) {
+            merged.put("skippedRows", skippedRows);
+            merged.put("skipped_rows", skippedRows);
+            merged.put("skippedRowsTruncated", skippedRows.size() >= 200);
+        }
         currencySummary.mergeInto(merged);
         if (Boolean.TRUE.equals(merged.get("mixed_currency"))) {
             merged.put("total_amount_selected", null);
@@ -561,8 +666,9 @@ public class ActualChargeJobRunner {
         merged.put("actual_charge_completed_at", java.time.OffsetDateTime.now().toString());
         ActualChargeRepository.PendingKpi pendingKpi =
                 actualChargeRepository.pendingKpisForBillingRun(billingRunId, pendingStuckThresholdMinutes);
-        merged.put("pending_count", pendingKpi.pendingCount());
-        merged.put("pendingCount", pendingKpi.pendingCount());
+        // Keep invoice-level pending from latest history; also expose raw PENDING_CAPTURE row KPIs.
+        merged.put("pending_capture_row_count", pendingKpi.pendingCount());
+        merged.put("pendingCaptureRowCount", pendingKpi.pendingCount());
         merged.put("pending_age_p95_seconds", pendingKpi.pendingAgeP95Seconds());
         merged.put("pendingAgeP95Seconds", pendingKpi.pendingAgeP95Seconds());
         merged.put("stuck_pending_count", pendingKpi.stuckPendingCount());
@@ -608,17 +714,57 @@ public class ActualChargeJobRunner {
                     billingRunId,
                     failed);
         }
-        advancePipelineAfterActualCharge(billingRunId);
+        advancePipelineAfterActualCharge(billingRunId, failed, merged);
 
         log.info(
                 "actual-charge job: terminal summary stageRunId={} billingRunId={} success={} pending={} failed={} skipped={} "
-                        + "(skipped includes idempotent skips and rows missing subscription/client_role)",
+                        + "idempotentAlreadySuccess={} (skipped = true skips only; already-finalized count as success)",
                 stageRunId,
                 billingRunId,
                 success,
                 pending,
                 failed,
-                skipped);
+                skipped,
+                idempotentAlreadySuccess);
+    }
+
+    private static String normalizeCurrency(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        return raw.trim().toUpperCase(Locale.ROOT);
+    }
+
+    private static void recordSkippedRow(
+            List<Map<String, Object>> skippedRows, MockInvoiceRow row, String reason, String reasonMessage) {
+        if (skippedRows == null || skippedRows.size() >= 200) {
+            return;
+        }
+        Map<String, Object> m = new HashMap<>();
+        m.put("reason", reason);
+        m.put("reasonMessage", reasonMessage);
+        m.put("reason_message", reasonMessage);
+        if (row.invoiceId() != null) {
+            m.put("invoiceId", row.invoiceId().toString());
+            m.put("invoice_id", row.invoiceId().toString());
+        }
+        if (row.subscriptionInstanceId() != null) {
+            m.put("subscriptionInstanceId", row.subscriptionInstanceId().toString());
+            m.put("subscription_instance_id", row.subscriptionInstanceId().toString());
+        }
+        if (row.clientRoleId() != null) {
+            m.put("clientRoleId", row.clientRoleId().toString());
+            m.put("client_role_id", row.clientRoleId().toString());
+        }
+        if (row.totalAmount() != null) {
+            m.put("totalAmount", row.totalAmount());
+            m.put("total_amount", row.totalAmount());
+        }
+        if (row.invoiceCurrencyCode() != null) {
+            m.put("currencyCode", row.invoiceCurrencyCode());
+            m.put("currency_code", row.invoiceCurrencyCode());
+        }
+        skippedRows.add(m);
     }
 
     /**
@@ -761,15 +907,106 @@ public class ActualChargeJobRunner {
                 row.totalAmount(),
                 null,
                 null);
+        enqueueActualChargeDlq(stageRunId, billingRunId, row, reason);
     }
 
-    private void advancePipelineAfterActualCharge(UUID billingRunId) {
+    private void enqueueActualChargeDlq(
+            UUID stageRunId,
+            UUID billingRunId,
+            MockInvoiceRow row,
+            String reason) {
+        try {
+            BillingWorkItem item = new BillingWorkItem();
+            item.setBillingRunId(billingRunId);
+            item.setRunMode(RunMode.LIVE);
+            item.setInvoiceId(row.invoiceId());
+            item.setSubscriptionInstanceId(row.subscriptionInstanceId());
+            item.setClientRoleId(row.clientRoleId());
+            item.setMock(false);
+            item.setHistoryStatusCode(BillingStatus.LIVE_PAYMENT_FAILED.getCode());
+            item.setFailureReason(reason);
+            item.setInvoiceSubTotal(row.subTotal());
+            item.setInvoiceTaxAmount(row.taxAmount());
+            item.setInvoiceDiscountAmount(row.discountAmount());
+            item.setInvoiceTotalAmount(row.totalAmount());
+
+            String errorType = determineActualChargeErrorType(reason);
+            dlqService.addToDLQ(
+                    item,
+                    new RuntimeException("Actual charge failure: " + (reason != null ? reason : "Unknown")),
+                    errorType,
+                    stageRunId);
+            log.info(
+                    "actual-charge: added payment failure to DLQ invoiceId={} stageRunId={} errorType={}",
+                    row.invoiceId(),
+                    stageRunId,
+                    errorType);
+        } catch (Exception e) {
+            log.error(
+                    "actual-charge: failed to add DLQ entry invoiceId={} stageRunId={}",
+                    row.invoiceId(),
+                    stageRunId,
+                    e);
+        }
+    }
+
+    private static String determineActualChargeErrorType(String failureReason) {
+        if (failureReason == null || failureReason.isBlank()) {
+            return "ActualChargePaymentFailure";
+        }
+        String reasonUpper = failureReason.toUpperCase(Locale.ROOT);
+        if (reasonUpper.contains("CIRCUIT_BREAKER") || reasonUpper.contains("CIRCUIT_OPEN")) {
+            return "CircuitBreakerOpen";
+        }
+        if (reasonUpper.contains("READ_TIMEOUT") || reasonUpper.contains("TIMEOUT") || reasonUpper.contains("TIMED OUT")) {
+            return "TimeoutError";
+        }
+        if (reasonUpper.contains("PAYMENT_HTTP_FAILED") || reasonUpper.contains("HTTP") || reasonUpper.contains("REST_CLIENT")) {
+            return "HttpError";
+        }
+        if (reasonUpper.contains("RATE_LIMIT")) {
+            return "RateLimitExceeded";
+        }
+        if (reasonUpper.contains("MANDATE") || reasonUpper.contains("TOKEN") || reasonUpper.contains("CURRENCY")) {
+            return "MandateValidationFailure";
+        }
+        if (reasonUpper.contains("CLIENT_PAYMENT_METHOD") || reasonUpper.contains("NOT FOUND")) {
+            return "DataError";
+        }
+        return "ActualChargePaymentFailure";
+    }
+
+    /**
+     * After Actual Charge finishes: advance to the next configured stage, or — when Actual Charge
+     * is the last pipeline stage — mark the parent billing run completed ({@code ended_on} +
+     * {@code COMPLETED_SUCCESS} / {@code COMPLETED_WITH_FAILURES}).
+     */
+    private void advancePipelineAfterActualCharge(
+            UUID billingRunId, int failedCount, Map<String, Object> acSummary) {
         String nextCode = stageRunRepository.findNextActiveStageCodeAfter(STAGE);
         if (nextCode == null) {
-            log.warn(
-                    "actual-charge pipeline: no next stage configured after ACTUAL_CHARGE in billing_config.billing_stage_code "
-                            + "(stage_sequence); billing_run.current_stage is unchanged. billingRunId={}",
+            String runStatus = failedCount > 0 ? "COMPLETED_WITH_FAILURES" : "COMPLETED_SUCCESS";
+            Map<String, Object> runSummary = new HashMap<>();
+            if (acSummary != null) {
+                runSummary.putAll(acSummary);
+            }
+            runSummary.put("completed_via", "ACTUAL_CHARGE");
+            runSummary.put("billing_run_terminal_status", runStatus);
+            log.info(
+                    "actual-charge pipeline: ACTUAL_CHARGE is last stage — completing billing run "
+                            + "statusCode={} failedCount={} billingRunId={}",
+                    runStatus,
+                    failedCount,
                     billingRunId);
+            try {
+                billingRunRepository.completeRunWithStatus(billingRunId, runStatus, runSummary);
+            } catch (Exception e) {
+                log.error(
+                        "actual-charge pipeline: failed to complete billing run billingRunId={} statusCode={}",
+                        billingRunId,
+                        runStatus,
+                        e);
+            }
             return;
         }
         log.info(

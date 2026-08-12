@@ -29,25 +29,39 @@ public class AuditLogController {
     /**
      * GET /api/v1/billing/audit
      * List audit log entries.
+     *
+     * <p>Prefer {@code billingRunId} (+ optional {@code eventType}) to trace an entire bill-run /
+     * stage lifecycle. {@code entityType}/{@code entityId} remain supported for narrow lookups.
      */
     @GetMapping
     public ResponseEntity<Map<String, Object>> listAuditLogs(
             @RequestParam(required = false) String entityType,
             @RequestParam(required = false) UUID entityId,
+            @RequestParam(required = false) UUID billingRunId,
+            @RequestParam(required = false) String eventType,
             @RequestParam(required = false) UUID locationLevelId,
             @RequestParam(required = false, defaultValue = "true") Boolean includeChildLocations,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime fromTs,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime toTs,
             @RequestParam(defaultValue = "100") Integer limit,
             @RequestParam(defaultValue = "0") Integer offset) {
-        
+
         log.debug(
-                "Listing audit logs: entityType={}, entityId={}, locationLevelId={}, includeChildLocations={}",
-                entityType, entityId, locationLevelId, includeChildLocations);
-        
+                "Listing audit logs: entityType={}, entityId={}, billingRunId={}, eventType={}, locationLevelId={}, includeChildLocations={}",
+                entityType, entityId, billingRunId, eventType, locationLevelId, includeChildLocations);
+
         Map<String, Object> response = auditLogService.listAuditLogs(
-                entityType, entityId, locationLevelId, includeChildLocations, fromTs, toTs, limit, offset);
-        
+                entityType,
+                entityId,
+                billingRunId,
+                eventType,
+                locationLevelId,
+                includeChildLocations,
+                fromTs,
+                toTs,
+                limit,
+                offset);
+
         return ResponseEntity.ok(response);
     }
 
@@ -58,26 +72,35 @@ public class AuditLogController {
     @GetMapping("/export")
     public ResponseEntity<byte[]> exportAuditLogs(
             @RequestParam(required = false) String entityType,
+            @RequestParam(required = false) UUID billingRunId,
+            @RequestParam(required = false) String eventType,
             @RequestParam(required = false) UUID locationLevelId,
             @RequestParam(required = false, defaultValue = "true") Boolean includeChildLocations,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime fromTs,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime toTs,
             @RequestParam(required = false, defaultValue = "csv") String format) {
-        
+
         log.debug(
-                "Exporting audit logs: entityType={}, locationLevelId={}, includeChildLocations={}, format={}",
-                entityType, locationLevelId, includeChildLocations, format);
-        
+                "Exporting audit logs: entityType={}, billingRunId={}, eventType={}, locationLevelId={}, includeChildLocations={}, format={}",
+                entityType, billingRunId, eventType, locationLevelId, includeChildLocations, format);
+
         byte[] exportData =
                 auditLogService.exportAuditLogs(
-                        entityType, locationLevelId, includeChildLocations, fromTs, toTs, format);
+                        entityType,
+                        billingRunId,
+                        eventType,
+                        locationLevelId,
+                        includeChildLocations,
+                        fromTs,
+                        toTs,
+                        format);
         if (exportData == null) {
             return ResponseEntity.notFound().build();
         }
-        
+
         String contentType = "csv".equalsIgnoreCase(format) ? "text/csv" : "application/json";
         String filename = "billing-audit-" + OffsetDateTime.now().toLocalDate() + "." + format;
-        
+
         return ResponseEntity.ok()
                 .header("Content-Type", contentType)
                 .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")

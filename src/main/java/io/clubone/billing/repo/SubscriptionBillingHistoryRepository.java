@@ -263,6 +263,7 @@ public class SubscriptionBillingHistoryRepository {
                    loc.location_id AS location_id,
                    pt.method_type_name AS payment_method_type,
                    mg.client_gateway_mandate_id AS mandate_id,
+                   mg.gateway_mandate_id AS mandate_code,
                    mg.mandate_status AS mandate_status,
                    mg.mandate_start_date AS mandate_valid_from,
                    mg.mandate_end_date AS mandate_valid_to,
@@ -315,6 +316,7 @@ public class SubscriptionBillingHistoryRepository {
             LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id
             LEFT JOIN LATERAL (
                 SELECT cgm.client_gateway_mandate_id,
+                       cgm.gateway_mandate_id,
                        lgs.code AS mandate_status,
                        cgm.mandate_start_date,
                        cgm.mandate_end_date,
@@ -444,6 +446,7 @@ public class SubscriptionBillingHistoryRepository {
                 loc.location_id AS location_id,
                 pt.method_type_name AS payment_method_type,
                 mg.client_gateway_mandate_id AS mandate_id,
+                mg.gateway_mandate_id AS mandate_code,
                 mg.mandate_status AS mandate_status,
                 mg.mandate_start_date AS mandate_valid_from,
                 mg.mandate_end_date AS mandate_valid_to,
@@ -506,6 +509,7 @@ public class SubscriptionBillingHistoryRepository {
                 ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id
             LEFT JOIN LATERAL (
                 SELECT cgm.client_gateway_mandate_id,
+                       cgm.gateway_mandate_id,
                        lgs.code AS mandate_status,
                        cgm.mandate_start_date,
                        cgm.mandate_end_date,
@@ -647,6 +651,7 @@ public class SubscriptionBillingHistoryRepository {
                 loc.location_id AS location_id,
                 pt.method_type_name AS payment_method_type,
                 mg.client_gateway_mandate_id AS mandate_id,
+                mg.gateway_mandate_id AS mandate_code,
                 mg.mandate_status AS mandate_status,
                 mg.mandate_start_date AS mandate_valid_from,
                 mg.mandate_end_date AS mandate_valid_to,
@@ -709,6 +714,7 @@ public class SubscriptionBillingHistoryRepository {
                 ON pt.payment_gateway_method_type_id = pgsm.payment_gateway_method_type_id
             LEFT JOIN LATERAL (
                 SELECT cgm.client_gateway_mandate_id,
+                       cgm.gateway_mandate_id,
                        lgs.code AS mandate_status,
                        cgm.mandate_start_date,
                        cgm.mandate_end_date,
@@ -1125,6 +1131,7 @@ public class SubscriptionBillingHistoryRepository {
                 (UUID) rs.getObject("location_id"),
                 blankToNull(rs.getString("payment_method_type")),
                 (UUID) rs.getObject("mandate_id"),
+                blankToNull(rs.getString("mandate_code")),
                 rs.getString("mandate_status"),
                 toOffsetUtc(rs.getTimestamp("mandate_valid_from")),
                 toOffsetUtc(rs.getTimestamp("mandate_valid_to")),

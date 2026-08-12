@@ -54,6 +54,8 @@ public record SubscriptionBillingHistoryItemDto(
         UUID locationId,
         String paymentMethodType,
         UUID mandateId,
+        /** Gateway / PSP mandate reference ({@code client_gateway_mandate.gateway_mandate_id}); prefer over {@link #mandateId} in UI. */
+        String mandateCode,
         String mandateStatus,
         OffsetDateTime mandateValidFrom,
         OffsetDateTime mandateValidTo,

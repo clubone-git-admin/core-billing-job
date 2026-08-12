@@ -6,6 +6,7 @@ import io.clubone.billing.batch.model.GatewayStatus;
 import io.clubone.billing.batch.ratelimit.BillingRateLimiter;
 import io.clubone.billing.repo.ActualChargeRepository;
 import io.clubone.billing.service.currency.GatewayMidCurrencyService;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
 import org.slf4j.Logger;
@@ -17,6 +18,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
@@ -207,16 +209,36 @@ public class HttpPaymentService implements PaymentService {
 		Object clientPaymentTxnIdObj = chargeResp.get("clientPaymentTransactionId");
 		if (clientPaymentTxnIdObj == null) {
 			log.warn("billInvoiceRecurring charge-at-will failed (missing clientPaymentTransactionId): invoiceId={} response={}", invoiceId, chargeResp);
-			return new PaymentResult(false, null, "CHARGE_AT_WILL_FAILED: missing clientPaymentTransactionId", intentId, null, null);
+			String reason = firstNonBlank(
+					asString(chargeResp.get("failureReason")),
+					asString(chargeResp.get("reason")),
+					asString(chargeResp.get("message")),
+					asString(chargeResp.get("error")),
+					"missing clientPaymentTransactionId");
+			return new PaymentResult(false, null,
+					"CHARGE_AT_WILL_FAILED: status=" + status + " reason=" + reason + " invoiceId=" + invoiceId,
+					intentId, null, null);
 		}
 
 		UUID clientPaymentTxnId = UUID.fromString(String.valueOf(chargeResp.get("clientPaymentTransactionId")));
 
 		if (GatewayStatus.FAILED.getCode().equalsIgnoreCase(status)) {
-			log.warn("billInvoiceRecurring charge-at-will FAILED: invoiceId={} status={} intentId={} txnId={}",
-					invoiceId, status, intentId, clientPaymentTxnId);
+			String reason = firstNonBlank(
+					asString(chargeResp.get("failureReason")),
+					asString(chargeResp.get("reason")),
+					asString(chargeResp.get("message")),
+					asString(chargeResp.get("error")),
+					"gateway returned FAILED");
+			String razorpayPaymentId = asString(chargeResp.get("razorpayPaymentId"));
+			log.warn("billInvoiceRecurring charge-at-will FAILED: invoiceId={} status={} reason={} intentId={} txnId={} rzpPaymentId={}",
+					invoiceId, status, reason, intentId, clientPaymentTxnId, razorpayPaymentId);
 			metrics.recordPaymentFailure("PAYMENT_FAILED");
-			return new PaymentResult(false, null, "PAYMENT_FAILED", intentId, clientPaymentTxnId, null);
+			String detail = "PAYMENT_FAILED: reason=" + reason
+					+ " invoiceId=" + invoiceId
+					+ " intentId=" + intentId
+					+ " txnId=" + clientPaymentTxnId
+					+ (razorpayPaymentId != null ? " razorpayPaymentId=" + razorpayPaymentId : "");
+			return new PaymentResult(false, null, detail, intentId, clientPaymentTxnId, null);
 		}
 
 		if (GatewayStatus.PENDING_CAPTURE.getCode().equalsIgnoreCase(status)
@@ -325,15 +347,103 @@ public class HttpPaymentService implements PaymentService {
 	}
 
 	/**
-	 * Fallback method for circuit breaker.
+	 * Resilience4j fallback: invoked when circuit is OPEN, or when the decorated call
+	 * throws after retries. Do not label every timeout as CIRCUIT_BREAKER_OPEN.
 	 */
 	public PaymentResult paymentFallback(UUID invoiceId, UUID clientRoleId, UUID clientPaymentMethodId,
 			long amountMinor, String currencyCode, Throwable throwable) {
-		log.warn("Circuit breaker fallback triggered: invoiceId={} error={}", invoiceId,
-			throwable != null ? throwable.getMessage() : "Unknown error");
 		clearAttemptCounters();
-		return PaymentResult.fail("CIRCUIT_BREAKER_OPEN: " +
-			(throwable != null ? throwable.getMessage() : "Service unavailable"));
+		String detail = formatPaymentCallFailure(
+				invoiceId, clientRoleId, clientPaymentMethodId, amountMinor, currencyCode, throwable);
+		boolean circuitOpen = throwable instanceof CallNotPermittedException
+				|| (throwable != null && throwable.getClass().getSimpleName().contains("CallNotPermitted"));
+		String prefix = circuitOpen ? "CIRCUIT_BREAKER_OPEN" : "PAYMENT_HTTP_FAILED";
+		log.warn("{}: {}", prefix, detail);
+		return PaymentResult.fail(prefix + ": " + detail);
+	}
+
+	private String formatPaymentCallFailure(
+			UUID invoiceId,
+			UUID clientRoleId,
+			UUID clientPaymentMethodId,
+			long amountMinor,
+			String currencyCode,
+			Throwable throwable) {
+		int timeoutMs = props.getPayment().getHttp().getTimeoutMs();
+		String baseUrl = props.getPayment().getHttp().getBaseUrl();
+		String chargePath = props.getPayment().getHttp().getChargeAtWillPath();
+		String root = rootCauseSummary(throwable);
+		String kind = classifyThrowable(throwable);
+		return "kind=" + kind
+				+ " invoiceId=" + invoiceId
+				+ " clientRoleId=" + clientRoleId
+				+ " clientPaymentMethodId=" + clientPaymentMethodId
+				+ " amountMinor=" + amountMinor
+				+ " currency=" + currencyCode
+				+ " endpoint=" + baseUrl + chargePath
+				+ " timeoutMs=" + timeoutMs
+				+ " error=" + root;
+	}
+
+	private static String classifyThrowable(Throwable throwable) {
+		if (throwable == null) {
+			return "UNKNOWN";
+		}
+		if (throwable instanceof CallNotPermittedException
+				|| throwable.getClass().getSimpleName().contains("CallNotPermitted")) {
+			return "CIRCUIT_OPEN";
+		}
+		Throwable cur = throwable;
+		while (cur != null) {
+			if (cur instanceof SocketTimeoutException
+					|| (cur.getMessage() != null && cur.getMessage().toLowerCase(Locale.ROOT).contains("timed out"))) {
+				return "READ_TIMEOUT";
+			}
+			if (cur instanceof ResourceAccessException) {
+				return "RESOURCE_ACCESS";
+			}
+			cur = cur.getCause();
+		}
+		return throwable.getClass().getSimpleName();
+	}
+
+	private static String rootCauseSummary(Throwable throwable) {
+		if (throwable == null) {
+			return "Service unavailable";
+		}
+		Throwable root = throwable;
+		while (root.getCause() != null && root.getCause() != root) {
+			root = root.getCause();
+		}
+		String msg = root.getMessage();
+		if (msg == null || msg.isBlank()) {
+			msg = throwable.getMessage();
+		}
+		if (msg == null || msg.isBlank()) {
+			msg = root.getClass().getSimpleName();
+		}
+		// Keep stored failure_reason readable in UI.
+		msg = msg.replace('\n', ' ').trim();
+		if (msg.length() > 500) {
+			msg = msg.substring(0, 500) + "…";
+		}
+		return root.getClass().getSimpleName() + ": " + msg;
+	}
+
+	private static String asString(Object value) {
+		return value == null ? null : String.valueOf(value);
+	}
+
+	private static String firstNonBlank(String... values) {
+		if (values == null) {
+			return null;
+		}
+		for (String v : values) {
+			if (v != null && !v.isBlank() && !"null".equalsIgnoreCase(v.trim())) {
+				return v.trim();
+			}
+		}
+		return null;
 	}
 
 	private Map<String, Object> postJson(String callName, String url, Map<String, Object> body) {
@@ -375,15 +485,29 @@ public class HttpPaymentService implements PaymentService {
 			resp = rt.exchange(url, HttpMethod.POST, req,
 					new ParameterizedTypeReference<Map<String, Object>>() {});
 		} catch (org.springframework.web.client.HttpStatusCodeException httpEx) {
-			// Surface payment-service body (e.g. missing X-Actor-Id) instead of opaque status only.
 			String respText = httpEx.getResponseBodyAsString();
 			log.error("HttpPaymentService {} failed: url={} statusCode={} body={}",
 					callName, url, httpEx.getStatusCode().value(), respText);
 			throw new IllegalStateException(
-					httpEx.getStatusCode().value() + " : " + (respText == null || respText.isBlank()
-							? httpEx.getMessage()
-							: respText),
+					"call=" + callName
+							+ " status=" + httpEx.getStatusCode().value()
+							+ " url=" + url
+							+ " body=" + (respText == null || respText.isBlank() ? httpEx.getMessage() : respText),
 					httpEx);
+		} catch (ResourceAccessException rae) {
+			int timeoutMs = props.getPayment().getHttp().getTimeoutMs();
+			boolean timedOut = rae.getCause() instanceof SocketTimeoutException
+					|| (rae.getMessage() != null && rae.getMessage().toLowerCase(Locale.ROOT).contains("timed out"));
+			String kind = timedOut ? "READ_TIMEOUT" : "CONNECTION_ERROR";
+			log.error("HttpPaymentService {} {}: url={} timeoutMs={} error={}",
+					callName, kind, url, timeoutMs, rae.getMessage());
+			throw new IllegalStateException(
+					"call=" + callName
+							+ " kind=" + kind
+							+ " url=" + url
+							+ " timeoutMs=" + timeoutMs
+							+ " error=" + rae.getMessage(),
+					rae);
 		}
 		int statusCode = resp.getStatusCode().value();
 		Map<String, Object> respBody = resp.getBody();
@@ -396,12 +520,13 @@ public class HttpPaymentService implements PaymentService {
 
 		if (statusCode >= 500 && statusCode < 600) {
 			log.warn("HttpPaymentService {} received 5xx error, will retry: url={} statusCode={}", callName, url, statusCode);
-			throw new IllegalStateException("Server error " + statusCode + " url=" + url);
+			throw new IllegalStateException("call=" + callName + " Server error " + statusCode + " url=" + url);
 		}
 
 		if (!resp.getStatusCode().is2xxSuccessful() || respBody == null) {
 			log.error("HttpPaymentService {} failed: url={} statusCode={} body={}", callName, url, statusCode, respBody);
-			throw new IllegalStateException("POST failed " + resp.getStatusCode() + " url=" + url);
+			throw new IllegalStateException("call=" + callName + " POST failed " + resp.getStatusCode() + " url=" + url
+					+ " body=" + respBody);
 		}
 		return respBody;
 	}

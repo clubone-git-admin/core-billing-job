@@ -759,4 +759,33 @@ public class DuePreviewRepository {
         }, stageRunId.toString(), requireAppIdStr());
         return rows.isEmpty() ? Map.of() : rows.get(0);
     }
+
+    /**
+     * Resolve subscription plan codes for a set of plan ids (used to backfill older due-preview CSV rows).
+     */
+    public Map<UUID, String> findSubscriptionPlanCodesByPlanIds(Collection<UUID> planIds) {
+        if (planIds == null || planIds.isEmpty()) {
+            return Map.of();
+        }
+        List<UUID> ids = planIds.stream().filter(Objects::nonNull).distinct().toList();
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        String placeholders = ids.stream().map(id -> "?::uuid").collect(java.util.stream.Collectors.joining(","));
+        String sql = String.format("""
+                SELECT sp.subscription_plan_id, sp.subscription_plan_code
+                FROM client_subscription_billing.subscription_plan sp
+                WHERE sp.subscription_plan_id IN (%s)
+                """, placeholders);
+        List<Object> args = new ArrayList<>(ids);
+        Map<UUID, String> out = new HashMap<>();
+        jdbc.query(sql, args.toArray(), rs -> {
+            UUID id = rs.getObject("subscription_plan_id", UUID.class);
+            String code = rs.getString("subscription_plan_code");
+            if (id != null && code != null && !code.isBlank()) {
+                out.put(id, code.trim());
+            }
+        });
+        return out;
+    }
 }

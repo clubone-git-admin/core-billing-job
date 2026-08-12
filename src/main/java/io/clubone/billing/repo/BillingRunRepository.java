@@ -889,8 +889,30 @@ public class BillingRunRepository {
      * Complete a billing run with summary and set status to COMPLETED_SUCCESS.
      */
     public void completeRunWithSummary(UUID billingRunId, Map<String, Object> summaryJson) {
-        String statusIdSql = "SELECT billing_run_status_id FROM billing_config.billing_run_status WHERE status_code = 'COMPLETED_SUCCESS'";
-        UUID statusId = jdbc.queryForObject(statusIdSql, UUID.class);
+        completeRunWithStatus(billingRunId, "COMPLETED_SUCCESS", summaryJson);
+    }
+
+    /**
+     * Mark billing run terminal: sets {@code billing_run_status_id}, {@code ended_on}, and optional summary.
+     * Used when the pipeline's last stage (Actual Charge) finishes and there is no next stage.
+     *
+     * @param statusCode typically {@code COMPLETED_SUCCESS} or {@code COMPLETED_WITH_FAILURES}
+     */
+    public void completeRunWithStatus(UUID billingRunId, String statusCode, Map<String, Object> summaryJson) {
+        String code = (statusCode == null || statusCode.isBlank()) ? "COMPLETED_SUCCESS" : statusCode.trim();
+        String statusIdSql =
+                "SELECT billing_run_status_id FROM billing_config.billing_run_status WHERE status_code = ?";
+        UUID statusId;
+        try {
+            statusId = jdbc.queryForObject(statusIdSql, UUID.class, code);
+        } catch (Exception e) {
+            // Fallback if COMPLETED_WITH_FAILURES (etc.) is not seeded.
+            statusId = jdbc.queryForObject(statusIdSql, UUID.class, "COMPLETED_SUCCESS");
+            code = "COMPLETED_SUCCESS";
+        }
+        if (statusId == null) {
+            throw new IllegalStateException("billing_run_status not found for " + code);
+        }
 
         String summaryJsonStr = null;
         if (summaryJson != null) {

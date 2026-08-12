@@ -261,6 +261,7 @@ public class DuePreviewService {
             summaryJson.put("invoice_limit", invoiceLimit);
         }
         ensureInvoiceAttributes(invoices);
+        enrichMissingSubscriptionPlanCodes(invoices);
 
         Set<UUID> scheduleIds = invoices.stream()
                 .map(row -> parseUuid(row.get("billing_schedule_id")))
@@ -513,13 +514,14 @@ public class DuePreviewService {
     /** Keys for invoice attributes that should always be present in get run details response. */
     private static final String[] INVOICE_ATTRIBUTE_KEYS = {
             "role_id", "client_agreement_status", "agreement_name", "location_name", "currency_code",
-            "payment_method_name", "payment_type_name", "card_last4", "subscription_id"
+            "payment_method_name", "payment_type_name", "card_last4", "subscription_id",
+            "subscription_plan_id", "subscription_plan_code"
     };
 
     /**
      * Ensure each invoice map has the standard attributes (role_id, client_agreement_status, agreement_name,
-     * location_name, payment_method_name, payment_type_name, card_last4, subscription_id) so the API response
-     * is consistent; missing keys get null.
+     * location_name, payment_method_name, payment_type_name, card_last4, subscription_id,
+     * subscription_plan_id, subscription_plan_code) so the API response is consistent; missing keys get null.
      */
     private void ensureInvoiceAttributes(List<Map<String, Object>> invoices) {
         if (invoices == null) return;
@@ -528,6 +530,47 @@ public class DuePreviewService {
                 if (!row.containsKey(key)) {
                     row.put(key, null);
                 }
+            }
+        }
+    }
+
+    /**
+     * Backfill {@code subscription_plan_code} for older CSV snapshots that predate the column,
+     * or rows where the code was blank at generation time.
+     */
+    private void enrichMissingSubscriptionPlanCodes(List<Map<String, Object>> invoices) {
+        if (invoices == null || invoices.isEmpty()) {
+            return;
+        }
+        Set<UUID> missingPlanIds = new LinkedHashSet<>();
+        for (Map<String, Object> row : invoices) {
+            if (row == null) continue;
+            Object codeObj = row.get("subscription_plan_code");
+            String code = codeObj != null ? codeObj.toString().trim() : "";
+            if (!code.isEmpty()) continue;
+            UUID planId = parseUuid(row.get("subscription_plan_id"));
+            if (planId != null) {
+                missingPlanIds.add(planId);
+            }
+        }
+        if (missingPlanIds.isEmpty()) {
+            return;
+        }
+        Map<UUID, String> codesByPlanId =
+                duePreviewRepository.findSubscriptionPlanCodesByPlanIds(missingPlanIds);
+        if (codesByPlanId.isEmpty()) {
+            return;
+        }
+        for (Map<String, Object> row : invoices) {
+            if (row == null) continue;
+            Object codeObj = row.get("subscription_plan_code");
+            String code = codeObj != null ? codeObj.toString().trim() : "";
+            if (!code.isEmpty()) continue;
+            UUID planId = parseUuid(row.get("subscription_plan_id"));
+            if (planId == null) continue;
+            String resolved = codesByPlanId.get(planId);
+            if (resolved != null && !resolved.isBlank()) {
+                row.put("subscription_plan_code", resolved.trim());
             }
         }
     }

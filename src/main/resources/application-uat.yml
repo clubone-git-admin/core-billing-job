@@ -9,6 +9,7 @@ spring:
 # UAT API host (parallel to develop-api.clubone.io).
 # Payment charge-at-will must hit the gateway (same host as txn), not localhost —
 # local payment-service on :8010 is optional and often down / times out.
+# charge-at-will does validate + Razorpay create/capture (often >8s) — keep read timeout generous.
 clubone:
   billing:
     payment:
@@ -16,5 +17,6 @@ clubone:
         # Must be https — http returns ALB 301 text/html and RestTemplate fails to parse JSON.
         base-url: https://uat.api.clubone.io
         txn-base-url: https://uat.api.clubone.io
+        timeout-ms: 45000
   notification:
     base-url: https://uat.api.clubone.io

@@ -456,6 +456,7 @@ public class InvoiceGenerationJobRunner {
         }
         Map<String, Object> auditPayload = new LinkedHashMap<>();
         auditPayload.put("billing_run_id", billingRunId.toString());
+        auditPayload.put("stage_run_id", stageRunId.toString());
         auditPayload.put("invoices_created", created);
         auditPayload.put("failure_count", failed);
         auditPayload.put("skipped_total", skippedTotal);
@@ -466,6 +467,13 @@ public class InvoiceGenerationJobRunner {
         auditPayload.put("total_amount", totalAmount != null ? totalAmount.toPlainString() : null);
         auditPayload.put("has_failures", failed > 0 || jobLevelIssue);
         auditPayload.put("job_level_issue", jobLevelIssue);
+        if (currenciesObj instanceof List<?> currencyList && !currencyList.isEmpty()) {
+            auditPayload.put("currencies", new ArrayList<>(currencyList));
+            auditPayload.put("mixed_currency", currencyList.size() > 1);
+        }
+        if (merged.get("by_currency") != null) {
+            auditPayload.put("by_currency", merged.get("by_currency"));
+        }
         auditLogRepository.insertAuditLog(
                 "INVOICE_GENERATION", "STAGE_RUN", stageRunId, "DRAFTS_GENERATED", actor, auditPayload);
     }

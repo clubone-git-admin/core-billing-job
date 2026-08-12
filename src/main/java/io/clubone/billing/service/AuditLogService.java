@@ -30,15 +30,34 @@ public class AuditLogService {
     }
 
     public Map<String, Object> listAuditLogs(
-            String entityType, UUID entityId, UUID locationLevelId, Boolean includeChildLocations, OffsetDateTime fromTs,
-            OffsetDateTime toTs, Integer limit, Integer offset) {
+            String entityType,
+            UUID entityId,
+            UUID billingRunId,
+            String eventType,
+            UUID locationLevelId,
+            Boolean includeChildLocations,
+            OffsetDateTime fromTs,
+            OffsetDateTime toTs,
+            Integer limit,
+            Integer offset) {
         List<UUID> locationIds = resolveLocationIds(locationLevelId, includeChildLocations);
-        
+
+        int safeLimit = limit != null && limit > 0 ? Math.min(limit, 1000) : 100;
+        int safeOffset = offset != null && offset >= 0 ? offset : 0;
+
         List<Map<String, Object>> logs = auditLogRepository.findAuditLogs(
-                entityType, entityId, locationIds, fromTs, toTs, limit, offset);
-        
+                entityType,
+                entityId,
+                billingRunId,
+                eventType,
+                locationIds,
+                fromTs,
+                toTs,
+                safeLimit,
+                safeOffset);
+
         Integer total = auditLogRepository.countAuditLogs(
-                entityType, entityId, locationIds, fromTs, toTs);
+                entityType, entityId, billingRunId, eventType, locationIds, fromTs, toTs);
 
         List<Map<String, Object>> logList = logs.stream()
                 .map(this::formatAuditLog)
@@ -47,13 +66,15 @@ public class AuditLogService {
         return Map.of(
                 "data", logList,
                 "total", total,
-                "limit", limit,
-                "offset", offset
+                "limit", safeLimit,
+                "offset", safeOffset
         );
     }
 
     public byte[] exportAuditLogs(
             String entityType,
+            UUID billingRunId,
+            String eventType,
             UUID locationLevelId,
             Boolean includeChildLocations,
             OffsetDateTime fromTs,
@@ -61,14 +82,16 @@ public class AuditLogService {
             String format) {
         List<UUID> locationIds = resolveLocationIds(locationLevelId, includeChildLocations);
         if ("csv".equalsIgnoreCase(format)) {
-            String csv = auditLogRepository.exportAuditLogsCSV(entityType, locationIds, fromTs, toTs);
+            String csv = auditLogRepository.exportAuditLogsCSV(
+                    entityType, billingRunId, eventType, locationIds, fromTs, toTs);
             return csv.getBytes(StandardCharsets.UTF_8);
         } else {
-            // For JSON format, return JSON bytes
             Map<String, Object> data =
                     listAuditLogs(
                             entityType,
                             null,
+                            billingRunId,
+                            eventType,
                             locationLevelId,
                             includeChildLocations,
                             fromTs,
@@ -114,11 +137,28 @@ public class AuditLogService {
                 com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
                 @SuppressWarnings("unchecked")
                 Map<String, Object> parsedDetails = mapper.readValue(detailsStr, Map.class);
-                details = parsedDetails;
+                details = new HashMap<>(parsedDetails);
             } catch (Exception e) {
                 // Keep empty map if parsing fails
             }
         }
+
+        String billingRunCode = stringOrEmpty(log.get("billing_run_code"));
+        String stageRunCode = stringOrEmpty(log.get("stage_run_code"));
+        String stageCode = stringOrEmpty(log.get("stage_code"));
+        if (!billingRunCode.isEmpty()) {
+            details.putIfAbsent("billing_run_code", billingRunCode);
+        }
+        if (!stageRunCode.isEmpty()) {
+            details.putIfAbsent("stage_run_code", stageRunCode);
+        }
+        if (!stageCode.isEmpty()) {
+            details.putIfAbsent("stage_code", stageCode);
+        }
+
+        String resolvedLabel = stringOrEmpty(log.get("resolved_user_label"));
+        String storedEmail = stringOrEmpty(log.get("user_email"));
+        String userEmail = !resolvedLabel.isEmpty() ? resolvedLabel : storedEmail;
 
         Map<String, Object> result = new HashMap<>();
         result.put("audit_log_id", log.get("audit_log_id"));
@@ -127,12 +167,24 @@ public class AuditLogService {
         result.put("entity_id", log.get("entity_id"));
         result.put("action", log.get("action"));
         result.put("user_id", log.getOrDefault("user_id", ""));
-        result.put("user_email", log.getOrDefault("user_email", ""));
+        result.put("user_email", userEmail);
+        result.put("user_name", resolvedLabel);
+        result.put("billing_run_code", billingRunCode);
+        result.put("stage_run_code", stageRunCode);
+        result.put("stage_code", stageCode);
         result.put("details", details);
         result.put("created_on", log.get("created_on"));
         result.put("ip_address", log.getOrDefault("ip_address", ""));
         result.put("user_agent", log.getOrDefault("user_agent", ""));
         return result;
+    }
+
+    private static String stringOrEmpty(Object v) {
+        if (v == null) {
+            return "";
+        }
+        String s = v.toString().trim();
+        return "null".equalsIgnoreCase(s) ? "" : s;
     }
 
     private List<UUID> resolveLocationIds(UUID locationLevelId, Boolean includeChildLocations) {
@@ -147,4 +199,3 @@ public class AuditLogService {
                 .toList();
     }
 }
-

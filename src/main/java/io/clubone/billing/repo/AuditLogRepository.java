@@ -47,13 +47,23 @@ public class AuditLogRepository {
 
     /**
      * Find audit log entries with filtering.
+     *
+     * <p>{@code billingRunId} matches BILLING_RUN entity rows, STAGE_RUN rows for that billing run,
+     * and any row whose details JSON carries {@code billing_run_id} (covers legacy / cross-entity traces).
      */
     public List<Map<String, Object>> findAuditLogs(
-            String entityType, UUID entityId, List<UUID> locationIds, OffsetDateTime fromTs,
-            OffsetDateTime toTs, Integer limit, Integer offset) {
-        
+            String entityType,
+            UUID entityId,
+            UUID billingRunId,
+            String eventType,
+            List<UUID> locationIds,
+            OffsetDateTime fromTs,
+            OffsetDateTime toTs,
+            Integer limit,
+            Integer offset) {
+
         StringBuilder sql = new StringBuilder("""
-            SELECT 
+            SELECT
                 bal.audit_log_id,
                 bal.event_type,
                 bal.entity_type,
@@ -64,51 +74,29 @@ public class AuditLogRepository {
                 bal.details,
                 bal.created_on,
                 bal.ip_address,
-                bal.user_agent
+                bal.user_agent,
+                br.billing_run_code AS billing_run_code,
+                bsr.stage_run_code AS stage_run_code,
+                bsc.stage_code AS stage_code,
+                COALESCE(
+                    NULLIF(TRIM(bal.user_email), ''),
+                    NULLIF(TRIM(CONCAT_WS(' ', actor_u.first_name, actor_u.last_name)), ''),
+                    NULLIF(TRIM(CONCAT_WS(' ', actor_app_u.first_name, actor_app_u.last_name)), ''),
+                    NULLIF(TRIM(actor_u.email), ''),
+                    NULLIF(TRIM(actor_app_u.email), '')
+                ) AS resolved_user_label
             FROM client_subscription_billing.billing_audit_log bal
-            LEFT JOIN client_subscription_billing.billing_run br
-              ON br.billing_run_id = bal.entity_id::uuid
-            WHERE 1=1
             """);
+        sql.append(resolvedBillingRunJoin());
+        sql.append(resolvedActorJoin());
+        sql.append(" WHERE 1=1 ");
 
         List<Object> params = new ArrayList<>();
-
-        if (entityType != null) {
-            sql.append(" AND bal.entity_type = ?");
-            params.add(entityType);
-        }
-
-        if (entityId != null) {
-            sql.append(" AND bal.entity_id = ?::uuid");
-            params.add(entityId.toString());
-        }
-
-        if (fromTs != null) {
-            sql.append(" AND bal.created_on >= ?");
-            params.add(fromTs);
-        }
-
-        if (toTs != null) {
-            sql.append(" AND bal.created_on <= ?");
-            params.add(toTs);
-        }
-        if (locationIds != null && !locationIds.isEmpty()) {
-            String in = inClausePlaceholders(locationIds.size());
-            sql.append(" AND (")
-                    .append("br.location_id IN (").append(in).append(") ")
-                    .append("OR EXISTS (SELECT 1 FROM client_subscription_billing.billing_run_location j ")
-                    .append("WHERE j.billing_run_id = br.billing_run_id ")
-                    .append("AND j.location_id IN (").append(in).append("))) ");
-            for (int pass = 0; pass < 2; pass++) {
-                for (UUID u : locationIds) {
-                    params.add(u.toString());
-                }
-            }
-        }
+        appendFilters(sql, params, entityType, entityId, billingRunId, eventType, locationIds, fromTs, toTs);
 
         sql.append(" ORDER BY bal.created_on DESC LIMIT ? OFFSET ?");
-        params.add(limit);
-        params.add(offset);
+        params.add(limit != null ? limit : 100);
+        params.add(offset != null ? offset : 0);
 
         return jdbc.queryForList(sql.toString(), params.toArray());
     }
@@ -117,62 +105,41 @@ public class AuditLogRepository {
      * Count audit log entries.
      */
     public Integer countAuditLogs(
-            String entityType, UUID entityId, List<UUID> locationIds, OffsetDateTime fromTs, OffsetDateTime toTs) {
-        
+            String entityType,
+            UUID entityId,
+            UUID billingRunId,
+            String eventType,
+            List<UUID> locationIds,
+            OffsetDateTime fromTs,
+            OffsetDateTime toTs) {
+
         StringBuilder sql = new StringBuilder("""
             SELECT COUNT(1)
             FROM client_subscription_billing.billing_audit_log bal
-            LEFT JOIN client_subscription_billing.billing_run br
-              ON br.billing_run_id = bal.entity_id::uuid
-            WHERE 1=1
             """);
+        sql.append(resolvedBillingRunJoin());
+        sql.append(" WHERE 1=1 ");
 
         List<Object> params = new ArrayList<>();
+        appendFilters(sql, params, entityType, entityId, billingRunId, eventType, locationIds, fromTs, toTs);
 
-        if (entityType != null) {
-            sql.append(" AND bal.entity_type = ?");
-            params.add(entityType);
-        }
-
-        if (entityId != null) {
-            sql.append(" AND bal.entity_id = ?::uuid");
-            params.add(entityId.toString());
-        }
-
-        if (fromTs != null) {
-            sql.append(" AND bal.created_on >= ?");
-            params.add(fromTs);
-        }
-
-        if (toTs != null) {
-            sql.append(" AND bal.created_on <= ?");
-            params.add(toTs);
-        }
-        if (locationIds != null && !locationIds.isEmpty()) {
-            String in = inClausePlaceholders(locationIds.size());
-            sql.append(" AND (")
-                    .append("br.location_id IN (").append(in).append(") ")
-                    .append("OR EXISTS (SELECT 1 FROM client_subscription_billing.billing_run_location j ")
-                    .append("WHERE j.billing_run_id = br.billing_run_id ")
-                    .append("AND j.location_id IN (").append(in).append("))) ");
-            for (int pass = 0; pass < 2; pass++) {
-                for (UUID u : locationIds) {
-                    params.add(u.toString());
-                }
-            }
-        }
-
-        return jdbc.queryForObject(sql.toString(), params.toArray(), Integer.class);
+        Integer count = jdbc.queryForObject(sql.toString(), params.toArray(), Integer.class);
+        return count != null ? count : 0;
     }
 
     /**
      * Export audit logs to CSV format.
      */
     public String exportAuditLogsCSV(
-            String entityType, List<UUID> locationIds, OffsetDateTime fromTs, OffsetDateTime toTs) {
-        
+            String entityType,
+            UUID billingRunId,
+            String eventType,
+            List<UUID> locationIds,
+            OffsetDateTime fromTs,
+            OffsetDateTime toTs) {
+
         StringBuilder sql = new StringBuilder("""
-            SELECT 
+            SELECT
                 bal.audit_log_id,
                 bal.event_type,
                 bal.entity_type,
@@ -181,18 +148,179 @@ public class AuditLogRepository {
                 bal.user_id,
                 bal.user_email,
                 bal.created_on,
-                bal.ip_address
+                bal.ip_address,
+                br.billing_run_code AS billing_run_code,
+                COALESCE(
+                    NULLIF(TRIM(bal.user_email), ''),
+                    NULLIF(TRIM(CONCAT_WS(' ', actor_u.first_name, actor_u.last_name)), ''),
+                    NULLIF(TRIM(CONCAT_WS(' ', actor_app_u.first_name, actor_app_u.last_name)), ''),
+                    NULLIF(TRIM(actor_u.email), ''),
+                    NULLIF(TRIM(actor_app_u.email), '')
+                ) AS resolved_user_label
             FROM client_subscription_billing.billing_audit_log bal
-            LEFT JOIN client_subscription_billing.billing_run br
-              ON br.billing_run_id = bal.entity_id::uuid
-            WHERE 1=1
             """);
+        sql.append(resolvedBillingRunJoin());
+        sql.append(resolvedActorJoin());
+        sql.append(" WHERE 1=1 ");
 
         List<Object> params = new ArrayList<>();
+        appendFilters(sql, params, entityType, null, billingRunId, eventType, locationIds, fromTs, toTs);
 
-        if (entityType != null) {
-            sql.append(" AND bal.entity_type = ?");
-            params.add(entityType);
+        sql.append(" ORDER BY bal.created_on DESC");
+
+        List<Map<String, Object>> logs = jdbc.queryForList(sql.toString(), params.toArray());
+
+        StringBuilder csv = new StringBuilder();
+        csv.append("audit_log_id,event_type,entity_type,entity_id,action,user_id,user_label,billing_run_code,created_on,ip_address\n");
+
+        for (Map<String, Object> log : logs) {
+            String userLabel = firstNonBlank(
+                    stringOrNull(log.get("resolved_user_label")),
+                    stringOrNull(log.get("user_email")),
+                    stringOrNull(log.get("user_id")));
+            csv.append(formatCSVValue(log.get("audit_log_id"))).append(",");
+            csv.append(formatCSVValue(log.get("event_type"))).append(",");
+            csv.append(formatCSVValue(log.get("entity_type"))).append(",");
+            csv.append(formatCSVValue(log.get("entity_id"))).append(",");
+            csv.append(formatCSVValue(log.get("action"))).append(",");
+            csv.append(formatCSVValue(log.get("user_id"))).append(",");
+            csv.append(formatCSVValue(userLabel)).append(",");
+            csv.append(formatCSVValue(log.get("billing_run_code"))).append(",");
+            csv.append(formatCSVValue(log.get("created_on"))).append(",");
+            csv.append(formatCSVValue(log.get("ip_address"))).append("\n");
+        }
+
+        return csv.toString();
+    }
+
+    /**
+     * Resolve the owning billing_run for both BILLING_RUN and STAGE_RUN audit rows so location
+     * filters do not drop stage-scoped events (entity_id is a stage_run_id in that case).
+     */
+    private static String resolvedBillingRunJoin() {
+        return """
+            LEFT JOIN client_subscription_billing.billing_stage_run bsr
+              ON UPPER(COALESCE(bal.entity_type, '')) = 'STAGE_RUN'
+             AND bal.entity_id IS NOT NULL
+             AND bal.entity_id::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             AND bsr.stage_run_id = bal.entity_id::uuid
+            LEFT JOIN billing_config.billing_stage_code bsc
+              ON bsc.billing_stage_code_id = bsr.stage_code_id
+            LEFT JOIN client_subscription_billing.billing_run br
+              ON br.billing_run_id = COALESCE(
+                    bsr.billing_run_id,
+                    CASE
+                      WHEN UPPER(COALESCE(bal.entity_type, '')) = 'BILLING_RUN'
+                       AND bal.entity_id IS NOT NULL
+                       AND bal.entity_id::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                        THEN bal.entity_id::uuid
+                      WHEN bal.details->>'billing_run_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                        THEN (bal.details->>'billing_run_id')::uuid
+                      WHEN bal.details->>'billingRunId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                        THEN (bal.details->>'billingRunId')::uuid
+                      ELSE NULL
+                    END
+                 )
+            """;
+    }
+
+    /**
+     * Resolve actor display label when {@code user_id} stores an access user / application-user UUID.
+     */
+    private static String resolvedActorJoin() {
+        return """
+            LEFT JOIN access.access_user actor_u
+              ON bal.user_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             AND actor_u.user_id = bal.user_id::uuid
+            LEFT JOIN access.access_application_user actor_aau
+              ON bal.user_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             AND actor_aau.application_user_id = bal.user_id::uuid
+            LEFT JOIN access.access_user actor_app_u
+              ON actor_app_u.user_id = actor_aau.user_id
+            """;
+    }
+
+    private static String stringOrNull(Object v) {
+        if (v == null) {
+            return null;
+        }
+        String s = v.toString().trim();
+        return s.isEmpty() ? null : s;
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String v : values) {
+            if (v != null && !v.isBlank()) {
+                return v.trim();
+            }
+        }
+        return null;
+    }
+
+    private void appendFilters(
+            StringBuilder sql,
+            List<Object> params,
+            String entityType,
+            UUID entityId,
+            UUID billingRunId,
+            String eventType,
+            List<UUID> locationIds,
+            OffsetDateTime fromTs,
+            OffsetDateTime toTs) {
+
+        if (entityType != null && !entityType.isBlank()) {
+            sql.append(" AND UPPER(bal.entity_type) = UPPER(?)");
+            params.add(entityType.trim());
+        }
+
+        if (entityId != null) {
+            sql.append(" AND bal.entity_id = ?::uuid");
+            params.add(entityId.toString());
+        }
+
+        if (billingRunId != null) {
+            // Trace everything for a bill run: direct BILLING_RUN rows, all STAGE_RUN rows for the
+            // run (including regenerate history), and any row that stamped billing_run_id in details.
+            sql.append("""
+                 AND (
+                      br.billing_run_id = ?::uuid
+                   OR (
+                        UPPER(COALESCE(bal.entity_type, '')) = 'BILLING_RUN'
+                    AND bal.entity_id = ?::uuid
+                   )
+                   OR (
+                        UPPER(COALESCE(bal.entity_type, '')) = 'STAGE_RUN'
+                    AND EXISTS (
+                          SELECT 1
+                            FROM client_subscription_billing.billing_stage_run s
+                           WHERE s.stage_run_id = bal.entity_id::uuid
+                             AND s.billing_run_id = ?::uuid
+                        )
+                   )
+                   OR (
+                        bal.details->>'billing_run_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    AND (bal.details->>'billing_run_id')::uuid = ?::uuid
+                   )
+                   OR (
+                        bal.details->>'billingRunId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    AND (bal.details->>'billingRunId')::uuid = ?::uuid
+                   )
+                 )
+                """);
+            String id = billingRunId.toString();
+            params.add(id);
+            params.add(id);
+            params.add(id);
+            params.add(id);
+            params.add(id);
+        }
+
+        if (eventType != null && !eventType.isBlank()) {
+            sql.append(" AND UPPER(bal.event_type) = UPPER(?)");
+            params.add(eventType.trim());
         }
 
         if (fromTs != null) {
@@ -204,6 +332,7 @@ public class AuditLogRepository {
             sql.append(" AND bal.created_on <= ?");
             params.add(toTs);
         }
+
         if (locationIds != null && !locationIds.isEmpty()) {
             String in = inClausePlaceholders(locationIds.size());
             sql.append(" AND (")
@@ -217,28 +346,6 @@ public class AuditLogRepository {
                 }
             }
         }
-
-        sql.append(" ORDER BY bal.created_on DESC");
-
-        List<Map<String, Object>> logs = jdbc.queryForList(sql.toString(), params.toArray());
-
-        // Build CSV
-        StringBuilder csv = new StringBuilder();
-        csv.append("audit_log_id,event_type,entity_type,entity_id,action,user_id,user_email,created_on,ip_address\n");
-
-        for (Map<String, Object> log : logs) {
-            csv.append(formatCSVValue(log.get("audit_log_id"))).append(",");
-            csv.append(formatCSVValue(log.get("event_type"))).append(",");
-            csv.append(formatCSVValue(log.get("entity_type"))).append(",");
-            csv.append(formatCSVValue(log.get("entity_id"))).append(",");
-            csv.append(formatCSVValue(log.get("action"))).append(",");
-            csv.append(formatCSVValue(log.get("user_id"))).append(",");
-            csv.append(formatCSVValue(log.get("user_email"))).append(",");
-            csv.append(formatCSVValue(log.get("created_on"))).append(",");
-            csv.append(formatCSVValue(log.get("ip_address"))).append("\n");
-        }
-
-        return csv.toString();
     }
 
     private String formatCSVValue(Object value) {

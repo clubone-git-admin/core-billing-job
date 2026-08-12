@@ -105,7 +105,7 @@ public class BillingJobProperties {
 		public static class Http {
 			private String baseUrl = "https://develop-api.clubone.io";
 			private String createAndCapturePath = "/api/payments/capture-invoice";
-			private int timeoutMs = 8000;
+			private int timeoutMs = 45000;
 			private String validateMethodPath = "/payment/razorpay/billing/validate-method";
 			private String createIntentPath = "/payment/api/payment/razorpay/intents";
 			private String chargeAtWillPath = "/payment/razorpay/billing/charge-at-will";

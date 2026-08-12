@@ -3,6 +3,7 @@ package io.clubone.billing.batch.dlq;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.clubone.billing.batch.audit.AuditService;
 import io.clubone.billing.batch.model.BillingWorkItem;
+import io.clubone.billing.security.AccessContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
@@ -38,39 +39,51 @@ public class DeadLetterQueueService {
      * Add a failed billing item to the Dead Letter Queue.
      */
     public void addToDLQ(BillingWorkItem item, Throwable error, String errorType) {
+        addToDLQ(item, error, errorType, null);
+    }
+
+    /**
+     * Add a failed billing item to the Dead Letter Queue (optionally scoped to a stage run).
+     * {@code application_id} is required so Exceptions workbench queries can see the row.
+     */
+    public void addToDLQ(BillingWorkItem item, Throwable error, String errorType, UUID stageRunId) {
         UUID dlqId = null;
         try {
+            UUID applicationId = AccessContext.applicationId();
             String workItemJson = objectMapper.writeValueAsString(item);
             String stackTrace = getStackTrace(error);
             String errorMessage = error != null ? error.getMessage() : "Unknown error";
 
-            // Generate DLQ ID before insert for audit logging
             dlqId = UUID.randomUUID();
 
             jdbc.update("""
                 INSERT INTO client_subscription_billing.billing_dead_letter_queue
-                (dlq_id, billing_run_id, invoice_id, subscription_instance_id, error_type, 
-                 error_message, error_stack_trace, work_item_json, created_on)
-                VALUES (?::uuid, ?::uuid, ?::uuid, ?::uuid, ?, ?, ?, ?::jsonb, now())
+                (dlq_id, billing_run_id, stage_run_id, invoice_id, subscription_instance_id, error_type,
+                 error_message, error_stack_trace, work_item_json, created_on, resolved, application_id)
+                VALUES (?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?, ?, ?, ?::jsonb, now(), false, ?::uuid)
                 """,
                 dlqId.toString(),
                 item.getBillingRunId() != null ? item.getBillingRunId().toString() : null,
+                stageRunId != null ? stageRunId.toString() : null,
                 item.getInvoiceId() != null ? item.getInvoiceId().toString() : null,
                 item.getSubscriptionInstanceId() != null ? item.getSubscriptionInstanceId().toString() : null,
                 errorType != null ? errorType : "UNKNOWN",
                 errorMessage,
                 stackTrace,
-                workItemJson
+                workItemJson,
+                applicationId.toString()
             );
 
-            log.warn("Added to DLQ: invoiceId={} billingRunId={} errorType={} error={}",
-                item.getInvoiceId(), item.getBillingRunId(), errorType, errorMessage);
-            
-            // Audit: DLQ entry created
+            log.warn("Added to DLQ: dlqId={} invoiceId={} billingRunId={} stageRunId={} errorType={} error={}",
+                dlqId, item.getInvoiceId(), item.getBillingRunId(), stageRunId, errorType, errorMessage);
+
             auditService.logDLQCreated(dlqId, item.getInvoiceId(), errorType, errorMessage, "system");
         } catch (Exception e) {
-            log.error("Failed to add to DLQ: invoiceId={} billingRunId={}",
-                item.getInvoiceId(), item.getBillingRunId(), e);
+            log.error("Failed to add to DLQ: invoiceId={} billingRunId={} stageRunId={}",
+                item != null ? item.getInvoiceId() : null,
+                item != null ? item.getBillingRunId() : null,
+                stageRunId,
+                e);
         }
     }
 
@@ -109,7 +122,6 @@ public class DeadLetterQueueService {
      * Mark a DLQ entry as resolved.
      */
     public void markResolved(UUID dlqId, String resolvedBy, String resolutionNotes) {
-        // Get invoice_id before update for audit logging
         UUID invoiceId = null;
         try {
             List<Map<String, Object>> results = jdbc.queryForList("""
@@ -124,7 +136,7 @@ public class DeadLetterQueueService {
         } catch (Exception e) {
             log.debug("Could not get invoice_id for DLQ audit: dlqId={}", dlqId, e);
         }
-        
+
         jdbc.update("""
             UPDATE client_subscription_billing.billing_dead_letter_queue
             SET resolved = true, resolved_on = now(), resolved_by = ?, resolution_notes = ?
@@ -135,8 +147,7 @@ public class DeadLetterQueueService {
             dlqId.toString()
         );
         log.info("Marked DLQ entry as resolved: dlqId={} resolvedBy={}", dlqId, resolvedBy);
-        
-        // Audit: DLQ entry resolved
+
         auditService.logDLQResolved(dlqId, invoiceId, resolvedBy, resolutionNotes, resolvedBy);
     }
 
