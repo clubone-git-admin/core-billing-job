@@ -32,17 +32,43 @@ public class BillingReportingRepository {
         return requireAppId().toString();
     }
 
+    /** SBH + invoice → reporting currency (aliases {@code sbh}/{@code i}/{@code br}). */
+    private static String sbhRep() {
+        return sbhRep("sbh", "i");
+    }
+
+    private static String sbhRep(String sbhAlias, String invAlias) {
+        return BillingReportSql.sbhReportingMoney(
+                sbhAlias,
+                invAlias,
+                "br.application_id",
+                "COALESCE("
+                        + invAlias
+                        + ".fx_as_of, "
+                        + sbhAlias
+                        + ".billing_attempt_on, br.due_date::timestamptz)");
+    }
+
+    private static String invRep() {
+        return BillingReportSql.invoiceReportingMoney("i");
+    }
+
+    private static String invRep(String invAlias) {
+        return BillingReportSql.invoiceReportingMoney(invAlias);
+    }
+
     public List<Map<String, Object>> billRunSummary(
             LocalDate from, LocalDate to, List<UUID> locationIds, int limit, int offset) {
         String sql =
                 "SELECT brs.status_code AS billing_run_status, COUNT(DISTINCT br.billing_run_id) AS run_count, "
                         + "COALESCE(SUM((br.summary_json->>'invoices_count')::int),0) AS invoice_count_sum, "
-                        + "COALESCE(SUM(sbh.invoice_total_amount),0) AS billed_amount, "
-                        + "COALESCE(SUM(CASE WHEN bs.is_success = true THEN sbh.invoice_total_amount ELSE 0 END),0) AS collected_amount "
+                        + "COALESCE(SUM(" + sbhRep() + "),0) AS billed_amount, "
+                        + "COALESCE(SUM(CASE WHEN bs.is_success = true THEN " + sbhRep() + " ELSE 0 END),0) AS collected_amount "
                         + "FROM client_subscription_billing.billing_run br "
                         + "JOIN billing_config.billing_run_status brs ON brs.billing_run_status_id = br.billing_run_status_id "
                         + "LEFT JOIN client_subscription_billing.subscription_billing_history sbh "
                         + "  ON sbh.billing_run_id = br.billing_run_id "
+                        + "LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id "
                         + "LEFT JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id "
                         + "WHERE br.due_date >= ?::date AND br.due_date <= ?::date "
                         + whereRunTouchesLocations("br", locationIds)
@@ -125,11 +151,13 @@ public class BillingReportingRepository {
         String inner =
                 "SELECT loc.location_id, loc.name AS location_name, "
                         + "COUNT(DISTINCT sbh.subscription_billing_history_id) AS line_count, "
-                        + "COALESCE(SUM(sbh.invoice_total_amount),0) AS total_amount, "
+                        + "COALESCE(SUM(" + sbhRep() + "),0) AS total_amount, "
                         + "COUNT(DISTINCT cr.client_role_id) AS total_clients, "
                         + "COUNT(DISTINCT CASE WHEN bs.is_success = true THEN sbh.invoice_id END) AS success_invoices, "
                         + "COUNT(DISTINCT CASE WHEN bs.is_failure = true THEN sbh.invoice_id END) AS failed_invoices, "
-                        + "COALESCE(SUM(CASE WHEN bs.is_failure = true THEN sbh.invoice_total_amount ELSE 0 END),0) AS failure_amount "
+                        + "COALESCE(SUM(CASE WHEN bs.is_failure = true THEN " + sbhRep() + " ELSE 0 END),0) AS failure_amount, "
+                        + "MAX(UPPER(TRIM(COALESCE(i.currency_code::text, sbh.currency_code::text, '')))) AS currency_code, "
+                        + "COALESCE(SUM(" + sbhRep() + "),0) AS amount_reporting "
                         + baseRest
                         + qWhere
                         + " GROUP BY loc.location_id, loc.name";
@@ -215,7 +243,7 @@ public class BillingReportingRepository {
                         + "  FROM ( "
                         + "    SELECT "
                         + "      sbh2.invoice_id, "
-                        + "      MAX(COALESCE(sbh2.invoice_total_amount,0)) AS invoice_amount, "
+                        + "      MAX(" + sbhRep("sbh2", "i_line2") + ") AS invoice_amount, "
                         + "      (array_agg(bstat2.is_success ORDER BY sbh2.billing_attempt_on DESC NULLS LAST, sbh2.created_on DESC NULLS LAST, sbh2.subscription_billing_history_id DESC))[1] AS latest_is_success, "
                         + "      (array_agg(bstat2.is_failure ORDER BY sbh2.billing_attempt_on DESC NULLS LAST, sbh2.created_on DESC NULLS LAST, sbh2.subscription_billing_history_id DESC))[1] AS latest_is_failure, "
                         + "      BOOL_OR(UPPER(COALESCE(invl2.status_name, '')) IN ('VOID', 'CANCELLED')) AS is_voided "
@@ -375,13 +403,14 @@ public class BillingReportingRepository {
                         + "MAX(COALESCE(pt.method_type_name, pgw.name)) AS payment_method, "
                         + "MAX(COALESCE(s.status_code, '')) AS billing_status, "
                         + "MAX(pgw.name) AS gateway_name, "
-                        + "COALESCE(SUM(sbh.invoice_total_amount),0) AS billed_amount, "
-                        + "COALESCE(SUM(CASE WHEN s.is_success = true THEN sbh.invoice_total_amount ELSE 0 END),0) AS collected_amount, "
-                        + "CASE WHEN COALESCE(SUM(sbh.invoice_total_amount),0) = 0 THEN 0::numeric "
-                        + "ELSE ROUND(100.0 * COALESCE(SUM(CASE WHEN s.is_success = true THEN sbh.invoice_total_amount ELSE 0 END),0) "
-                        + "/ NULLIF(COALESCE(SUM(sbh.invoice_total_amount),0),0), 2) END AS collection_rate, "
+                        + "COALESCE(SUM(" + sbhRep() + "),0) AS billed_amount, "
+                        + "COALESCE(SUM(CASE WHEN s.is_success = true THEN " + sbhRep() + " ELSE 0 END),0) AS collected_amount, "
+                        + "CASE WHEN COALESCE(SUM(" + sbhRep() + "),0) = 0 THEN 0::numeric "
+                        + "ELSE ROUND(100.0 * COALESCE(SUM(CASE WHEN s.is_success = true THEN " + sbhRep() + " ELSE 0 END),0) "
+                        + "/ NULLIF(COALESCE(SUM(" + sbhRep() + "),0),0), 2) END AS collection_rate, "
                         + "CASE WHEN COUNT(1) = 0 THEN 0::numeric "
-                        + "ELSE ROUND(100.0 * COUNT(CASE WHEN s.is_success = true THEN 1 END)::numeric / COUNT(1), 2) END AS gateway_success_rate "
+                        + "ELSE ROUND(100.0 * COUNT(CASE WHEN s.is_success = true THEN 1 END)::numeric / COUNT(1), 2) END AS gateway_success_rate, "
+                        + "MAX(UPPER(TRIM(COALESCE(i.currency_code::text, sbh.currency_code::text, '')))) AS currency_code "
                         + base
                         + " GROUP BY pt.payment_gateway_method_type_id, pgw.payment_gateway_id";
         String outerFilter;
@@ -536,16 +565,18 @@ public class BillingReportingRepository {
                         + "COALESCE(a.agreement_name, CAST(ca.client_agreement_id AS TEXT), '') AS agreement_name, "
                         + "GREATEST(CURRENT_DATE - br.due_date, 0) AS days_overdue, "
                         + "br.due_date AS original_due_date, "
-                        + "COALESCE(i.total_amount,0) AS outstanding_amount, "
+                        + "COALESCE(" + invRep() + ",0) AS outstanding_amount, "
                         + "0::int AS retry_attempt, "
                         + "NULL::timestamptz AS last_try_on, "
                         + "loc.location_id, "
-                        + "COALESCE(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 0 AND 30 THEN i.total_amount ELSE 0 END,0) AS bucket_0_30, "
-                        + "COALESCE(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 31 AND 60 THEN i.total_amount ELSE 0 END,0) AS bucket_30_60, "
-                        + "COALESCE(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 61 AND 90 THEN i.total_amount ELSE 0 END,0) AS bucket_60_90, "
-                        + "COALESCE(CASE WHEN (CURRENT_DATE - br.due_date) > 90 THEN i.total_amount ELSE 0 END,0) AS bucket_90_plus, "
-                        + "COALESCE(i.total_amount,0) AS ar_total, "
-                        + "COALESCE(i.total_amount,0) AS ar_amount "
+                        + "COALESCE(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 0 AND 30 THEN " + invRep() + " ELSE 0 END,0) AS bucket_0_30, "
+                        + "COALESCE(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 31 AND 60 THEN " + invRep() + " ELSE 0 END,0) AS bucket_30_60, "
+                        + "COALESCE(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 61 AND 90 THEN " + invRep() + " ELSE 0 END,0) AS bucket_60_90, "
+                        + "COALESCE(CASE WHEN (CURRENT_DATE - br.due_date) > 90 THEN " + invRep() + " ELSE 0 END,0) AS bucket_90_plus, "
+                        + "COALESCE(" + invRep() + ",0) AS ar_total, "
+                        + "COALESCE(" + invRep() + ",0) AS ar_amount, "
+                        + "UPPER(TRIM(COALESCE(i.currency_code::text, ''))) AS currency_code, "
+                        + invRep() + " AS amount_reporting "
                         + base
                         + qWhere;
         Long tot = jdbc.queryForObject("SELECT COUNT(1) FROM (" + inner + ") c", p.toArray(), Long.class);
@@ -568,9 +599,23 @@ public class BillingReportingRepository {
             int offset) {
         String sql =
                 "SELECT sbsa.subscription_billing_schedule_adjustment_id, sbsa.billing_schedule_id, "
-                        + "sbsa.amount AS adjustment_amount, sbsa.created_on, loc.location_id, loc.name AS location_name, "
+                        + BillingReportSql.reportingMoney(
+                                "i.amount_reporting",
+                                "sbsa.amount",
+                                "COALESCE(i.currency_code::text, '')",
+                                "COALESCE(i.application_id, br.application_id, sbs.application_id)",
+                                "COALESCE(i.fx_as_of, sbsa.created_on)")
+                        + " AS adjustment_amount, sbsa.created_on, loc.location_id, loc.name AS location_name, "
                         + "bat.adjustment_type_code AS adjustment_type, "
-                        + "br.due_date AS billing_run_due_date "
+                        + "br.due_date AS billing_run_due_date, "
+                        + "UPPER(TRIM(COALESCE(i.currency_code::text, ''))) AS currency_code, "
+                        + BillingReportSql.reportingMoney(
+                                "i.amount_reporting",
+                                "sbsa.amount",
+                                "COALESCE(i.currency_code::text, '')",
+                                "COALESCE(i.application_id, br.application_id, sbs.application_id)",
+                                "COALESCE(i.fx_as_of, sbsa.created_on)")
+                        + " AS amount_reporting "
                         + "FROM client_subscription_billing.subscription_billing_schedule_adjustment sbsa "
                         + "LEFT JOIN billing_config.billing_adjustment_type bat "
                         + "  ON bat.billing_adjustment_type_id = sbsa.billing_adjustment_type_id "
@@ -667,14 +712,17 @@ public class BillingReportingRepository {
                         + "END AS invoice_count, "
                         + "COALESCE((br.summary_json->'scopeSummary')::text, '') AS scope, "
                         + "COALESCE(lv_scope.\"name\", l.name, '') AS location_scope, "
-                        + "COALESCE(NULLIF((SELECT COALESCE(SUM(i2.total_amount),0) "
+                        + "COALESCE(NULLIF((SELECT COALESCE(SUM(" + invRep("i2") + "),0) "
                         + " FROM transactions.invoice i2 "
                         + " WHERE i2.billing_run_id = br.billing_run_id), 0), "
                         + "CASE WHEN UPPER(COALESCE(bsc_cur.stage_code, '')) IN ('DUE_PREVIEW', 'MOCK_CHARGE') "
                         + "THEN COALESCE((csr.summary_json->>'total_amount')::numeric, 0) ELSE 0 END) AS billed_amount, "
-                        + "(SELECT COALESCE(SUM(CASE WHEN bs2.is_success = true THEN sbh2.invoice_total_amount ELSE 0 END),0) "
+                        + "(SELECT COALESCE(SUM(CASE WHEN bs2.is_success = true THEN "
+                        + sbhRep("sbh2", "i_pay")
+                        + " ELSE 0 END),0) "
                         + " FROM client_subscription_billing.subscription_billing_history sbh2 "
                         + " JOIN billing_config.billing_status bs2 ON bs2.billing_status_id = sbh2.billing_status_id "
+                        + " LEFT JOIN transactions.invoice i_pay ON i_pay.invoice_id = sbh2.invoice_id "
                         + " WHERE sbh2.billing_run_id = br.billing_run_id "
                         + "   AND COALESCE(sbh2.is_mock, false) = false) AS collected_amount "
                         + baseFrom;
@@ -730,7 +778,7 @@ public class BillingReportingRepository {
     public Map<String, Object> billRunKpiTotals(LocalDate from, LocalDate to, List<UUID> locationIds) {
         String sql =
                 "SELECT "
-                        + "COALESCE(SUM(COALESCE(NULLIF((SELECT COALESCE(SUM(i2.amount_reporting),0) "
+                        + "COALESCE(SUM(COALESCE(NULLIF((SELECT COALESCE(SUM(" + invRep("i2") + "),0) "
                         + "              FROM transactions.invoice i2 "
                         + "              WHERE i2.billing_run_id = br.billing_run_id), 0), "
                         + "              CASE WHEN UPPER(COALESCE(bsc_cur.stage_code, '')) IN ('DUE_PREVIEW', 'MOCK_CHARGE') "
@@ -747,7 +795,9 @@ public class BillingReportingRepository {
                         + "              LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i4.invoice_status_id "
                         + "              WHERE i4.billing_run_id = br.billing_run_id "
                         + "                AND UPPER(COALESCE(invs.status_name, '')) IN ('VOID', 'CANCELLED'))), 0) AS total_voided, "
-                        + "COALESCE(SUM((SELECT COALESCE(SUM(CASE WHEN bs2.is_success = true THEN COALESCE(i_pay.amount_reporting, 0) ELSE 0 END),0) "
+                        + "COALESCE(SUM((SELECT COALESCE(SUM(CASE WHEN bs2.is_success = true THEN "
+                        + sbhRep("sbh2", "i_pay")
+                        + " ELSE 0 END),0) "
                         + "              FROM client_subscription_billing.subscription_billing_history sbh2 "
                         + "              JOIN billing_config.billing_status bs2 ON bs2.billing_status_id = sbh2.billing_status_id "
                         + "              LEFT JOIN transactions.invoice i_pay ON i_pay.invoice_id = sbh2.invoice_id "
@@ -925,7 +975,7 @@ public class BillingReportingRepository {
                 "WITH loc_totals AS ( "
                         + "  SELECT COALESCE(loc.location_id::text, 'UNKNOWN') AS location_id, "
                         + "         COALESCE(MAX(loc.name), 'Unknown') AS location_name, "
-                        + "         COALESCE(SUM(sbh.invoice_total_amount),0) AS total_revenue "
+                        + "         COALESCE(SUM(" + sbhRep() + "),0) AS total_revenue "
                         + base
                         + "  GROUP BY COALESCE(loc.location_id::text, 'UNKNOWN') "
                         + ") "
@@ -941,15 +991,15 @@ public class BillingReportingRepository {
     public Map<String, Object> paymentKpiRollup(LocalDate from, LocalDate to, List<UUID> locationIds) {
         String sql =
                 "SELECT "
-                        + "COALESCE(SUM(sbh.invoice_total_amount),0) AS total_billed, "
-                        + "COALESCE(SUM(CASE WHEN s.is_success = true THEN sbh.invoice_total_amount ELSE 0 END),0) AS total_collected, "
+                        + "COALESCE(SUM(" + sbhRep() + "),0) AS total_billed, "
+                        + "COALESCE(SUM(CASE WHEN s.is_success = true THEN " + sbhRep() + " ELSE 0 END),0) AS total_collected, "
                         + "COUNT(1) AS total_payments_count, "
                         + "COUNT(1) FILTER (WHERE s.is_failure = true) AS failed_payments_count, "
                         + "CASE WHEN COUNT(1) = 0 THEN 0::numeric "
-                        + "ELSE ROUND(COALESCE(SUM(CASE WHEN s.is_success = true THEN sbh.invoice_total_amount ELSE 0 END),0) / COUNT(1), 2) END AS avg_payment_value, "
-                        + "CASE WHEN COALESCE(SUM(sbh.invoice_total_amount),0) = 0 THEN 0::numeric "
-                        + "ELSE ROUND(100.0 * COALESCE(SUM(CASE WHEN s.is_success = true THEN sbh.invoice_total_amount ELSE 0 END),0) "
-                        + "/ NULLIF(COALESCE(SUM(sbh.invoice_total_amount),0),0), 2) END AS collection_pct "
+                        + "ELSE ROUND(COALESCE(SUM(CASE WHEN s.is_success = true THEN " + sbhRep() + " ELSE 0 END),0) / COUNT(1), 2) END AS avg_payment_value, "
+                        + "CASE WHEN COALESCE(SUM(" + sbhRep() + "),0) = 0 THEN 0::numeric "
+                        + "ELSE ROUND(100.0 * COALESCE(SUM(CASE WHEN s.is_success = true THEN " + sbhRep() + " ELSE 0 END),0) "
+                        + "/ NULLIF(COALESCE(SUM(" + sbhRep() + "),0),0), 2) END AS collection_pct "
                         + "FROM ( "
                         + "  SELECT * FROM ( "
                         + "    SELECT sbh0.*, "
@@ -975,11 +1025,11 @@ public class BillingReportingRepository {
     public Map<String, Object> outstandingKpiRollup(LocalDate from, LocalDate to, List<UUID> locationIds) {
         String sql =
                 "SELECT "
-                        + "COALESCE(SUM(i.total_amount),0) AS total_outstanding, "
-                        + "COALESCE(SUM(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 0 AND 30 THEN i.total_amount END),0) AS bucket_0_30, "
-                        + "COALESCE(SUM(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 31 AND 60 THEN i.total_amount END),0) AS bucket_30_60, "
-                        + "COALESCE(SUM(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 61 AND 90 THEN i.total_amount END),0) AS bucket_60_90, "
-                        + "COALESCE(SUM(CASE WHEN (CURRENT_DATE - br.due_date) > 90 THEN i.total_amount END),0) AS bucket_90_plus "
+                        + "COALESCE(SUM(" + invRep() + "),0) AS total_outstanding, "
+                        + "COALESCE(SUM(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 0 AND 30 THEN " + invRep() + " END),0) AS bucket_0_30, "
+                        + "COALESCE(SUM(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 31 AND 60 THEN " + invRep() + " END),0) AS bucket_30_60, "
+                        + "COALESCE(SUM(CASE WHEN (CURRENT_DATE - br.due_date) BETWEEN 61 AND 90 THEN " + invRep() + " END),0) AS bucket_60_90, "
+                        + "COALESCE(SUM(CASE WHEN (CURRENT_DATE - br.due_date) > 90 THEN " + invRep() + " END),0) AS bucket_90_plus "
                         + "FROM transactions.invoice i "
                         + "JOIN client_subscription_billing.billing_run br ON br.billing_run_id = i.billing_run_id "
                         + "LEFT JOIN transactions.lu_invoice_status invs ON invs.invoice_status_id = i.invoice_status_id "
@@ -1017,7 +1067,7 @@ public class BillingReportingRepository {
                         + "  FROM ( "
                         + "    SELECT "
                         + "      sbh2.invoice_id, "
-                        + "      MAX(COALESCE(sbh2.invoice_total_amount,0)) AS invoice_amount, "
+                        + "      MAX(" + sbhRep("sbh2", "i_line2") + ") AS invoice_amount, "
                         + "      (array_agg(bstat2.is_success ORDER BY sbh2.billing_attempt_on DESC NULLS LAST, sbh2.created_on DESC NULLS LAST, sbh2.subscription_billing_history_id DESC))[1] AS latest_is_success, "
                         + "      (array_agg(bstat2.is_failure ORDER BY sbh2.billing_attempt_on DESC NULLS LAST, sbh2.created_on DESC NULLS LAST, sbh2.subscription_billing_history_id DESC))[1] AS latest_is_failure, "
                         + "      BOOL_OR(UPPER(COALESCE(invl2.status_name, '')) IN ('VOID', 'CANCELLED')) AS is_voided "
@@ -1101,11 +1151,13 @@ public class BillingReportingRepository {
                         + "NULL::text AS gateway, "
                         + "COALESCE(NULLIF(dlq.error_type, ''), ft.failure_type_code) AS failure_reason, "
                         + "CASE WHEN COALESCE(dlq.resolved, false) THEN 'RESOLVED' ELSE 'OPEN' END AS retry_status, "
-                        + "COALESCE(i.total_amount, 0) AS rebill_amount, "
+                        + "COALESCE(" + invRep() + ", 0) AS rebill_amount, "
                         + "0::numeric AS credits, "
                         + "COALESCE(loc.name, '') AS location_name, "
                         + "COALESCE(dlq.retry_count, 0) AS retry_attempt, "
-                        + "dlq.last_retry_on AS last_try_on "
+                        + "dlq.last_retry_on AS last_try_on, "
+                        + "UPPER(TRIM(COALESCE(i.currency_code::text, ''))) AS currency_code, "
+                        + invRep() + " AS amount_reporting "
                         + base;
         List<Object> cp = new ArrayList<>();
         cp.add(from);
@@ -1482,7 +1534,7 @@ public class BillingReportingRepository {
                         + "COALESCE(sp_pre.subscription_plan_code, '') AS plan_template, "
                         + "to_char(sbs.billing_period_start, 'YYYY-MM-DD') || ' - ' || to_char(sbs.billing_period_end, 'YYYY-MM-DD') AS billing_period, "
                         + "COALESCE(NULLIF(TRIM(i.invoice_number), ''), CAST(sbh.invoice_id AS TEXT)) AS invoice_id, "
-                        + "COALESCE(sbh.invoice_total_amount, 0) AS invoice_amount, "
+                        + "COALESCE(" + sbhRep() + ", 0) AS invoice_amount, "
                         + "CASE WHEN bs.is_success = true THEN 'SUCCESS' WHEN bs.is_failure = true THEN 'FAILED' ELSE 'PENDING' END AS payment_status, "
                         + "COALESCE(pt.method_type_name, pgw.name, 'Manual') AS payment_method, "
                         + "COALESCE(pgw.name, 'Manual') AS gateway, "
@@ -1491,8 +1543,10 @@ public class BillingReportingRepository {
                         + "     WHEN bs.is_success = true THEN 'SUCCESS' "
                         + "     WHEN bs.is_failure = true THEN 'FAILED' "
                         + "     ELSE 'FAILED' END AS execution_status, "
-                        + "COALESCE(sbh.invoice_total_amount, 0) AS final_amount, "
-                        + "CASE WHEN bs.is_success = true THEN COALESCE(sbh.invoice_total_amount, 0) ELSE 0 END AS payment_amount "
+                        + "COALESCE(" + sbhRep() + ", 0) AS final_amount, "
+                        + "CASE WHEN bs.is_success = true THEN COALESCE(" + sbhRep() + ", 0) ELSE 0 END AS payment_amount, "
+                        + "UPPER(TRIM(COALESCE(i.currency_code::text, sbh.currency_code::text, ''))) AS currency_code, "
+                        + sbhRep() + " AS amount_reporting "
                         + base;
         StringBuilder extra = new StringBuilder();
         if (q != null && !q.isBlank()) {
@@ -1538,8 +1592,8 @@ public class BillingReportingRepository {
                 "SELECT "
                         + "COUNT(1) AS total_schedules_processed, "
                         + "COUNT(DISTINCT sbh.invoice_id) AS invoices_generated, "
-                        + "COALESCE(SUM(COALESCE(sbh.invoice_total_amount,0)),0) AS total_billed_amount, "
-                        + "COALESCE(SUM(CASE WHEN bs.is_success = true THEN COALESCE(sbh.invoice_total_amount,0) ELSE 0 END),0) AS total_collected, "
+                        + "COALESCE(SUM(COALESCE(" + sbhRep() + ",0)),0) AS total_billed_amount, "
+                        + "COALESCE(SUM(CASE WHEN bs.is_success = true THEN COALESCE(" + sbhRep() + ",0) ELSE 0 END),0) AS total_collected, "
                         + "COUNT(1) FILTER (WHERE bs.is_failure = true) AS failed_billing_count, "
                         + "COUNT(1) FILTER (WHERE dlq.error_type IS NOT NULL) AS exception_count, "
                         + "CASE WHEN COUNT(1)=0 THEN 0::numeric "
@@ -1556,6 +1610,7 @@ public class BillingReportingRepository {
                         + ") sbh "
                         + "JOIN client_subscription_billing.billing_run br ON br.billing_run_id = sbh.billing_run_id "
                         + "JOIN billing_config.billing_status bs ON bs.billing_status_id = sbh.billing_status_id "
+                        + "LEFT JOIN transactions.invoice i ON i.invoice_id = sbh.invoice_id "
                         + "LEFT JOIN LATERAL ( "
                         + "  SELECT dlq.error_type "
                         + "  FROM client_subscription_billing.billing_dead_letter_queue dlq "

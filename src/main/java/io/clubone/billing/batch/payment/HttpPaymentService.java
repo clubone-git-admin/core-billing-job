@@ -310,6 +310,16 @@ public class HttpPaymentService implements PaymentService {
 			return new PaymentResult(false, null, "PAYMENT_FAILED:" + status, intentId, clientPaymentTxnId, null);
 		}
 
+		// Prefer mapped txn status over Adyen resultCode. ContAuth with auto-capture keeps
+		// resultCode=AUTHORISED but promotes status→CAPTURED — must not treat that as pending.
+		if ("CAPTURED".equals(normalized) || "SETTLED".equals(normalized) || "SUCCESS".equals(normalized)
+				|| "PAID".equals(normalized)) {
+			log.info("billInvoiceRecurring Adyen SUCCESS: invoiceId={} status={} resultCode={} intentId={} txnId={}",
+					invoiceId, status, resultCode, intentId, clientPaymentTxnId);
+			return new PaymentResult(true, "ADYEN_PSP:" + chargeResp.getOrDefault("pspReference", ""), null, intentId,
+					clientPaymentTxnId, null);
+		}
+
 		if ("PENDING".equals(normalized) || "RECEIVED".equals(normalized)
 				|| "PENDING".equals(resultNorm) || "RECEIVED".equals(resultNorm)) {
 			log.info("billInvoiceRecurring Adyen PENDING: invoiceId={} status={} resultCode={} intentId={} txnId={}",
@@ -323,11 +333,9 @@ public class HttpPaymentService implements PaymentService {
 					null);
 		}
 
-		// Enterprise: AUTHORISED alone is hold (manual capture) → PENDING_CAPTURE.
-		// Final success only when status is CAPTURED (ContAuth promotes AUTHORISED→CAPTURED when auto-capture on).
-		if ("AUTHORISED".equals(normalized) || "AUTHORIZED".equals(normalized)
-				|| "AUTHORISED".equals(resultNorm) || "AUTHORIZED".equals(resultNorm)) {
-			log.info("billInvoiceRecurring Adyen AUTHORISED (pending capture unless auto-capture promoted): invoiceId={} status={} resultCode={} intentId={} txnId={}",
+		// Manual-capture hold: status still AUTHORISED (not promoted to CAPTURED).
+		if ("AUTHORISED".equals(normalized) || "AUTHORIZED".equals(normalized)) {
+			log.info("billInvoiceRecurring Adyen AUTHORISED (pending capture): invoiceId={} status={} resultCode={} intentId={} txnId={}",
 					invoiceId, status, resultCode, intentId, clientPaymentTxnId);
 			return new PaymentResult(
 					false,
@@ -336,14 +344,6 @@ public class HttpPaymentService implements PaymentService {
 					intentId,
 					clientPaymentTxnId,
 					null);
-		}
-
-		if ("CAPTURED".equals(normalized) || "SETTLED".equals(normalized) || "SUCCESS".equals(normalized)
-				|| "PAID".equals(normalized)) {
-			log.info("billInvoiceRecurring Adyen SUCCESS: invoiceId={} status={} resultCode={} intentId={} txnId={}",
-					invoiceId, status, resultCode, intentId, clientPaymentTxnId);
-			return new PaymentResult(true, "ADYEN_PSP:" + chargeResp.getOrDefault("pspReference", ""), null, intentId,
-					clientPaymentTxnId, null);
 		}
 
 		log.warn("billInvoiceRecurring Adyen unexpected status: invoiceId={} status={} resultCode={} intentId={} txnId={}",

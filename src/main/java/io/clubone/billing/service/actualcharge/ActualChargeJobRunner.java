@@ -371,6 +371,25 @@ public class ActualChargeJobRunner {
                     continue;
                 }
                 if (freshPending.contains(row.invoiceId())) {
+                    // Heal stuck PENDING_CAPTURE when gateway already CAPTURED (auto-capture race).
+                    if (finalizePendingIfGatewayAlreadySuccess(row.invoiceId(), statusOk)) {
+                        success++;
+                        idempotentAlreadySuccess++;
+                        chargedAmount = chargedAmount.add(amt);
+                        String currency = normalizeCurrency(row.invoiceCurrencyCode());
+                        if (currency != null) {
+                            currencySummary.addCount(currency, "success_count", 1);
+                            currencySummary.addAmount(currency, "charged_amount", amt);
+                            currencySummary.addCount(currency, "total_selected", 1);
+                            currencySummary.addAmount(currency, "total_amount_selected", amt);
+                        }
+                        log.info(
+                                "actual-charge invoice {}: SUCCESS (healed PENDING_CAPTURE→LIVE_FINALIZED; gateway already captured) invoiceId={} amount={}",
+                                idx,
+                                row.invoiceId(),
+                                amt);
+                        continue;
+                    }
                     pending++;
                     pendingAmount = pendingAmount.add(amt);
                     String currency = normalizeCurrency(row.invoiceCurrencyCode());
@@ -877,6 +896,38 @@ public class ActualChargeJobRunner {
         return GatewayStatus.PENDING_CAPTURE.getCode().equalsIgnoreCase(reason)
                 || GatewayStatus.AUTHORIZED.getCode().equalsIgnoreCase(reason)
                 || GatewayStatus.CREATED.getCode().equalsIgnoreCase(reason);
+    }
+
+    /**
+     * When ContAuth wrote CAPTURED but billing history stayed PENDING_CAPTURE (resultCode=AUTHORISED race),
+     * promote history to LIVE_FINALIZED without recharging.
+     */
+    private boolean finalizePendingIfGatewayAlreadySuccess(UUID invoiceId, UUID statusOk) {
+        if (invoiceId == null || statusOk == null) {
+            return false;
+        }
+        ActualChargeRepository.PendingChargeRow pending =
+                actualChargeRepository.findLatestPendingByInvoiceId(invoiceId);
+        if (pending == null || pending.clientPaymentTransactionId() == null) {
+            return false;
+        }
+        String gatewayStatus = actualChargeRepository.findGatewayTransactionStatus(
+                pending.clientPaymentTransactionId(),
+                pending.applicationId());
+        if (gatewayStatus == null) {
+            return false;
+        }
+        String normalized = gatewayStatus.trim().toUpperCase(Locale.ROOT);
+        if (!Set.of("CAPTURED", "SETTLED", "SUCCESS", "PAID").contains(normalized)) {
+            return false;
+        }
+        actualChargeRepository.updateHistoryStatus(
+                pending.subscriptionBillingHistoryId(),
+                statusOk,
+                null,
+                pending.applicationId());
+        markInvoicePaidAfterSuccessfulCharge(invoiceId);
+        return true;
     }
 
     /**
