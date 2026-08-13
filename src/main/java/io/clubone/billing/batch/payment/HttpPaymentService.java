@@ -323,10 +323,23 @@ public class HttpPaymentService implements PaymentService {
 					null);
 		}
 
-		// Adyen ContAuth often returns AUTHORISED (auto-capture or capture pending).
-		if ("CAPTURED".equals(normalized) || "SETTLED".equals(normalized) || "SUCCESS".equals(normalized)
-				|| "PAID".equals(normalized) || "AUTHORISED".equals(normalized) || "AUTHORIZED".equals(normalized)
+		// Enterprise: AUTHORISED alone is hold (manual capture) → PENDING_CAPTURE.
+		// Final success only when status is CAPTURED (ContAuth promotes AUTHORISED→CAPTURED when auto-capture on).
+		if ("AUTHORISED".equals(normalized) || "AUTHORIZED".equals(normalized)
 				|| "AUTHORISED".equals(resultNorm) || "AUTHORIZED".equals(resultNorm)) {
+			log.info("billInvoiceRecurring Adyen AUTHORISED (pending capture unless auto-capture promoted): invoiceId={} status={} resultCode={} intentId={} txnId={}",
+					invoiceId, status, resultCode, intentId, clientPaymentTxnId);
+			return new PaymentResult(
+					false,
+					GatewayStatus.PENDING_CAPTURE.getCode(),
+					GatewayStatus.PENDING_CAPTURE.getCode(),
+					intentId,
+					clientPaymentTxnId,
+					null);
+		}
+
+		if ("CAPTURED".equals(normalized) || "SETTLED".equals(normalized) || "SUCCESS".equals(normalized)
+				|| "PAID".equals(normalized)) {
 			log.info("billInvoiceRecurring Adyen SUCCESS: invoiceId={} status={} resultCode={} intentId={} txnId={}",
 					invoiceId, status, resultCode, intentId, clientPaymentTxnId);
 			return new PaymentResult(true, "ADYEN_PSP:" + chargeResp.getOrDefault("pspReference", ""), null, intentId,

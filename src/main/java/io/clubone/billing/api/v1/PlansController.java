@@ -38,8 +38,8 @@ public class PlansController {
             @RequestParam(defaultValue = "0") Integer offset) {
         
         log.debug(
-                "Listing plans: isActive={}, clientAgreementId={}, locationLevelId={}, includeChildLocations={}",
-                isActive, clientAgreementId, locationLevelId, includeChildLocations);
+                "Listing plans: isActive={}, clientAgreementId={}, locationLevelId={}, includeChildLocations={}, limit={}, offset={}",
+                isActive, clientAgreementId, locationLevelId, includeChildLocations, limit, offset);
         
         Map<String, Object> response =
                 plansService.listPlans(

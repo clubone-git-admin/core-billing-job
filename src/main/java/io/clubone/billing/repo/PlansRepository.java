@@ -136,6 +136,77 @@ public class PlansRepository {
     }
 
     /**
+     * Batch list-summary metrics for plan cards (avoids N+1 full getPlan enrichment).
+     * Keys: active_instances_count, paid_cycles_count, next_billing_date.
+     */
+    public Map<UUID, Map<String, Object>> findListSummaries(Collection<UUID> planIds) {
+        if (planIds == null || planIds.isEmpty()) {
+            return Map.of();
+        }
+        List<UUID> ids = planIds.stream().filter(Objects::nonNull).distinct().toList();
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        String in = inClausePlaceholders(ids.size());
+        String sql = """
+            SELECT
+                sp.subscription_plan_id,
+                COALESCE((
+                    SELECT COUNT(1)
+                    FROM client_subscription_billing.subscription_instance si
+                    JOIN billing_config.subscription_instance_status sis
+                      ON sis.subscription_instance_status_id = si.subscription_instance_status_id
+                    WHERE si.subscription_plan_id = sp.subscription_plan_id
+                      AND si.application_id = sp.application_id
+                      AND sis.status_name = 'ACTIVE'
+                ), 0) AS active_instances_count,
+                COALESCE((
+                    SELECT COUNT(1)
+                    FROM client_subscription_billing.subscription_instance si
+                    JOIN client_subscription_billing.subscription_billing_schedule sbs
+                      ON sbs.subscription_instance_id = si.subscription_instance_id
+                    JOIN billing_config.billing_schedule_status bss
+                      ON bss.billing_schedule_status_id = sbs.billing_schedule_status_id
+                    WHERE si.subscription_plan_id = sp.subscription_plan_id
+                      AND si.application_id = sp.application_id
+                      AND UPPER(bss.status_code) = 'PAID'
+                ), 0) AS paid_cycles_count,
+                (
+                    SELECT MIN(si.next_billing_date)
+                    FROM client_subscription_billing.subscription_instance si
+                    JOIN billing_config.subscription_instance_status sis
+                      ON sis.subscription_instance_status_id = si.subscription_instance_status_id
+                    WHERE si.subscription_plan_id = sp.subscription_plan_id
+                      AND si.application_id = sp.application_id
+                      AND sis.status_name = 'ACTIVE'
+                      AND si.next_billing_date IS NOT NULL
+                ) AS next_billing_date
+            FROM client_subscription_billing.subscription_plan sp
+            WHERE sp.application_id = ?::uuid
+              AND sp.subscription_plan_id IN (%s)
+            """.formatted(in);
+
+        List<Object> params = new ArrayList<>();
+        params.add(requireAppIdStr());
+        for (UUID id : ids) {
+            params.add(id.toString());
+        }
+
+        Map<UUID, Map<String, Object>> out = new HashMap<>();
+        List<Map<String, Object>> rows = jdbc.queryForList(sql, params.toArray());
+        for (Map<String, Object> row : rows) {
+            Object rawId = row.get("subscription_plan_id");
+            UUID planId = rawId instanceof UUID u ? u : UUID.fromString(String.valueOf(rawId));
+            Map<String, Object> summary = new HashMap<>();
+            summary.put("active_instances_count", row.get("active_instances_count"));
+            summary.put("paid_cycles_count", row.get("paid_cycles_count"));
+            summary.put("next_billing_date", row.get("next_billing_date"));
+            out.put(planId, summary);
+        }
+        return out;
+    }
+
+    /**
      * Count subscription plans.
      */
     public Integer countPlans(Boolean isActive, UUID clientAgreementId, List<UUID> locationIds) {

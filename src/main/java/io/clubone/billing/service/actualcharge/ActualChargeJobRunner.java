@@ -13,6 +13,7 @@ import io.clubone.billing.batch.payment.PaymentServiceFactory;
 import io.clubone.billing.repo.ActualChargeRepository;
 import io.clubone.billing.repo.BillingRunRepository;
 import io.clubone.billing.repo.BillingRepository;
+import io.clubone.billing.repo.InvoiceRepository;
 import io.clubone.billing.repo.MockChargeRepository;
 import io.clubone.billing.repo.MockChargeRepository.MandateProbe;
 import io.clubone.billing.repo.MockChargeRepository.MockInvoiceRow;
@@ -59,6 +60,7 @@ public class ActualChargeJobRunner {
     private final MockChargeRepository mockChargeRepository;
     private final ActualChargeRepository actualChargeRepository;
     private final BillingRepository billingRepository;
+    private final InvoiceRepository invoiceRepository;
     private final DeadLetterQueueService dlqService;
     /** Resolved LIVE implementation (same selection as Spring Batch for {@link RunMode#LIVE}). */
     private final PaymentService livePaymentService;
@@ -75,6 +77,7 @@ public class ActualChargeJobRunner {
             MockChargeRepository mockChargeRepository,
             ActualChargeRepository actualChargeRepository,
             BillingRepository billingRepository,
+            InvoiceRepository invoiceRepository,
             DeadLetterQueueService dlqService,
             @Value("${clubone.billing.actual-charge.pending.retry-grace-minutes:30}") int pendingRetryGraceMinutes,
             @Value("${clubone.billing.actual-charge.pending.stuck-threshold-minutes:30}") int pendingStuckThresholdMinutes,
@@ -88,6 +91,7 @@ public class ActualChargeJobRunner {
         this.mockChargeRepository = mockChargeRepository;
         this.actualChargeRepository = actualChargeRepository;
         this.billingRepository = billingRepository;
+        this.invoiceRepository = invoiceRepository;
         this.dlqService = dlqService;
         this.pendingRetryGraceMinutes = Math.max(1, pendingRetryGraceMinutes);
         this.pendingStuckThresholdMinutes = Math.max(1, pendingStuckThresholdMinutes);
@@ -345,6 +349,9 @@ public class ActualChargeJobRunner {
                 if (alreadySuccess.contains(row.invoiceId())) {
                     // Already charged on a prior pass/retry — count as success, not "skipped".
                     // Treating these as skipped inflated terminal KPIs (e.g. 3/2 after FAILED_ONLY retry).
+                    // Also repair invoice/schedule PAID when history is LIVE_FINALIZED but invoice stayed DUE
+                    // (e.g. Adyen ContAuth path that never ran Razorpay-style markInvoicePaid).
+                    markInvoicePaidAfterSuccessfulCharge(row.invoiceId());
                     success++;
                     idempotentAlreadySuccess++;
                     chargedAmount = chargedAmount.add(amt);
@@ -483,6 +490,7 @@ public class ActualChargeJobRunner {
                                 row.totalAmount(),
                                 pr.getClientPaymentIntentId(),
                                 pr.getClientPaymentTransactionId());
+                        markInvoicePaidAfterSuccessfulCharge(row.invoiceId());
                         success++;
                         chargedAmount = chargedAmount.add(amt);
                         currencySummary.addCount(currency, "success_count", 1);
@@ -765,6 +773,30 @@ public class ActualChargeJobRunner {
             m.put("currency_code", row.invoiceCurrencyCode());
         }
         skippedRows.add(m);
+    }
+
+    /**
+     * After LIVE_FINALIZED (or idempotent already-success), align invoice + schedule with Razorpay webhook
+     * behavior so Adyen ContAuth successes do not leave {@code transactions.invoice} stuck on DUE.
+     */
+    private void markInvoicePaidAfterSuccessfulCharge(UUID invoiceId) {
+        if (invoiceId == null) {
+            return;
+        }
+        try {
+            int inv = invoiceRepository.markInvoicePaid(invoiceId);
+            int sch = invoiceRepository.markBillingSchedulePaidForInvoice(invoiceId);
+            log.info(
+                    "actual-charge: marked invoice paid after successful charge invoiceId={} invoiceRows={} scheduleRows={}",
+                    invoiceId,
+                    inv,
+                    sch);
+        } catch (Exception ex) {
+            log.warn(
+                    "actual-charge: failed to mark invoice/schedule PAID after successful charge invoiceId={}",
+                    invoiceId,
+                    ex);
+        }
     }
 
     /**

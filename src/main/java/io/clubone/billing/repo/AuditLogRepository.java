@@ -177,6 +177,7 @@ public class AuditLogRepository {
             String userLabel = firstNonBlank(
                     stringOrNull(log.get("resolved_user_label")),
                     stringOrNull(log.get("user_email")),
+                    "system".equalsIgnoreCase(stringOrNull(log.get("user_id"))) ? "System" : null,
                     stringOrNull(log.get("user_id")));
             csv.append(formatCSVValue(log.get("audit_log_id"))).append(",");
             csv.append(formatCSVValue(log.get("event_type"))).append(",");
@@ -226,15 +227,20 @@ public class AuditLogRepository {
 
     /**
      * Resolve actor display label when {@code user_id} stores an access user / application-user UUID.
+     * Compare via text — never cast {@code bal.user_id} to uuid (job rows store {@code "system"}).
+     * Postgres does not guarantee AND short-circuit, so {@code ... ~* uuid AND col = user_id::uuid}
+     * still throws on non-UUID values like {@code "system"}.
      */
     private static String resolvedActorJoin() {
         return """
             LEFT JOIN access.access_user actor_u
-              ON bal.user_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-             AND actor_u.user_id = bal.user_id::uuid
+              ON bal.user_id IS NOT NULL
+             AND bal.user_id <> ''
+             AND actor_u.user_id::text = bal.user_id
             LEFT JOIN access.access_application_user actor_aau
-              ON bal.user_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-             AND actor_aau.application_user_id = bal.user_id::uuid
+              ON bal.user_id IS NOT NULL
+             AND bal.user_id <> ''
+             AND actor_aau.application_user_id::text = bal.user_id
             LEFT JOIN access.access_user actor_app_u
               ON actor_app_u.user_id = actor_aau.user_id
             """;
@@ -293,6 +299,8 @@ public class AuditLogRepository {
                    )
                    OR (
                         UPPER(COALESCE(bal.entity_type, '')) = 'STAGE_RUN'
+                    AND bal.entity_id IS NOT NULL
+                    AND bal.entity_id::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                     AND EXISTS (
                           SELECT 1
                             FROM client_subscription_billing.billing_stage_run s

@@ -158,7 +158,10 @@ public class AuditLogService {
 
         String resolvedLabel = stringOrEmpty(log.get("resolved_user_label"));
         String storedEmail = stringOrEmpty(log.get("user_email"));
-        String userEmail = !resolvedLabel.isEmpty() ? resolvedLabel : storedEmail;
+        String userId = stringOrEmpty(log.get("user_id"));
+        String displayName = !resolvedLabel.isEmpty()
+                ? resolvedLabel
+                : ("system".equalsIgnoreCase(userId) ? "System" : storedEmail);
 
         Map<String, Object> result = new HashMap<>();
         result.put("audit_log_id", log.get("audit_log_id"));
@@ -166,9 +169,9 @@ public class AuditLogService {
         result.put("entity_type", log.get("entity_type"));
         result.put("entity_id", log.get("entity_id"));
         result.put("action", log.get("action"));
-        result.put("user_id", log.getOrDefault("user_id", ""));
-        result.put("user_email", userEmail);
-        result.put("user_name", resolvedLabel);
+        result.put("user_id", userId);
+        result.put("user_email", displayName);
+        result.put("user_name", displayName);
         result.put("billing_run_code", billingRunCode);
         result.put("stage_run_code", stageRunCode);
         result.put("stage_code", stageCode);

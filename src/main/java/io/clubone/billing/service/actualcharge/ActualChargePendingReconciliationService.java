@@ -4,6 +4,7 @@ import io.clubone.billing.api.dto.ActualChargePaymentStatusUpdateRequest;
 import io.clubone.billing.batch.model.BillingStatus;
 import io.clubone.billing.repo.ActualChargeRepository;
 import io.clubone.billing.repo.BillingRepository;
+import io.clubone.billing.repo.InvoiceRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,21 +23,24 @@ public class ActualChargePendingReconciliationService {
 
     private static final Logger log = LoggerFactory.getLogger(ActualChargePendingReconciliationService.class);
     private static final Set<String> SUCCESS_GATEWAY_STATUSES = Set.of(
-            "CAPTURED", "SETTLED", "SUCCESS", "PAID", "AUTHORISED", "AUTHORIZED");
+            "CAPTURED", "SETTLED", "SUCCESS", "PAID");
     private static final Set<String> FAILED_GATEWAY_STATUSES = Set.of("FAILED", "EXPIRED", "REVERSED", "CANCELLED");
 
     private final ActualChargeRepository actualChargeRepository;
     private final BillingRepository billingRepository;
+    private final InvoiceRepository invoiceRepository;
     private final int pollBatchSize;
     private final int staleMinutes;
 
     public ActualChargePendingReconciliationService(
             ActualChargeRepository actualChargeRepository,
             BillingRepository billingRepository,
+            InvoiceRepository invoiceRepository,
             @Value("${clubone.billing.actual-charge.pending.poll.batch-size:20}") int pollBatchSize,
             @Value("${clubone.billing.actual-charge.pending.poll.stale-minutes:2}") int staleMinutes) {
         this.actualChargeRepository = actualChargeRepository;
         this.billingRepository = billingRepository;
+        this.invoiceRepository = invoiceRepository;
         this.pollBatchSize = Math.max(1, pollBatchSize);
         this.staleMinutes = Math.max(1, staleMinutes);
     }
@@ -112,6 +116,7 @@ public class ActualChargePendingReconciliationService {
                         finalizedStatusId,
                         null,
                         row.applicationId());
+                markInvoicePaidAfterSuccessfulCharge(row.invoiceId(), row.applicationId());
                 finalized++;
                 continue;
             }
@@ -163,6 +168,7 @@ public class ActualChargePendingReconciliationService {
                     finalizedStatusId,
                     null,
                     row.applicationId());
+            markInvoicePaidAfterSuccessfulCharge(row.invoiceId(), row.applicationId());
             updated = true;
         } else if (FAILED_GATEWAY_STATUSES.contains(gatewayStatus)) {
             String reason = request.reason() != null && !request.reason().isBlank()
@@ -183,6 +189,23 @@ public class ActualChargePendingReconciliationService {
                 "invoiceId", row.invoiceId(),
                 "gatewayStatus", gatewayStatus,
                 "clientPaymentTransactionId", request.clientPaymentTransactionId());
+    }
+
+    private void markInvoicePaidAfterSuccessfulCharge(UUID invoiceId, UUID applicationId) {
+        if (invoiceId == null) {
+            return;
+        }
+        try {
+            int inv = invoiceRepository.markInvoicePaid(invoiceId, applicationId);
+            int sch = invoiceRepository.markBillingSchedulePaidForInvoice(invoiceId, applicationId);
+            log.info(
+                    "actual-charge reconcile: marked invoice paid invoiceId={} invoiceRows={} scheduleRows={}",
+                    invoiceId,
+                    inv,
+                    sch);
+        } catch (Exception ex) {
+            log.warn("actual-charge reconcile: failed to mark invoice PAID invoiceId={}", invoiceId, ex);
+        }
     }
 
     private static String normalize(String value) {

@@ -10,6 +10,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -53,7 +54,9 @@ public class ForecastController {
             List<Map<String, Object>> data =
                     forecastService.getForecastAggregated(
                             from, to, groupBy, locationLevelId, includeChildLocations, ccy);
-            return ResponseEntity.ok(Map.of("data", data));
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("data", data);
+            return ResponseEntity.ok(body);
         } else {
             PageResponse<ForecastItemDto> response =
                     forecastService.getForecast(from, to, locationLevelId, includeChildLocations, ccy);
@@ -101,6 +104,24 @@ public class ForecastController {
                 date, search, locationId, hasWarnings, limit, offset, ccy);
 
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * GET /api/v1/billing/forecast/{date}/reports
+     * Breakdown reports for forecast detail dialog (client/location/agreement).
+     */
+    @GetMapping("/{date}/reports")
+    public ResponseEntity<Map<String, Object>> getForecastReports(
+            @PathVariable @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false) String reportType,
+            @RequestParam(required = false, name = "report_type") String reportTypeSnake,
+            @RequestParam(required = false) String currencyCode,
+            @RequestParam(required = false) String currency) {
+
+        String type = reportType != null && !reportType.isBlank() ? reportType : reportTypeSnake;
+        String ccy = currencyCode != null && !currencyCode.isBlank() ? currencyCode : currency;
+        log.debug("Getting forecast reports: date={}, reportType={}, currencyCode={}", date, type, ccy);
+        return ResponseEntity.ok(forecastService.getForecastReports(date, type, ccy));
     }
 
     /**

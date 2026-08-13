@@ -329,6 +329,12 @@ public class BillingReportingService {
         o.put("billed_amount", row.get("billed_amount"));
         o.put("collected_amount", row.get("collected_amount"));
         o.put("billing_run_id", row.get("billing_run_id"));
+        if (row.get("currency_code") != null) {
+            o.put("currency_code", row.get("currency_code"));
+        }
+        if (row.get("amount_reporting") != null) {
+            o.put("amount_reporting", row.get("amount_reporting"));
+        }
         return o;
     }
 
@@ -398,59 +404,84 @@ public class BillingReportingService {
                 kpi("COMPLETED_SUCCESS", String.valueOf(toLong(k.get("completed_success_count"))), "Billing runs completed successfully"));
     }
 
-    private static List<Map<String, Object>> buildLocationRevenueKpis(Map<String, Object> k) {
+    private List<Map<String, Object>> buildLocationRevenueKpis(Map<String, Object> k) {
         if (k == null) {
             return List.of();
         }
+        String reporting = tenantSettingsService.getReportingCurrencyCode();
         return List.of(
-                kpi("Total Revenue (all locations)", formatNumber(k.get("total_revenue")), "Total revenue across billed locations"),
+                moneyKpiStatic(
+                        "Total Revenue (all locations)",
+                        k.get("total_revenue"),
+                        "Total revenue across billed locations (reporting currency)",
+                        reporting),
                 kpi("Top Performing Location", String.valueOf(k.getOrDefault("top_performing_location", "-")), "Location with highest revenue"),
                 kpi("Lowest Performing Location", String.valueOf(k.getOrDefault("lowest_performing_location", "-")), "Location with lowest revenue"),
-                kpi("Avg Revenue per Location", formatNumber(k.get("avg_revenue_per_location")), "Average revenue across locations billed"),
+                moneyKpiStatic(
+                        "Avg Revenue per Location",
+                        k.get("avg_revenue_per_location"),
+                        "Average revenue across locations billed (reporting currency)",
+                        reporting),
                 kpi("Total Locations Billed", String.valueOf(k.getOrDefault("total_locations_billed", 0)), "Count of locations billed in range"));
     }
 
-    private static List<Map<String, Object>> buildPaymentKpis(Map<String, Object> k) {
+    private List<Map<String, Object>> buildPaymentKpis(Map<String, Object> k) {
         if (k == null) {
             return List.of();
         }
+        String reporting = tenantSettingsService.getReportingCurrencyCode();
         Object pct = k.get("collection_pct");
         return List.of(
-                kpi("Total Collected Amount", formatNumber(k.get("total_collected")), "SUM(payment_amount)"),
+                moneyKpiStatic(
+                        "Total Collected Amount",
+                        k.get("total_collected"),
+                        "Collected amount in reporting currency",
+                        reporting),
                 kpi("Total Payments Count", String.valueOf(toLong(k.get("total_payments_count"))), "Total payment rows"),
                 kpi(
                         "Collection Rate (%)",
                         pct == null ? "0" : formatNumber(pct) + "%",
                         "Collected / billed by amount"),
-                kpi("Avg Payment Value", formatNumber(k.get("avg_payment_value")), "Average collected value per payment row"),
+                moneyKpiStatic(
+                        "Avg Payment Value",
+                        k.get("avg_payment_value"),
+                        "Average collected value per payment row (reporting currency)",
+                        reporting),
                 kpi("Failed Payments Count", String.valueOf(toLong(k.get("failed_payments_count"))), "Payment rows with failed status"));
     }
 
-    private static List<Map<String, Object>> buildOutstandingKpis(Map<String, Object> k) {
+    private List<Map<String, Object>> buildOutstandingKpis(Map<String, Object> k) {
         if (k == null) {
             return List.of();
         }
+        String reporting = tenantSettingsService.getReportingCurrencyCode();
         return List.of(
-                kpi("Total outstanding", formatNumber(k.get("total_outstanding")), "Open balance on invoices in range"),
-                kpi("0–30 days", formatNumber(k.get("bucket_0_30")), "Aging bucket (days past due)"),
-                kpi("30–60 days", formatNumber(k.get("bucket_30_60")), "Aging bucket"),
-                kpi("60–90 days", formatNumber(k.get("bucket_60_90")), "Aging bucket"),
-                kpi("90+ days", formatNumber(k.get("bucket_90_plus")), "Aging bucket"));
+                moneyKpiStatic("Total outstanding", k.get("total_outstanding"), "Open balance in reporting currency", reporting),
+                moneyKpiStatic("0–30 days", k.get("bucket_0_30"), "Aging bucket (days past due)", reporting),
+                moneyKpiStatic("30–60 days", k.get("bucket_30_60"), "Aging bucket", reporting),
+                moneyKpiStatic("60–90 days", k.get("bucket_60_90"), "Aging bucket", reporting),
+                moneyKpiStatic("90+ days", k.get("bucket_90_plus"), "Aging bucket", reporting));
     }
 
-    private static List<Map<String, Object>> buildStageRunKpis(Map<String, Object> k) {
+    private List<Map<String, Object>> buildStageRunKpis(Map<String, Object> k) {
         if (k == null) {
             return List.of();
         }
+        String reporting = tenantSettingsService.getReportingCurrencyCode();
         return List.of(
                 kpi("Stage runs", String.valueOf(k.getOrDefault("stage_run_count", 0)), "Rows for this stage in range"),
-                kpi("Billed in scope", formatNumber(k.get("total_billed")), "History amounts on runs with this stage"));
+                moneyKpiStatic(
+                        "Billed in scope",
+                        k.get("total_billed"),
+                        "History amounts on runs with this stage (reporting currency)",
+                        reporting));
     }
 
-    private static List<Map<String, Object>> buildInvoiceGenerationKpis(Map<String, Object> k) {
+    private List<Map<String, Object>> buildInvoiceGenerationKpis(Map<String, Object> k) {
         if (k == null) {
             return List.of();
         }
+        String reporting = tenantSettingsService.getReportingCurrencyCode();
         long runs = toLong(k.get("stage_run_count"));
         long totalInvoices = toLong(k.get("total_invoices"));
         long success = toLong(k.get("success_count"));
@@ -458,7 +489,11 @@ public class BillingReportingService {
         long voided = toLong(k.get("voided_count"));
         return List.of(
                 kpi("Generated Invoices", String.valueOf(totalInvoices), "Distinct generated invoices"),
-                kpi("Invoice Value", formatNumber(k.get("total_invoice_value")), "Total invoice value"),
+                moneyKpiStatic(
+                        "Invoice Value",
+                        k.get("total_invoice_value"),
+                        "Total invoice value (reporting currency)",
+                        reporting),
                 kpi("Runs", String.valueOf(runs), "Invoice-generation runs"),
                 kpi("Voided%", formatPct(voided, totalInvoices), "Voided invoices / total invoices"),
                 kpi("Success%", formatPct(success, totalInvoices), "Successful invoices / total invoices"),
@@ -478,15 +513,24 @@ public class BillingReportingService {
                 kpi("Net Billable Amount", formatNumber(k.get("net_billable_amount")), "Final expected billable amount"));
     }
 
-    private static List<Map<String, Object>> buildPostBillKpis(Map<String, Object> k) {
+    private List<Map<String, Object>> buildPostBillKpis(Map<String, Object> k) {
         if (k == null) {
             return List.of();
         }
+        String reporting = tenantSettingsService.getReportingCurrencyCode();
         return List.of(
                 kpi("Total Schedules Processed", String.valueOf(toLong(k.get("total_schedules_processed"))), "Total schedules processed"),
                 kpi("Invoices Generated", String.valueOf(toLong(k.get("invoices_generated"))), "Distinct invoices generated"),
-                kpi("Total Billed Amount", formatNumber(k.get("total_billed_amount")), "SUM(final_amount)"),
-                kpi("Total Collected", formatNumber(k.get("total_collected")), "SUM(payment_amount)"),
+                moneyKpiStatic(
+                        "Total Billed Amount",
+                        k.get("total_billed_amount"),
+                        "SUM(final_amount) in reporting currency",
+                        reporting),
+                moneyKpiStatic(
+                        "Total Collected",
+                        k.get("total_collected"),
+                        "SUM(payment_amount) in reporting currency",
+                        reporting),
                 kpi("Failed Billing Count", String.valueOf(toLong(k.get("failed_billing_count"))), "Failed billing rows"),
                 kpi("Exception Count", String.valueOf(toLong(k.get("exception_count"))), "Rows with exception"),
                 kpi("Success Rate (%)", formatNumber(k.get("success_rate")) + "%", "Successful rows / processed rows"));
@@ -1011,6 +1055,8 @@ public class BillingReportingService {
         o.put("retry_attempt", m.get("retry_attempt"));
         o.put("last_try_on", m.get("last_try_on"));
         o.put("retry_status", m.get("retry_status"));
+        o.put("currency_code", m.get("currency_code"));
+        o.put("amount_reporting", m.get("amount_reporting"));
         return o;
     }
 
@@ -1060,6 +1106,8 @@ public class BillingReportingService {
         o.put("success_invoices", r.get("success_invoices"));
         o.put("revenue_amount", r.get("total_amount"));
         o.put("final_amount", r.get("total_amount"));
+        o.put("currency_code", r.get("currency_code"));
+        o.put("amount_reporting", r.get("amount_reporting"));
         return o;
     }
 
@@ -1073,6 +1121,8 @@ public class BillingReportingService {
         o.put("gateway_success_pct", r.get("gateway_success_rate"));
         o.put("payment_date", r.get("payment_date"));
         o.put("amount", r.get("collected_amount"));
+        o.put("currency_code", r.get("currency_code"));
+        o.put("amount_reporting", r.get("collected_amount"));
         return o;
     }
 
@@ -1094,6 +1144,8 @@ public class BillingReportingService {
         o.put("bucket_90_plus", r.get("bucket_90_plus"));
         o.put("ar_total", r.get("ar_total"));
         o.put("ar_amount", r.get("ar_amount"));
+        o.put("currency_code", r.get("currency_code"));
+        o.put("amount_reporting", r.get("amount_reporting"));
         return o;
     }
 
@@ -1125,6 +1177,8 @@ public class BillingReportingService {
         o.put("gateway", r.get("gateway"));
         o.put("failure_reason", r.get("failure_reason"));
         o.put("execution_status", r.get("execution_status"));
+        o.put("currency_code", r.get("currency_code"));
+        o.put("amount_reporting", r.get("amount_reporting"));
         return o;
     }
 
@@ -1169,6 +1223,10 @@ public class BillingReportingService {
         o.put("error_type", errorType);
         o.put("error_message", errorMessage);
         o.put("status", status);
+        Object ccy = firstNonNull(r, "currency_code", "currencyCode", "currency");
+        if (ccy != null) {
+            o.put("currency_code", String.valueOf(ccy).trim().toUpperCase());
+        }
         return o;
     }
 
@@ -1365,6 +1423,8 @@ public class BillingReportingService {
         o.put("subscription_billing_schedule_adjustment_id", row.get("subscription_billing_schedule_adjustment_id"));
         o.put("billing_schedule_id", row.get("billing_schedule_id"));
         o.put("created_on", row.get("created_on"));
+        o.put("currency_code", row.get("currency_code"));
+        o.put("amount_reporting", row.get("amount_reporting"));
         return o;
     }
 
@@ -1513,6 +1573,13 @@ public class BillingReportingService {
         String reporting = tenantSettingsService.getReportingCurrencyCode();
         m.put("reportingCurrencyCode", reporting);
         m.put("reporting_currency_code", reporting);
+        if (reporting != null && !reporting.isBlank()) {
+            for (Map<String, Object> row : r) {
+                if (row == null) continue;
+                row.putIfAbsent("reportingCurrencyCode", reporting);
+                row.putIfAbsent("reporting_currency_code", reporting);
+            }
+        }
         if (kpis != null && !kpis.isEmpty()) {
             m.put("kpis", kpis);
         }

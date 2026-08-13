@@ -6,7 +6,8 @@ package io.clubone.billing.batch.model;
  */
 public enum InvoiceStatus {
     PENDING("PENDING"),
-    DUE("DUE");
+    DUE("DUE"),
+    PAID("PAID");
 
     private final String code;
 

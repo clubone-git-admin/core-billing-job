@@ -257,6 +257,122 @@ public class InvoiceRepository {
     }
 
     /**
+     * Marks an invoice paid after a successful live charge (Actual Charge / gateway capture).
+     * Sets {@code is_paid = true} and {@code invoice_status_id} to {@code PAID} when that Lu row exists.
+     * Idempotent: safe to call when already PAID.
+     *
+     * @return rows updated on {@code transactions.invoice} (0 or 1)
+     */
+    public int markInvoicePaid(UUID invoiceId) {
+        return markInvoicePaid(invoiceId, null);
+    }
+
+    /**
+     * @param applicationId when non-null (e.g. background poller), scopes the update; otherwise uses actor tenant.
+     */
+    public int markInvoicePaid(UUID invoiceId, UUID applicationId) {
+        if (invoiceId == null) {
+            return 0;
+        }
+        String appId = applicationId != null ? applicationId.toString() : requireAppIdStr();
+        Optional<UUID> paidId = findInvoiceStatusIdByName("PAID");
+        if (paidId.isEmpty()) {
+            paidId = findInvoiceStatusIdByName("Paid");
+        }
+        try {
+            if (paidId.isPresent()) {
+                return jdbc.update(
+                        """
+                        UPDATE transactions.invoice i
+                        SET is_paid = true,
+                            invoice_status_id = ?::uuid,
+                            modified_on = now()
+                        WHERE i.invoice_id = ?::uuid
+                          AND i.application_id = ?::uuid
+                          AND COALESCE(i.is_active, true) = true
+                        """,
+                        paidId.get().toString(),
+                        invoiceId.toString(),
+                        appId);
+            }
+            return jdbc.update(
+                    """
+                    UPDATE transactions.invoice i
+                    SET is_paid = true,
+                        modified_on = now()
+                    WHERE i.invoice_id = ?::uuid
+                      AND i.application_id = ?::uuid
+                      AND COALESCE(i.is_active, true) = true
+                    """,
+                    invoiceId.toString(),
+                    appId);
+        } catch (DataAccessException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Moves {@code subscription_billing_schedule} for this invoice to {@code PAID} (fallback {@code BILLED}).
+     */
+    public int markBillingSchedulePaidForInvoice(UUID invoiceId) {
+        return markBillingSchedulePaidForInvoice(invoiceId, null);
+    }
+
+    public int markBillingSchedulePaidForInvoice(UUID invoiceId, UUID applicationId) {
+        if (invoiceId == null) {
+            return 0;
+        }
+        String appId = applicationId != null ? applicationId.toString() : requireAppIdStr();
+        String code = "PAID";
+        UUID statusId = resolveBillingScheduleStatusId(code);
+        if (statusId == null) {
+            code = "BILLED";
+            statusId = resolveBillingScheduleStatusId(code);
+        }
+        if (statusId == null) {
+            return 0;
+        }
+        boolean markBilled = "BILLED".equalsIgnoreCase(code);
+        try {
+            return jdbc.update(
+                    """
+                    UPDATE client_subscription_billing.subscription_billing_schedule s
+                    SET billing_schedule_status_id = ?::uuid,
+                        billed_on = CASE WHEN ? THEN COALESCE(s.billed_on, now()) ELSE s.billed_on END
+                    WHERE s.invoice_id = ?::uuid
+                      AND s.application_id = ?::uuid
+                      AND s.billing_schedule_status_id IS DISTINCT FROM ?::uuid
+                    """,
+                    statusId.toString(),
+                    markBilled,
+                    invoiceId.toString(),
+                    appId,
+                    statusId.toString());
+        } catch (DataAccessException e) {
+            return 0;
+        }
+    }
+
+    private UUID resolveBillingScheduleStatusId(String statusCode) {
+        if (statusCode == null || statusCode.isBlank()) {
+            return null;
+        }
+        try {
+            return jdbc.query(
+                    """
+                    SELECT billing_schedule_status_id
+                    FROM billing_config.billing_schedule_status
+                    WHERE UPPER(TRIM(status_code)) = UPPER(TRIM(?))
+                    LIMIT 1
+                    """,
+                    rs -> rs.next() ? (UUID) rs.getObject("billing_schedule_status_id") : null,
+                    statusCode);
+        } catch (DataAccessException e) {
+            return null;
+        }
+    }
+
+    /**
      * Sets {@code transactions.invoice.invoice_status_id} to {@code newStatusId} when current Lu status name
      * is different from {@code notWhenCurrentStatus} (case-insensitive). Returns rows updated (0 or 1).
      */

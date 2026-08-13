@@ -34,30 +34,73 @@ public class PlansService {
             Boolean includeChildLocations,
             Integer limit,
             Integer offset) {
+        int safeLimit = limit == null || limit < 1 ? 50 : Math.min(limit, 200);
+        int safeOffset = offset == null || offset < 0 ? 0 : offset;
+
         List<UUID> locationIds = resolveLocationIds(locationLevelId, includeChildLocations);
+        // Explicit location filter that resolves to nothing must return empty — not unscoped all-plans.
+        if (locationLevelId != null && locationIds.isEmpty()) {
+            Map<String, Object> empty = new HashMap<>();
+            empty.put("data", List.of());
+            empty.put("total", 0);
+            empty.put("limit", safeLimit);
+            empty.put("offset", safeOffset);
+            return empty;
+        }
+
         List<Map<String, Object>> plans =
-                plansRepository.findPlans(isActive, clientAgreementId, locationIds, limit, offset);
+                plansRepository.findPlans(isActive, clientAgreementId, locationIds, safeLimit, safeOffset);
         Integer total = plansRepository.countPlans(isActive, clientAgreementId, locationIds);
 
+        // Lightweight list rows only — never call full getPlan() per row (N+1 timeout).
         List<Map<String, Object>> planList = plans.stream()
-                .map(p -> {
-                    Object id = p.get("subscription_plan_id");
-                    if (id instanceof UUID planId) {
-                        Map<String, Object> full = getPlan(planId);
-                        if (full != null) {
-                            return full;
-                        }
-                    }
-                    return formatPlan(p);
-                })
+                .map(this::formatPlan)
                 .collect(Collectors.toList());
 
-        return Map.of(
-                "data", planList,
-                "total", total,
-                "limit", limit,
-                "offset", offset
-        );
+        List<UUID> planIds = planList.stream()
+                .map(p -> toUuid(p.get("subscription_plan_id")))
+                .filter(Objects::nonNull)
+                .toList();
+        if (!planIds.isEmpty()) {
+            Map<UUID, Map<String, Object>> summaries = plansRepository.findListSummaries(planIds);
+            for (Map<String, Object> row : planList) {
+                UUID planId = toUuid(row.get("subscription_plan_id"));
+                if (planId == null) {
+                    continue;
+                }
+                Map<String, Object> summary = summaries.get(planId);
+                if (summary == null) {
+                    row.put("active_instances_count", 0);
+                    row.put("paid_cycles_count", 0);
+                    row.put("next_billing_date", null);
+                    continue;
+                }
+                row.put("active_instances_count", summary.getOrDefault("active_instances_count", 0));
+                row.put("paid_cycles_count", summary.getOrDefault("paid_cycles_count", 0));
+                row.put("next_billing_date", summary.get("next_billing_date"));
+            }
+        }
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("data", planList);
+        response.put("total", total);
+        response.put("limit", safeLimit);
+        response.put("offset", safeOffset);
+        return response;
+    }
+
+    private static UUID toUuid(Object value) {
+        if (value instanceof UUID u) {
+            return u;
+        }
+        if (value == null) {
+            return null;
+        }
+        try {
+            return UUID.fromString(String.valueOf(value));
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
     }
 
     private List<UUID> resolveLocationIds(UUID locationLevelId, Boolean includeChildLocations) {
@@ -114,8 +157,8 @@ public class PlansService {
         Integer activeInstancesCount = plansRepository.getActiveInstancesCount(subscriptionPlanId);
         formattedPlan.put("active_instances_count", activeInstancesCount);
 
-        // Add instances (all statuses)
-        List<Map<String, Object>> instances = plansRepository.findInstances(subscriptionPlanId, null, 10_000, 0);
+        // Cap instances on detail — list UI uses listSummaries; avoid 10k-row payloads.
+        List<Map<String, Object>> instances = plansRepository.findInstances(subscriptionPlanId, null, 200, 0);
         formattedPlan.put("instances", instances.stream().map(this::formatInstance).toList());
 
         // Add full cycle timeline with paid/upcoming/future bucketing

@@ -46,13 +46,22 @@ public class ForecastService {
         List<Map<String, Object>> items =
                 forecastRepository.getForecastAggregated(from, to, groupBy, locationIds, ccy);
 
-        return items.stream()
-                .map(item -> Map.of(
-                        "payment_due_date", item.get("payment_due_date"),
-                        "invoice_count", item.get("invoice_count"),
-                        "total_amount", item.get("total_amount")
-                ))
-                .collect(Collectors.toList());
+        return items.stream().map(item -> {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("payment_due_date", item.get("payment_due_date"));
+            out.put("invoice_count", item.get("invoice_count"));
+            out.put("total_amount", item.get("total_amount"));
+            if (item.get("amount_reporting") != null) {
+                out.put("amount_reporting", item.get("amount_reporting"));
+            }
+            if (item.get("currency_code") != null) {
+                out.put("currency_code", item.get("currency_code"));
+            }
+            if (item.get("reporting_currency_code") != null) {
+                out.put("reporting_currency_code", item.get("reporting_currency_code"));
+            }
+            return out;
+        }).collect(Collectors.toList());
     }
 
     public PageResponse<ForecastItemDto> getForecast(
@@ -78,21 +87,35 @@ public class ForecastService {
         String ccy = normalizeCurrency(currencyCode);
         Map<String, Object> summary = forecastRepository.getForecastSummary(date, ccy);
 
-        return Map.of(
-                "payment_due_date", date,
-                "total_invoices", summary.get("total_invoices"),
-                "total_amount", summary.get("total_amount"),
-                "by_status", Map.of(
-                        "PENDING", Map.of(
-                                "count", summary.get("pending_count"),
-                                "amount", summary.get("pending_amount")
-                        ),
-                        "DUE", Map.of(
-                                "count", summary.get("due_count"),
-                                "amount", summary.get("due_amount")
-                        )
-                )
-        );
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("payment_due_date", date.toString());
+        out.put("total_invoices", nzNum(summary.get("total_invoices")));
+        out.put("total_amount", nzNum(summary.get("total_amount")));
+        if (summary.get("amount_reporting") != null) {
+            out.put("amount_reporting", nzNum(summary.get("amount_reporting")));
+        }
+        if (summary.get("currency_code") != null) {
+            out.put("currency_code", summary.get("currency_code").toString());
+        }
+        Object reportingCcy = summary.get("reporting_currency_code");
+        if (reportingCcy != null && !reportingCcy.toString().isBlank()) {
+            out.put("reporting_currency_code", reportingCcy.toString());
+            out.put("currency", reportingCcy.toString());
+        } else if (summary.get("currency_code") != null) {
+            out.put("currency", summary.get("currency_code").toString());
+        }
+
+        Map<String, Object> pending = new LinkedHashMap<>();
+        pending.put("count", nzNum(summary.get("pending_count")));
+        pending.put("amount", nzNum(summary.get("pending_amount")));
+        Map<String, Object> due = new LinkedHashMap<>();
+        due.put("count", nzNum(summary.get("due_count")));
+        due.put("amount", nzNum(summary.get("due_amount")));
+        Map<String, Object> byStatus = new LinkedHashMap<>();
+        byStatus.put("PENDING", pending);
+        byStatus.put("DUE", due);
+        out.put("by_status", byStatus);
+        return out;
     }
 
     public PageResponse<ForecastItemDto> getForecastInvoices(
@@ -111,69 +134,143 @@ public class ForecastService {
         return PageResponse.of(forecastItems, total, limit, offset);
     }
 
+    /**
+     * Breakdown for forecast detail Reports tab (client / location / agreement).
+     */
+    public Map<String, Object> getForecastReports(LocalDate date, String reportType, String currencyCode) {
+        String ccy = normalizeCurrency(currencyCode);
+        String type = reportType == null || reportType.isBlank() ? "client" : reportType.trim().toLowerCase();
+        List<Map<String, Object>> rows = forecastRepository.getForecastBreakdown(date, type, ccy);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("report_type", type);
+        out.put("payment_due_date", date.toString());
+        out.put("data", rows);
+        return out;
+    }
+
     public List<ForecastItemDto> getSubscriptionForecast(UUID subscriptionInstanceId, LocalDate from, LocalDate to) {
         List<Map<String, Object>> items = forecastRepository.getSubscriptionForecast(
                 subscriptionInstanceId, from, to);
 
         return items.stream()
-                .map(item -> {
-                    String scheduleStatus = (String) item.get("schedule_status");
-                    StatusDto statusDto = new StatusDto(
-                            scheduleStatus,
-                            scheduleStatus,
-                            null
-                    );
-
-                    return new ForecastItemDto(
-                            (LocalDate) item.get("payment_due_date"),
-                            (UUID) item.get("subscription_instance_id"),
-                            (UUID) item.get("invoice_id"),
-                            ((Number) item.getOrDefault("cycle_number", 0)).intValue(),
-                            statusDto,
-                            1, // invoice_count
-                            null, // total_amount - would need to join with invoice
-                            null, // location_id
-                            null, // location_name
-                            null, // client_id
-                            null, // client_name
-                            null, // agreement_id
-                            List.of(), // warnings
-                            List.of() // validation_errors
-                    );
-                })
+                .map(this::mapToForecastItemDto)
                 .collect(Collectors.toList());
     }
 
     private ForecastItemDto mapToForecastItemDto(Map<String, Object> item) {
-        String scheduleStatus = (String) item.getOrDefault("schedule_status", "PENDING");
+        String scheduleStatus = str(item.get("schedule_status"));
+        if (scheduleStatus == null) {
+            scheduleStatus = "PENDING";
+        }
         StatusDto statusDto = new StatusDto(scheduleStatus, scheduleStatus, null);
 
-        LocalDate paymentDueDate = (LocalDate) item.get("payment_due_date");
-        UUID subscriptionInstanceId = item.get("subscription_instance_id") != null ?
-                (UUID) item.get("subscription_instance_id") : null;
-        UUID invoiceId = item.get("invoice_id") != null ?
-                (UUID) item.get("invoice_id") : null;
+        LocalDate paymentDueDate = toLocalDate(item.get("payment_due_date"));
+        UUID subscriptionInstanceId = toUuid(item.get("subscription_instance_id"));
+        UUID invoiceId = toUuid(item.get("invoice_id"));
         Integer cycleNumber = item.get("cycle_number") != null ?
                 ((Number) item.get("cycle_number")).intValue() : 0;
-        Double totalAmount = item.get("total_amount") != null ?
-                ((Number) item.get("total_amount")).doubleValue() : null;
+        Double totalAmount = toDouble(item.get("total_amount"));
+        Double amountReporting = toDouble(item.get("amount_reporting"));
+        String currencyCode = str(item.get("currency_code"));
+        if (currencyCode != null) {
+            currencyCode = currencyCode.toUpperCase();
+        }
+        UUID locationId = toUuid(item.get("location_id"));
+        String locationName = str(item.get("location_name"));
+        UUID clientId = toUuid(item.get("client_id"));
+        String clientName = str(item.get("client_name"));
+        UUID agreementId = toUuid(item.get("agreement_id"));
 
         return new ForecastItemDto(
                 paymentDueDate,
                 subscriptionInstanceId,
                 invoiceId,
+                str(item.get("invoice_number")),
                 cycleNumber,
                 statusDto,
-                1, // invoice_count
+                1,
                 totalAmount,
-                null, // location_id
-                null, // location_name
-                null, // client_id
-                null, // client_name
-                null, // agreement_id
-                Collections.emptyList(), // warnings
-                Collections.emptyList() // validation_errors
+                amountReporting,
+                currencyCode,
+                locationId,
+                locationName,
+                clientId,
+                clientName,
+                agreementId,
+                str(item.get("agreement_name")),
+                Collections.emptyList(),
+                Collections.emptyList()
         );
+    }
+
+    private static Object nzNum(Object v) {
+        if (v == null) {
+            return 0;
+        }
+        if (v instanceof Number n) {
+            return n;
+        }
+        try {
+            return new java.math.BigDecimal(v.toString().trim());
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private static String str(Object v) {
+        if (v == null) {
+            return null;
+        }
+        String s = v.toString().trim();
+        return s.isEmpty() ? null : s;
+    }
+
+    private static Double toDouble(Object v) {
+        if (v == null) {
+            return null;
+        }
+        if (v instanceof Number n) {
+            return n.doubleValue();
+        }
+        try {
+            return Double.parseDouble(v.toString().trim());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static LocalDate toLocalDate(Object v) {
+        if (v == null) {
+            return null;
+        }
+        if (v instanceof LocalDate ld) {
+            return ld;
+        }
+        if (v instanceof java.sql.Date d) {
+            return d.toLocalDate();
+        }
+        if (v instanceof java.util.Date d) {
+            return new java.sql.Date(d.getTime()).toLocalDate();
+        }
+        String s = v.toString().trim();
+        if (s.length() >= 10) {
+            return LocalDate.parse(s.substring(0, 10));
+        }
+        return LocalDate.parse(s);
+    }
+
+    private static UUID toUuid(Object v) {
+        if (v == null) {
+            return null;
+        }
+        if (v instanceof UUID u) {
+            return u;
+        }
+        String s = v.toString().trim();
+        if (s.isEmpty()) {
+            return null;
+        }
+        return UUID.fromString(s);
     }
 
     private List<UUID> resolveLocationIds(UUID locationLevelId, Boolean includeChildLocations) {

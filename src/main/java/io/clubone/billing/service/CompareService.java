@@ -539,10 +539,10 @@ public class CompareService {
                 firstNonBlank(right != null ? right.invoiceNumber() : null,
                         right != null && right.invoiceId() != null ? right.invoiceId().toString() : null));
 
+        // Due preview has no invoice yet and uses eligibility-style statuses (e.g. ELIGIBLE);
+        // invoice generation has invoice numbers and lifecycle statuses (DUE/PAID). Relax both
+        // so amount/client/agreement/location drive MATCHED vs CHANGED for this stage pair.
         List<String> changed = new ArrayList<>();
-        if (!Objects.equals(leftStatus, rightStatus)) {
-            changed.add("status");
-        }
         if (leftAmount.subtract(rightAmount).abs().compareTo(new BigDecimal("0.0001")) > 0) {
             changed.add("amount");
         }
