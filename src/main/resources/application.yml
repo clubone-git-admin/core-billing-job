@@ -19,7 +19,8 @@ logging:
 
 spring:
   profiles:
-    active: uat
+    # UAT ECS sets SPRING_PROFILES_ACTIVE=uat. Prod tasks have no env override.
+    active: prod
   application:
     name: clubone-billing-batch
   # Platform threads on tiny tasks — virtual threads + Tomcat amplify CPU throttling.
